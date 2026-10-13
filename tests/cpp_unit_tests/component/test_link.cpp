@@ -45,6 +45,7 @@ TEST_CASE("Test link") {
         CHECK(branch.base_i_from() == doctest::Approx(base_i_from));
         CHECK(branch.base_i_to() == doctest::Approx(base_i_to));
         CHECK(branch.phase_shift() == 0.0);
+        CHECK(branch.phase_incidence() == BranchPhaseIncidence{});
     }
 
     SUBCASE("Branch into itself is supported") {

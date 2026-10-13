@@ -9,6 +9,7 @@
 #include <doctest/doctest.h>
 
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace power_grid_model {
@@ -111,6 +112,13 @@ TEST_CASE("Exceptions") {
               "Invalid clock for transformer 0, clock 1\n");
         CHECK(std::string{InvalidTransformerClock{na_IntID, na_IntS}.what()} ==
               "Invalid clock for transformer -2147483648, clock -128\n");
+    }
+    SUBCASE("MissingPhaseForWinding") {
+        auto const msg = std::string{MissingPhaseForWinding{"branch", Idx{3}, "ab", "a"}.what()};
+        CHECK(msg.find("branch #3") != std::string::npos);
+        CHECK(msg.find("(ab)") != std::string::npos);
+        CHECK(msg.find("node phases: a") != std::string::npos);
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
     }
     SUBCASE("SparseMatrixError") {
         CHECK(std::string{SparseMatrixError{}.what()} ==

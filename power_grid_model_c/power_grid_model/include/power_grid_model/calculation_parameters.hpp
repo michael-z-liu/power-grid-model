@@ -13,8 +13,12 @@
 #include "common/three_phase_tensor.hpp"
 
 #include <array>
+#include <cassert>
 #include <concepts>
+#include <cstddef>
+#include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace power_grid_model {
@@ -162,10 +166,83 @@ using BranchIdx = std::array<Idx, 2>;
 // in case of indices for math model, -1/disconnected means the branch is not connected to that side
 using Branch3Idx = std::array<Idx, 3>;
 
+// phase slots of a bus or a branch terminal: a = bit 0, b = bit 1, c = bit 2
+// bit operations are confined to this class so that they all operate on unsigned 8-bit values
+class PhaseMask {
+  public:
+    using underlying_type = std::uint8_t;
+
+    constexpr PhaseMask() = default; // no phases
+    explicit constexpr PhaseMask(underlying_type value) : bits_{static_cast<underlying_type>(value & all_bits)} {}
+
+    constexpr underlying_type bits() const { return bits_; }
+    constexpr bool none() const { return bits_ == 0; }
+    constexpr bool all() const { return bits_ == all_bits; }
+    // phase is the phase slot 0, 1, 2 for a, b, c; any other value is not present
+    constexpr bool has(Idx phase) const {
+        if (phase < 0 || phase >= static_cast<Idx>(single_phase_bits.size())) {
+            return false;
+        }
+        return (bits_ & single_phase_bits[static_cast<std::size_t>(phase)]) != 0;
+    }
+    // all phases of other are present in this mask
+    constexpr bool contains(PhaseMask other) const { return (bits_ & other.bits_) == other.bits_; }
+
+    friend constexpr PhaseMask operator|(PhaseMask lhs, PhaseMask rhs) {
+        return PhaseMask{static_cast<underlying_type>(lhs.bits_ | rhs.bits_)};
+    }
+    friend constexpr PhaseMask operator&(PhaseMask lhs, PhaseMask rhs) {
+        return PhaseMask{static_cast<underlying_type>(lhs.bits_ & rhs.bits_)};
+    }
+    friend constexpr bool operator==(PhaseMask const& lhs, PhaseMask const& rhs) = default;
+
+  private:
+    static constexpr underlying_type all_bits{0b111};
+    static constexpr std::array<underlying_type, 3> single_phase_bits{0b001, 0b010, 0b100};
+
+    underlying_type bits_{};
+};
+static_assert(sizeof(PhaseMask) == 1);
+
+inline constexpr PhaseMask phase_mask_none{};
+inline constexpr PhaseMask phase_mask_a{0b001};
+inline constexpr PhaseMask phase_mask_b{0b010};
+inline constexpr PhaseMask phase_mask_c{0b100};
+inline constexpr PhaseMask phase_mask_ab{0b011};
+inline constexpr PhaseMask phase_mask_ac{0b101};
+inline constexpr PhaseMask phase_mask_bc{0b110};
+inline constexpr PhaseMask phase_mask_abc{0b111};
+
+constexpr std::string_view phase_letters(PhaseMask mask) {
+    constexpr std::array<std::string_view, 8> letters{"-", "a", "b", "ab", "c", "ac", "bc", "abc"};
+    return letters[mask.bits()];
+}
+
+// how the phases of the two terminals of a branch are coupled
+//   per_phase: phase k at one terminal is connected to phase k at the other (line-like)
+//   winding: all phases of a terminal are coupled through a winding (transformer-like)
+enum class PhaseCoupling : IntS { per_phase = 0, winding = 1 };
+
+// non-earth terminals of a branch at each side and how they couple
+struct BranchPhaseIncidence {
+    PhaseMask from{phase_mask_abc};
+    PhaseMask to{phase_mask_abc};
+    PhaseCoupling coupling{PhaseCoupling::per_phase}; // per_phase requires from == to
+
+    constexpr bool all_phases() const { return from.all() && to.all(); }
+    friend constexpr bool operator==(BranchPhaseIncidence const& lhs, BranchPhaseIncidence const& rhs) = default;
+};
+inline constexpr BranchPhaseIncidence three_phase_winding{
+    .from = phase_mask_abc, .to = phase_mask_abc, .coupling = PhaseCoupling::winding};
+
 struct MathModelTopology {
     Idx slack_bus{};
     bool is_radial{};
+    // true if at least one bus has fewer than three phases; only then bus_phase_mask is filled
+    bool has_reduced_phase{false};
     std::vector<double> phase_shift;
+    // phases present at each bus; size n_bus() if has_reduced_phase, otherwise empty (all buses abc)
+    std::vector<PhaseMask> bus_phase_mask;
     std::vector<BranchIdx> branch_bus_idx;
     std::vector<BranchIdx> fill_in;
     DenseGroupedIdxVector sources_per_bus;
@@ -185,6 +262,12 @@ struct MathModelTopology {
     DenseGroupedIdxVector voltage_regulators_per_load_gen;
 
     Idx n_bus() const { return static_cast<Idx>(phase_shift.size()); }
+
+    PhaseMask bus_phase(Idx bus) const {
+        assert(bus >= 0 && bus < n_bus());
+        assert(!has_reduced_phase || std::ssize(bus_phase_mask) == n_bus());
+        return has_reduced_phase ? bus_phase_mask[static_cast<std::size_t>(bus)] : phase_mask_abc;
+    }
 
     Idx n_branch() const { return static_cast<Idx>(branch_bus_idx.size()); }
 
@@ -540,6 +623,8 @@ struct ComponentConnections {
     std::vector<Branch3Connected> branch3_connected;
     std::vector<BranchConnected> link_connected;
     DoubleVector branch_phase_shift;
+    // one entry per branch_connected entry; empty means all branches are abc -> abc, per phase
+    std::vector<BranchPhaseIncidence> branch_phase_incidence;
     // 3-way branch, phase shift = phase_node_x - phase_internal_node
     std::vector<std::array<double, 3>> branch3_phase_shift;
     IntSVector source_connected;

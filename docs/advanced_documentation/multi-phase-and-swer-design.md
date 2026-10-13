@@ -125,20 +125,38 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 
 ### Phase mask
 
-* **New fields.** Add to `MathModelTopology` (`<core>/calculation_parameters.hpp:165`):
-  * `std::vector<std::uint8_t> bus_phase_mask`: bit 0 for a, bit 1 for b, bit 2 for c.
+* **Phase mask type.** `PhaseMask` is a one-byte wrapper class in `<core>/calculation_parameters.hpp`: bit 0 for a, bit 1
+  for b, bit 2 for c. All bit operations live inside the class.
+* **New fields.** Added to `MathModelTopology`:
+  * `std::vector<PhaseMask> bus_phase_mask`: one entry per bus.
   * `bool has_reduced_phase`: a fast-path flag. When it is false the mask stays empty and nothing below runs.
-  * `std::vector<std::array<double, 3>> bus_slot_angle`: see [Initial voltages](#initial-voltages).
-* **Incidence per branch.** Add a virtual `Edge::phase_incidence()` that returns which slots are connected on the
-  from and to side, and whether the branch is a winding. It defaults to abc → abc for all existing branches.
-  Register it in `ComponentConnections` (`<core>/main_core/topology.hpp:261-300`).
-* **Propagation.** Add `propagate_phases()` to `Topology::build_topology()` (`<core>/topology.hpp:139`), after
-  `dfs_search()`. Seed each math model's source buses with `0b111`, then propagate breadth-first:
-  * **Line-type branches:** a present slot on one side makes the same slot present on the other side.
-  * **Transformer windings:** the far side becomes present only if *all* non-earth terminals of the feeding
-    winding are present. Otherwise a winding could back-feed an absent slot and create a floating, singular
-    sub-problem. A winding with only some terminals present raises a new `MissingPhaseForWinding` error.
-  * **Links and supernodes:** take the union of the masks.
+    Read the mask through `bus_phase(bus)`, which returns abc when the flag is false.
+  * `bus_slot_angle` (see [Initial voltages](#initial-voltages)) is not part of the topology milestone and is added
+    together with the start values (M6).
+* **Incidence per branch.** A virtual `Edge::phase_incidence()` returns a `BranchPhaseIncidence`: the non-earth
+  terminals at the from and to side, plus the coupling. `per_phase` couples slot k on one side to slot k on the other
+  (line-like, both sides equal). `winding` couples all terminals of a side through a winding (transformer-like). It
+  defaults to abc → abc, per phase; `Transformer` and `GenericBranch` report a three-phase winding, and each leg of a
+  three-winding transformer is a three-phase winding. The values are registered in
+  `ComponentConnections::branch_phase_incidence` (`<core>/main_core/topology.hpp`), which stays empty when every
+  branch is abc → abc.
+* **Propagation.** `Topology::propagate_phases()` runs in `Topology::build_topology()` after `dfs_search()` and returns
+  immediately when `branch_phase_incidence` is empty. Otherwise:
+  1. Build a directed phase graph with the same edges as the global graph.
+  2. Seed *every* connected source bus (not only the slack bus) with abc, then propagate to a fixed point with a
+     worklist. Masks only grow, so this terminates.
+     * **Line-type branches:** a present slot on one side makes the same slot present on the other side.
+     * **Transformer windings:** the far side becomes present only if *all* non-earth terminals of the feeding
+       winding are present. Otherwise a winding could back-feed an absent slot and create a floating, singular
+       sub-problem.
+     * **Links and supernodes:** on the v2 path, nodes are merged before the topology is built, so a merged node
+       carries the union. On the legacy path, a link is a per-phase abc branch, which gives the same union.
+  3. Validate after the fixed point, so that the outcome does not depend on the visit order. A connected winding side
+     (also of a branch that is connected on one side only) whose node has only some of the winding's terminals raises
+     `MissingPhaseForWinding`. A winding with none of its terminals present is allowed.
+  4. Write the masks. A math model gets `has_reduced_phase` and a mask vector only if at least one of its buses is not
+     abc. A bus that no phase reaches is kept with the mask `none`; the output for such a bus is decided with the solver
+     changes.
 * **Rebuilds.** `phases` and the connection attributes are input-only. The mask therefore changes only through
   status updates, which already trigger a topology rebuild.
 
@@ -305,7 +323,7 @@ the `bus_slot_angle` field:
 
 * Each branch's incidence also reports the slot pattern on the far side. For a centre-tapped secondary that is
   `{0, π, ·}`; for a SWER secondary it is `{0, ·, ·}`.
-* The DFS copies these patterns along with the phase shift.
+* The patterns are copied along with the masks, in the separate pass after the DFS.
 * The flat and average-source starts use `bus_slot_angle` only when `has_reduced_phase` is true.
 
 ### Sources
@@ -359,7 +377,7 @@ assume three phases. A source on a reduced-phase node raises an error.
 | # | Milestone | Main files | Tests | Effort / risk |
 |---|-----------|-----------|-------|---------------|
 | M0 | Fix `average_of_off_diagonal_of_matrix` | `<core>/common/matrix_utils.hpp` | Corrected expected values in `tests/cpp_unit_tests/component/test_asym_line.cpp` (which reproduced the bug); new `tests/cpp_unit_tests/common/test_matrix_utils.cpp` | XS / low |
-| M1 | Phase-mask topology (mask always full; no behaviour change) | `<core>/calculation_parameters.hpp`, `<core>/component/edge.hpp`, `<core>/main_core/topology.hpp`, `<core>/topology.hpp` | `tests/cpp_unit_tests/test_topology.cpp`: hand-built incidences, partial-winding error | M / medium |
+| M1 | Phase-mask topology (mask always full; no behaviour change) | `<core>/calculation_parameters.hpp`, `<core>/common/exception.hpp`, `<core>/component/edge.hpp`, `<core>/component/transformer.hpp`, `<core>/component/generic_branch.hpp`, `<core>/main_core/topology.hpp`, `<core>/topology.hpp` | `tests/cpp_unit_tests/test_topology.cpp`: hand-built incidences, partial-winding error | M / medium |
 | M2 | Solver masking | `<core>/math_solver/y_bus.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp`, `iterative_pf_solver.hpp`, `common_solver_functions.hpp`, `short_circuit_solver.hpp`, `math_solver.hpp` (state-estimation rejection), `<core>/main_core/output.hpp`, `<core>/component/node.hpp` | Math solver unit tests with a forced mask; all existing validation cases unchanged | M / **high** (core numerics) |
 | M3 | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,swer-a}` with OpenDSS `test.dss`; short-circuit cases | M / medium |
 | M4 | Symmetric-calculation guards | `<core>/main_model_impl.hpp`, `<core>/common/exception.hpp`, `src/power_grid_model/_core/error_handling.py`, `errors.py` | C++ main-model tests; Python error-mapping tests | S / low |

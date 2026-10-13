@@ -7,12 +7,16 @@
 #include <power_grid_model/calculation_parameters.hpp>
 #include <power_grid_model/common/common.hpp>
 #include <power_grid_model/common/enum.hpp>
+#include <power_grid_model/common/exception.hpp>
 #include <power_grid_model/common/grouped_index_vector.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -119,6 +123,104 @@ template <grouped_idx_vector_type T> void check_equal(T const& first, T const& s
         CHECK(std::ranges::equal(first_element, second_element));
     }
 }
+
+// phase mask and branch phase incidence
+static_assert(PhaseMask{}.none());
+static_assert(!PhaseMask{}.all());
+static_assert(phase_mask_abc.all());
+static_assert(!phase_mask_abc.none());
+static_assert(PhaseMask{0b1111} == phase_mask_abc); // bits beyond c are dropped
+static_assert(phase_mask_a.bits() == 0b001 && phase_mask_b.bits() == 0b010 && phase_mask_c.bits() == 0b100);
+static_assert(phase_mask_ab.has(0) && phase_mask_ab.has(1) && !phase_mask_ab.has(2));
+static_assert(phase_mask_ac.has(0) && !phase_mask_ac.has(1) && phase_mask_ac.has(2));
+static_assert(!phase_mask_bc.has(0) && phase_mask_bc.has(1) && phase_mask_bc.has(2));
+static_assert(!phase_mask_abc.has(-1) && !phase_mask_abc.has(3));
+static_assert(!phase_mask_none.has(0) && !phase_mask_none.has(1) && !phase_mask_none.has(2));
+static_assert(phase_mask_abc.contains(phase_mask_ab) && phase_mask_ab.contains(phase_mask_a));
+static_assert(!phase_mask_ab.contains(phase_mask_c) && !phase_mask_a.contains(phase_mask_ab));
+static_assert(phase_mask_a.contains(phase_mask_none) && phase_mask_none.contains(phase_mask_none));
+static_assert((phase_mask_a | phase_mask_b) == phase_mask_ab);
+static_assert((phase_mask_ab | phase_mask_bc) == phase_mask_abc);
+static_assert((phase_mask_ab & phase_mask_bc) == phase_mask_b);
+static_assert((phase_mask_a & phase_mask_b) == phase_mask_none);
+static_assert(phase_letters(phase_mask_none) == "-");
+static_assert(phase_letters(phase_mask_a) == "a");
+static_assert(phase_letters(phase_mask_b) == "b");
+static_assert(phase_letters(phase_mask_ab) == "ab");
+static_assert(phase_letters(phase_mask_c) == "c");
+static_assert(phase_letters(phase_mask_ac) == "ac");
+static_assert(phase_letters(phase_mask_bc) == "bc");
+static_assert(phase_letters(phase_mask_abc) == "abc");
+static_assert(BranchPhaseIncidence{}.all_phases());
+static_assert(BranchPhaseIncidence{}.coupling == PhaseCoupling::per_phase);
+static_assert(three_phase_winding.all_phases());
+static_assert(three_phase_winding.coupling == PhaseCoupling::winding);
+static_assert(three_phase_winding != BranchPhaseIncidence{});
+static_assert(!BranchPhaseIncidence{.from = phase_mask_a, .to = phase_mask_a}.all_phases());
+
+using TopologyResult = std::pair<std::vector<std::shared_ptr<MathModelTopology const>>,
+                                 std::shared_ptr<TopologicalComponentToMathCoupling const>>;
+
+// per phase branch with the same phases at both terminals
+constexpr BranchPhaseIncidence pp(PhaseMask mask) {
+    return {.from = mask, .to = mask, .coupling = PhaseCoupling::per_phase};
+}
+// winding branch
+constexpr BranchPhaseIncidence winding(PhaseMask from, PhaseMask to) {
+    return {.from = from, .to = to, .coupling = PhaseCoupling::winding};
+}
+
+struct PhaseTestBranch {
+    BranchIdx nodes;
+    BranchPhaseIncidence incidence{};
+    BranchConnected connected{1, 1};
+};
+
+// small topology fixture with the phase incidence of each branch set explicitly
+struct PhaseTestNetwork {
+    ReducedComponentTopology comp_topo{};
+    ComponentConnections comp_conn{};
+
+    PhaseTestNetwork(Idx n_node, std::vector<Idx> sources, std::vector<PhaseTestBranch> const& branches) {
+        comp_topo.n_node = n_node;
+        comp_topo.source_node_idx = std::move(sources);
+        comp_conn.source_connected = std::vector<IntS>(comp_topo.source_node_idx.size(), IntS{1});
+        std::vector<BranchIdx> branch_node_idx;
+        for (auto const& branch : branches) {
+            branch_node_idx.push_back(branch.nodes);
+            comp_conn.branch_connected.push_back(branch.connected);
+            comp_conn.branch_phase_shift.push_back(0.0);
+            comp_conn.branch_phase_incidence.push_back(branch.incidence);
+        }
+        comp_topo.branch_node_idx = std::move(branch_node_idx);
+    }
+
+    void add_branch3(Branch3Idx nodes, Branch3Connected connected = {1, 1, 1}) {
+        std::vector<Branch3Idx> branch3_node_idx(comp_topo.branch3_node_idx.begin(), comp_topo.branch3_node_idx.end());
+        branch3_node_idx.push_back(nodes);
+        comp_topo.branch3_node_idx = std::move(branch3_node_idx);
+        comp_conn.branch3_connected.push_back(connected);
+        comp_conn.branch3_phase_shift.push_back({0.0, 0.0, 0.0});
+    }
+
+    TopologyResult build() const { return Topology{comp_topo, comp_conn}.build_topology(); }
+};
+
+PhaseMask node_phase(TopologyResult const& result, Idx node) {
+    auto const [group, pos] = result.second->node[static_cast<size_t>(node)];
+    return result.first[static_cast<size_t>(group)]->bus_phase(pos);
+}
+
+std::vector<std::string> node_phase_letters(TopologyResult const& result, std::vector<Idx> const& nodes) {
+    std::vector<std::string> letters;
+    letters.reserve(nodes.size());
+    for (Idx const node : nodes) {
+        letters.emplace_back(phase_letters(node_phase(result, node)));
+    }
+    return letters;
+}
+
+using Letters = std::vector<std::string>;
 
 } // namespace
 
@@ -359,6 +461,8 @@ TEST_CASE("Test topology") {
             auto const& math_ref = math_topology_ref[i];
             CHECK(math.slack_bus == math_ref.slack_bus);
             CHECK(math.n_bus() == math_ref.n_bus());
+            CHECK_FALSE(math.has_reduced_phase);
+            CHECK(math.bus_phase_mask.empty());
             check_equal(math.sources_per_bus, math_ref.sources_per_bus);
             CHECK(math.branch_bus_idx == math_ref.branch_bus_idx);
             CHECK(math.phase_shift == math_ref.phase_shift);
@@ -374,6 +478,239 @@ TEST_CASE("Test topology") {
             check_equal(math.power_sensors_per_branch_to, math_ref.power_sensors_per_branch_to);
             CHECK(math.fill_in == math_ref.fill_in);
         }
+    }
+}
+
+TEST_CASE("Test topology phase mask") {
+    constexpr Idx n_node = 4;
+
+    SUBCASE("Explicit incidence of full phase branches gives the same topology") {
+        // same network as in "Test topology", with a transformer-like branch 1
+        // the result must be identical to that of the reference, which has no incidence
+        ReducedComponentTopology comp_topo{};
+        comp_topo.n_node = 14;
+        comp_topo.branch_node_idx = {{0, 1}, {0, 3}, {3, 4}, {7, 8}, {6, 7}, {4, 2}, {5, 4}, {4, 5}, {1, 1}};
+        comp_topo.branch3_node_idx = {{1, 3, 2}, {11, 7, 8}, {10, 6, 5}, {4, 12, 12}, {13, 13, 13}};
+        comp_topo.source_node_idx = {0, 5, 9, 3, 13};
+
+        ComponentConnections comp_conn_ref{};
+        comp_conn_ref.branch_connected = {{1, 1}, {1, 1}, {1, 0}, {1, 1}, {0, 1}, {0, 1}, {1, 1}, {1, 1}, {1, 1}};
+        comp_conn_ref.branch3_connected = {{1, 1, 1}, {1, 1, 1}, {0, 1, 1}, {1, 1, 1}, {1, 1, 1}};
+        comp_conn_ref.branch_phase_shift = {0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        comp_conn_ref.branch3_phase_shift = {
+            {0.0, -1.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},
+        };
+        comp_conn_ref.source_connected = {1, 1, 0, 0, 1};
+
+        ComponentConnections comp_conn = comp_conn_ref;
+        comp_conn.branch_phase_incidence = std::vector<BranchPhaseIncidence>(9, BranchPhaseIncidence{});
+        comp_conn.branch_phase_incidence[1] = three_phase_winding;
+
+        auto const [math_ref, coup_ref] = Topology{comp_topo, comp_conn_ref}.build_topology();
+        auto const [math, coup] = Topology{comp_topo, comp_conn}.build_topology();
+
+        CHECK(coup->node == coup_ref->node);
+        CHECK(coup->source == coup_ref->source);
+        CHECK(coup->branch == coup_ref->branch);
+        CHECK(coup->branch3 == coup_ref->branch3);
+        REQUIRE(math.size() == math_ref.size());
+        for (size_t i = 0; i < math.size(); i++) {
+            CHECK_FALSE(math[i]->has_reduced_phase);
+            CHECK(math[i]->bus_phase_mask.empty());
+            CHECK(math[i]->slack_bus == math_ref[i]->slack_bus);
+            CHECK(math[i]->n_bus() == math_ref[i]->n_bus());
+            CHECK(math[i]->phase_shift == math_ref[i]->phase_shift);
+            CHECK(math[i]->branch_bus_idx == math_ref[i]->branch_bus_idx);
+            CHECK(math[i]->fill_in == math_ref[i]->fill_in);
+        }
+    }
+
+    SUBCASE("Empty incidence leaves all math models at full phases") {
+        PhaseTestNetwork network{3, {0}, {{.nodes = {0, 1}}, {.nodes = {1, 2}}}};
+        network.comp_conn.branch_phase_incidence.clear();
+        auto const result = network.build();
+        REQUIRE(result.first.size() == 1);
+        CHECK_FALSE(result.first[0]->has_reduced_phase);
+        CHECK(result.first[0]->bus_phase_mask.empty());
+        CHECK(node_phase(result, 2) == phase_mask_abc);
+    }
+
+    SUBCASE("Per phase branches restrict the phases of the far bus") {
+        // 0 -a- 1 -a- 2
+        //  \-abc- 3
+        PhaseTestNetwork const network{n_node,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {0, 3}}}};
+        auto const result = network.build();
+        REQUIRE(result.first.size() == 1);
+        CHECK(result.first[0]->has_reduced_phase);
+        CHECK(result.first[0]->bus_phase_mask.size() == 4);
+        CHECK(node_phase_letters(result, {0, 1, 2, 3}) == Letters{"abc", "a", "a", "abc"});
+    }
+
+    SUBCASE("Parallel paths add up their phases") {
+        PhaseTestNetwork const network{3,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {0, 2}},
+                                        {.nodes = {2, 1}, .incidence = pp(phase_mask_b)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "ab", "abc"});
+    }
+
+    SUBCASE("Windings transform the phases") {
+        PhaseTestNetwork const network{5,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = winding(phase_mask_ab, phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {2, 3}, .incidence = winding(phase_mask_a, phase_mask_ab)},
+                                        {.nodes = {3, 4}, .incidence = pp(phase_mask_b)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2, 3, 4}) == Letters{"abc", "a", "a", "ab", "b"});
+    }
+
+    SUBCASE("Windings are directional in their branch direction") {
+        PhaseTestNetwork const network{2, {0}, {{.nodes = {1, 0}, .incidence = winding(phase_mask_a, phase_mask_ab)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "a"});
+    }
+
+    SUBCASE("The result does not depend on the order of the branches") {
+        // in the reversed order node 1 is popped with mask a before it has reached ab, which makes this test
+        // meaningful; this relies on the stable placement of the edges in the CSR graph of Boost
+        std::vector<PhaseTestBranch> branches{{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                              {.nodes = {1, 3}, .incidence = winding(phase_mask_ab, phase_mask_a)},
+                                              {.nodes = {0, 2}},
+                                              {.nodes = {2, 1}, .incidence = pp(phase_mask_b)}};
+        PhaseTestNetwork const forward{4, {0}, branches};
+        CHECK(node_phase_letters(forward.build(), {0, 1, 2, 3}) == Letters{"abc", "ab", "abc", "a"});
+
+        std::ranges::reverse(branches);
+        PhaseTestNetwork const reversed{4, {0}, branches};
+        CHECK(node_phase_letters(reversed.build(), {0, 1, 2, 3}) == Letters{"abc", "ab", "abc", "a"});
+    }
+
+    SUBCASE("A winding without any of its phases present is allowed") {
+        PhaseTestNetwork const network{3,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = winding(phase_mask_bc, phase_mask_a)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "-"});
+    }
+
+    SUBCASE("A bus that no phase reaches has no phases") {
+        PhaseTestNetwork const network{
+            3,
+            {0},
+            {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .incidence = pp(phase_mask_b)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "-"});
+    }
+
+    SUBCASE("A winding with only some of its phases present throws") {
+        SUBCASE("Three phase winding on a single phase bus") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = three_phase_winding}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), MissingPhaseForWinding);
+        }
+        SUBCASE("Winding at a side that is the only connected side") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = three_phase_winding, .connected = {1, 0}}}};
+            CHECK_THROWS_AS(network.build(), MissingPhaseForWinding);
+        }
+        SUBCASE("Winding at a side that is the only connected side, on the to side") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {2, 1}, .incidence = three_phase_winding, .connected = {0, 1}}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), MissingPhaseForWinding);
+        }
+        SUBCASE("Self-loop winding, which is not in the graph but is still validated") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 1}, .incidence = three_phase_winding}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), MissingPhaseForWinding);
+        }
+        SUBCASE("Partial winding") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = winding(phase_mask_ab, phase_mask_a)}}};
+            CHECK_THROWS_AS(network.build(), MissingPhaseForWinding);
+        }
+        SUBCASE("Branch3 leg") {
+            PhaseTestNetwork network{n_node, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}}};
+            network.add_branch3({1, 2, 3});
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch3 #0"), MissingPhaseForWinding);
+        }
+    }
+
+    SUBCASE("A winding at a node outside every math model is not validated") {
+        SUBCASE("Branch with only its to side connected") {
+            // node 2 has no connected branch and no source, so it is in no math model
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = three_phase_winding, .connected = {0, 1}}}};
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(result.second->node[2].group == disconnected);
+            CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "a"});
+        }
+        SUBCASE("Branch3 with the leg at the reduced bus switched off") {
+            // the legs at nodes 2 and 3 are connected to each other but not to a source
+            PhaseTestNetwork network{n_node, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}}};
+            network.add_branch3({1, 2, 3}, {0, 1, 1});
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(result.second->node[2].group == disconnected);
+            CHECK(result.second->node[3].group == disconnected);
+            CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "a"});
+        }
+    }
+
+    SUBCASE("Every source starts with all phases in its own math model") {
+        PhaseTestNetwork const network{
+            n_node, {0, 2}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {2, 3}}}};
+        auto const result = network.build();
+        REQUIRE(result.first.size() == 2);
+        auto const group0 = static_cast<size_t>(result.second->node[0].group);
+        auto const group1 = static_cast<size_t>(result.second->node[2].group);
+        CHECK(group0 != group1);
+        CHECK(result.first[group0]->has_reduced_phase);
+        CHECK(result.first[group0]->bus_phase_mask.size() == 2);
+        CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "a"});
+        CHECK_FALSE(result.first[group1]->has_reduced_phase);
+        CHECK(result.first[group1]->bus_phase_mask.empty());
+        CHECK(node_phase_letters(result, {2, 3}) == Letters{"abc", "abc"});
+    }
+
+    SUBCASE("A disconnected branch does not carry phases") {
+        PhaseTestNetwork const network{2, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a), .connected = {1, 0}}}};
+        auto const result = network.build();
+        CHECK(result.second->node[1].group == disconnected);
+        REQUIRE(result.first.size() == 1);
+        CHECK_FALSE(result.first[0]->has_reduced_phase);
+        CHECK(result.first[0]->bus_phase_mask.empty());
+    }
+
+    SUBCASE("Multiple sources in one math model all feed all phases") {
+        PhaseTestNetwork const network{
+            3,
+            {0, 2},
+            {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .incidence = pp(phase_mask_a)}}};
+        auto const result = network.build();
+        REQUIRE(result.first.size() == 1);
+        CHECK(result.first[0]->has_reduced_phase);
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "abc"});
     }
 }
 

@@ -79,6 +79,15 @@ class InvalidTransformerClock : public PowerGridError {
         : PowerGridError{std::format("Invalid clock for transformer {}, clock {}\n", id, clock)} {}
 };
 
+class MissingPhaseForWinding : public PowerGridError {
+  public:
+    MissingPhaseForWinding(std::string_view branch_type, Idx branch_idx, std::string_view winding_phases,
+                           std::string_view node_phases)
+        : PowerGridError{std::format("Winding of {} #{} has only some of its phases ({}) present at its node "
+                                     "(node phases: {}). A winding must have all or none of its phases present.\n",
+                                     branch_type, branch_idx, winding_phases, node_phases)} {}
+};
+
 class SparseMatrixError : public PowerGridError {
   public:
     SparseMatrixError(Idx err, std::string_view msg = "")

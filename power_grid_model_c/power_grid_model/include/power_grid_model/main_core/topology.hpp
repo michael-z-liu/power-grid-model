@@ -25,6 +25,7 @@
 #include "../container_fwd.hpp"
 #include "container_queries.hpp"
 
+#include <algorithm>
 #include <concepts>
 #include <type_traits>
 #include <vector>
@@ -43,6 +44,20 @@ constexpr void apply_registration(ComponentContainer const& components, std::vec
 
     target.resize(std::distance(begin, end));
     std::transform(begin, end, target.begin(), func);
+}
+
+// the incidence vector is only filled if at least one branch is not abc -> abc, per phase
+// empty means that all branches are abc -> abc, per phase
+template <std::derived_from<Edge> Component, class ComponentContainer>
+    requires common::component_container_c<ComponentContainer, Component>
+constexpr void register_branch_phase_incidence(ComponentContainer const& components,
+                                               std::vector<BranchPhaseIncidence>& target) {
+    if (std::ranges::all_of(components.template citer<Component>(),
+                            [](Edge const& edge) { return edge.phase_incidence().all_phases(); })) {
+        target.clear(); // fast path: nothing allocated
+        return;
+    }
+    apply_registration<Component>(components, target, [](Edge const& edge) { return edge.phase_incidence(); });
 }
 
 // TODO(mgovers): cleanup v2: remove use_legacy_topology path
@@ -264,6 +279,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Edge>(components, comp_conn.branch_phase_shift,
                              [](Edge const& edge) { return edge.phase_shift(); });
+    register_branch_phase_incidence<Edge>(components, comp_conn.branch_phase_incidence);
 }
 
 template <std::same_as<Branch3> Component, class ComponentContainer>
@@ -294,6 +310,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Component>(components, comp_conn.branch_phase_shift,
                                   [](Branch const& branch) { return branch.phase_shift(); });
+    register_branch_phase_incidence<Branch>(components, comp_conn.branch_phase_incidence);
 }
 
 // TODO(jguo): cleanup v2 node single link registration path

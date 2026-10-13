@@ -86,6 +86,7 @@ TEST_CASE("Test line") {
         CHECK(branch.base_i_from() == doctest::Approx(base_i));
         CHECK(branch.base_i_to() == doctest::Approx(base_i));
         CHECK(branch.phase_shift() == 0.0);
+        CHECK(branch.phase_incidence() == BranchPhaseIncidence{});
     }
 
     SUBCASE("Symmetric parameters") {
