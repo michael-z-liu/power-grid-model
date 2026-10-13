@@ -119,6 +119,13 @@ TEST_CASE("Exceptions") {
         CHECK(msg.find("(ab)") != std::string::npos);
         CHECK(msg.find("node phases: a") != std::string::npos);
         CHECK(msg.find(" is not implemented for ") == std::string::npos);
+        CHECK(msg.find("not all present") != std::string::npos);
+    }
+    SUBCASE("DanglingConductor") {
+        auto const msg = std::string{DanglingConductor{"branch", Idx{2}, "bc", "a", "open"}.what()};
+        CHECK(msg ==
+              "Conductors of branch #2 on phases (bc) are not present at any of its connected nodes (from node phases: "
+              "a, to node phases: open). Every conductor must be present at the nodes it connects.\n");
     }
     SUBCASE("SparseMatrixError") {
         CHECK(std::string{SparseMatrixError{}.what()} ==

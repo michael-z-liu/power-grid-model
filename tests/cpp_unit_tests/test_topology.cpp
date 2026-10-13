@@ -157,6 +157,14 @@ static_assert(three_phase_winding.all_phases());
 static_assert(three_phase_winding.coupling == PhaseCoupling::winding);
 static_assert(three_phase_winding != BranchPhaseIncidence{});
 static_assert(!BranchPhaseIncidence{.from = phase_mask_a, .to = phase_mask_a}.all_phases());
+static_assert(link_incidence.all_phases());
+static_assert(link_incidence.coupling == PhaseCoupling::link);
+static_assert(link_incidence != BranchPhaseIncidence{});
+static_assert(phase_mask_abc.without(phase_mask_a) == phase_mask_bc);
+static_assert(phase_mask_ab.without(phase_mask_bc) == phase_mask_a);
+static_assert(phase_mask_a.without(phase_mask_abc) == phase_mask_none);
+static_assert(phase_mask_ac.without(phase_mask_none) == phase_mask_ac);
+static_assert(phase_mask_none.without(phase_mask_b) == phase_mask_none);
 
 using TopologyResult = std::pair<std::vector<std::shared_ptr<MathModelTopology const>>,
                                  std::shared_ptr<TopologicalComponentToMathCoupling const>>;
@@ -592,22 +600,89 @@ TEST_CASE("Test topology phase mask") {
         CHECK(node_phase_letters(reversed.build(), {0, 1, 2, 3}) == Letters{"abc", "ab", "abc", "a"});
     }
 
-    SUBCASE("A winding without any of its phases present is allowed") {
+    SUBCASE("A winding without any of its phases present throws") {
         PhaseTestNetwork const network{3,
                                        {0},
                                        {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
                                         {.nodes = {1, 2}, .incidence = winding(phase_mask_bc, phase_mask_a)}}};
-        auto const result = network.build();
-        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "-"});
+        CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), MissingPhaseForWinding);
     }
 
-    SUBCASE("A bus that no phase reaches has no phases") {
-        PhaseTestNetwork const network{
-            3,
-            {0},
-            {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .incidence = pp(phase_mask_b)}}};
-        auto const result = network.build();
-        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "-"});
+    SUBCASE("A conductor that is not present at its connected nodes throws") {
+        SUBCASE("Branch between two separately fed nodes") {
+            // 0 -a- 1 -abc- 2 -a- 0: the b and c conductors of branch 2 are present at neither node
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {0, 2}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #2"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("(bc)"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("from node phases: a, to node phases: a"),
+                                 DanglingConductor);
+        }
+        SUBCASE("Single side stub") {
+            PhaseTestNetwork const network{
+                3, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .connected = {1, 0}}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("(bc)"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("to node phases: open"), DanglingConductor);
+        }
+        SUBCASE("Single side stub, on the to side") {
+            PhaseTestNetwork const network{
+                3, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {2, 1}, .connected = {0, 1}}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("from node phases: open, to node phases: a"),
+                                 DanglingConductor);
+        }
+        SUBCASE("Branch disjoint from its feeder") {
+            // replaces the M1 case of a bus that no phase reaches: such a bus can no longer exist in a math model
+            PhaseTestNetwork const network{
+                3,
+                {0},
+                {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .incidence = pp(phase_mask_b)}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("on phases (b)"), DanglingConductor);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("from node phases: a, to node phases: -"),
+                                 DanglingConductor);
+        }
+        SUBCASE("Self-loop, which is not in the graph but is still validated") {
+            PhaseTestNetwork const network{
+                2,
+                {0},
+                {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 1}, .incidence = pp(phase_mask_b)}}};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch #1"), DanglingConductor);
+        }
+    }
+
+    SUBCASE("A conductor is not validated where it is not needed") {
+        SUBCASE("Per phase branch at a node outside every math model") {
+            // node 2 has no connected branch and no source, so it is in no math model
+            PhaseTestNetwork const network{
+                3, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .connected = {0, 1}}}};
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(result.second->node[2].group == disconnected);
+            CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "a"});
+        }
+        SUBCASE("Link between two separately fed single phase nodes") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {0, 2}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = link_incidence}}};
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "a"});
+        }
+        SUBCASE("Link feeds the phases of its node") {
+            PhaseTestNetwork const network{
+                3,
+                {0},
+                {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}, {.nodes = {1, 2}, .incidence = link_incidence}}};
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "a"});
+        }
     }
 
     SUBCASE("A winding with only some of its phases present throws") {

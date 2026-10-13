@@ -125,6 +125,8 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
         REQUIRE(edge_it != edges.end());
         auto const expected_idx = static_cast<size_t>(std::ranges::distance(edges.begin(), edge_it));
         CHECK(static_cast<Idx>(expected_idx) == get_component_sequence_idx<Edge>(components, ID{5}));
+        auto const link_idx = static_cast<size_t>(get_component_sequence_idx<Edge>(components, ID{4}));
+        CHECK(link_idx != expected_idx);
 
         REQUIRE(conn.branch_connected.size() == 3);
         REQUIRE(conn.branch_phase_incidence.size() == conn.branch_connected.size());
@@ -135,6 +137,10 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
                 CHECK(conn.branch_phase_incidence[idx] == BranchPhaseIncidence{.from = phase_mask_a,
                                                                                .to = phase_mask_a,
                                                                                .coupling = PhaseCoupling::per_phase});
+            } else if (idx == link_idx) {
+                // on the legacy path the link is an Edge, which reports its own coupling
+                CHECK(conn.branch_connected[idx] == BranchConnected{1, 1});
+                CHECK(conn.branch_phase_incidence[idx] == link_incidence);
             } else {
                 CHECK(conn.branch_connected[idx] == BranchConnected{1, 1});
                 CHECK(conn.branch_phase_incidence[idx] == BranchPhaseIncidence{});

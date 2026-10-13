@@ -187,6 +187,10 @@ class PhaseMask {
     }
     // all phases of other are present in this mask
     constexpr bool contains(PhaseMask other) const { return (bits_ & other.bits_) == other.bits_; }
+    // the phases of this mask that are not in other
+    constexpr PhaseMask without(PhaseMask other) const {
+        return PhaseMask{static_cast<underlying_type>(bits_ & static_cast<underlying_type>(other.bits_ ^ all_bits))};
+    }
 
     friend constexpr PhaseMask operator|(PhaseMask lhs, PhaseMask rhs) {
         return PhaseMask{static_cast<underlying_type>(lhs.bits_ | rhs.bits_)};
@@ -221,19 +225,23 @@ constexpr std::string_view phase_letters(PhaseMask mask) {
 // how the phases of the two terminals of a branch are coupled
 //   per_phase: phase k at one terminal is connected to phase k at the other (line-like)
 //   winding: all phases of a terminal are coupled through a winding (transformer-like)
-enum class PhaseCoupling : IntS { per_phase = 0, winding = 1 };
+//   link: phase k at one terminal is connected to phase k at the other, like per_phase, but the branch is an ideal
+//         connection that carries whatever phases its nodes have, so its phases are never dangling
+enum class PhaseCoupling : IntS { per_phase = 0, winding = 1, link = 2 };
 
 // non-earth terminals of a branch at each side and how they couple
 struct BranchPhaseIncidence {
     PhaseMask from{phase_mask_abc};
     PhaseMask to{phase_mask_abc};
-    PhaseCoupling coupling{PhaseCoupling::per_phase}; // per_phase requires from == to
+    PhaseCoupling coupling{PhaseCoupling::per_phase}; // per_phase and link require from == to
 
     constexpr bool all_phases() const { return from.all() && to.all(); }
     friend constexpr bool operator==(BranchPhaseIncidence const& lhs, BranchPhaseIncidence const& rhs) = default;
 };
 inline constexpr BranchPhaseIncidence three_phase_winding{
     .from = phase_mask_abc, .to = phase_mask_abc, .coupling = PhaseCoupling::winding};
+inline constexpr BranchPhaseIncidence link_incidence{
+    .from = phase_mask_abc, .to = phase_mask_abc, .coupling = PhaseCoupling::link};
 
 struct MathModelTopology {
     Idx slack_bus{};

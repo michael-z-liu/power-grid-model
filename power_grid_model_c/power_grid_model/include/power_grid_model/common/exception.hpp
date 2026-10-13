@@ -83,9 +83,19 @@ class MissingPhaseForWinding : public PowerGridError {
   public:
     MissingPhaseForWinding(std::string_view branch_type, Idx branch_idx, std::string_view winding_phases,
                            std::string_view node_phases)
-        : PowerGridError{std::format("Winding of {} #{} has only some of its phases ({}) present at its node "
-                                     "(node phases: {}). A winding must have all or none of its phases present.\n",
+        : PowerGridError{std::format("Winding of {} #{} has phases ({}) that are not all present at its node "
+                                     "(node phases: {}). A connected winding must have all of its phases present.\n",
                                      branch_type, branch_idx, winding_phases, node_phases)} {}
+};
+
+class DanglingConductor : public PowerGridError {
+  public:
+    DanglingConductor(std::string_view branch_type, Idx branch_idx, std::string_view dangling_phases,
+                      std::string_view from_node_phases, std::string_view to_node_phases)
+        : PowerGridError{std::format("Conductors of {} #{} on phases ({}) are not present at any of its connected "
+                                     "nodes (from node phases: {}, to node phases: {}). Every conductor must be "
+                                     "present at the nodes it connects.\n",
+                                     branch_type, branch_idx, dangling_phases, from_node_phases, to_node_phases)} {}
 };
 
 class SparseMatrixError : public PowerGridError {

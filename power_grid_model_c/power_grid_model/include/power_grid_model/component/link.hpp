@@ -29,6 +29,8 @@ class Link final : public Edge {
     double base_i_to() const override { return base_i_to_; }
     double loading(double /* max_s */, double /* max_i */) const override { return 0.0; };
     double phase_shift() const override { return 0.0; }
+    // an ideal connection carries the phases of its nodes; it is never dangling
+    BranchPhaseIncidence phase_incidence() const override { return link_incidence; }
 
     template <symmetry_tag sym> BranchOutput<sym> get_energized_zero_output() const {
         BranchOutput<sym> output = get_null_output<sym>();
