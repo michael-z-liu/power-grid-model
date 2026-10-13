@@ -217,6 +217,39 @@ inline constexpr PhaseMask phase_mask_ac{0b101};
 inline constexpr PhaseMask phase_mask_bc{0b110};
 inline constexpr PhaseMask phase_mask_abc{0b111};
 
+// set the slots of the absent phases to exactly zero
+// this is done by assignment, never by multiplication, so that a non-finite value in an absent slot is discarded too
+template <scalar_value T> inline void mask_absent_phases(three_phase_tensor::Vector<T>& value, PhaseMask phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!phases.has(phase)) {
+            value(phase) = T{};
+        }
+    }
+}
+
+// set the rows of the phases absent in row_phases and the columns of the phases absent in col_phases to exactly zero
+template <scalar_value T>
+inline void mask_absent_phases(three_phase_tensor::Tensor<T>& value, PhaseMask row_phases, PhaseMask col_phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!row_phases.has(phase)) {
+            value.row(phase).setZero();
+        }
+        if (!col_phases.has(phase)) {
+            value.col(phase).setZero();
+        }
+    }
+}
+
+// overwrite the diagonal of each absent phase with one, so that an absent slot has the equation 1 * x = 0
+template <scalar_value T>
+inline void set_absent_phase_identity(three_phase_tensor::Tensor<T>& value, PhaseMask phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!phases.has(phase)) {
+            value(phase, phase) = T{1.0};
+        }
+    }
+}
+
 constexpr std::string_view phase_letters(PhaseMask mask) {
     constexpr std::array<std::string_view, 8> letters{"-", "a", "b", "ab", "c", "ac", "bc", "abc"};
     return letters[mask.bits()];

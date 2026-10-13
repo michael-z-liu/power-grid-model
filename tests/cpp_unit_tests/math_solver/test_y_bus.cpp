@@ -619,6 +619,174 @@ TEST_CASE("Incremental update y-bus") {
     }
 }
 
+TEST_CASE("Test y bus - absent phases are masked") {
+    // bus0 (abc) --branch0-- bus1 (a) -- shunt0
+    // expected values are derived by hand from the masking rule Y_ij <- M_i Y_ij M_j and Y_ii(p, p) = 1 for each
+    // absent phase p, with exact equality where no arithmetic other than the summation of the contributions is involved
+    using Tensor = ComplexTensor<asymmetric_t>;
+
+    MathModelTopology topo{};
+    topo.slack_bus = 0;
+    topo.phase_shift = {0.0, 0.0};
+    topo.branch_bus_idx = {{0, 1}};
+    topo.sources_per_bus = {from_sparse, {0, 1, 1}};
+    topo.shunts_per_bus = {from_sparse, {0, 0, 1}};
+    topo.load_gens_per_bus = {from_sparse, {0, 0, 0}};
+    topo.has_reduced_phase = true;
+    topo.bus_phase_mask = {phase_mask_abc, phase_mask_a};
+
+    constexpr DoubleComplex y{2.0, -4.0};
+    constexpr DoubleComplex ys{0.1, 0.3};
+    constexpr DoubleComplex ys0{0.4, -0.2};
+    // sequence-based shunt: diagonal (2 ys + ys0) / 3, off-diagonal (ys0 - ys) / 3
+    Tensor const y_shunt{(2.0 * ys + ys0) / 3.0, (ys0 - ys) / 3.0};
+    Tensor y_a{0.0};
+    y_a(0, 0) = y;
+
+    MathModelParam<asymmetric_t> param;
+    param.branch_param = {{y_a, -y_a, -y_a, y_a}};
+    param.shunt_param = {y_shunt};
+    param.source_param = {SourceCalcParam{.y1 = 1.0, .y0 = 1.0}};
+
+    auto const entry_of = [](YBus<asymmetric_t> const& ybus, Idx row, Idx col) {
+        for (Idx k = ybus.row_indptr()[row]; k != ybus.row_indptr()[row + 1]; ++k) {
+            if (ybus.col_indices()[k] == col) {
+                return k;
+            }
+        }
+        FAIL("entry not found");
+        return Idx{-1};
+    };
+    auto const check_exact = [](Tensor const& actual, Tensor const& expected) {
+        for (Idx i = 0; i != 3; ++i) {
+            for (Idx j = 0; j != 3; ++j) {
+                CHECK(actual(i, j) == expected(i, j));
+            }
+        }
+    };
+    // bus 1 diagonal: [[y + (2 ys + ys0) / 3, 0, 0], [0, 1, 0], [0, 0, 1]]
+    auto const bus1_diagonal = [&y_a](Tensor const& shunt) {
+        Tensor result{0.0};
+        result(0, 0) = y_a(0, 0) + shunt(0, 0);
+        result(1, 1) = 1.0;
+        result(2, 2) = 1.0;
+        return result;
+    };
+
+    SUBCASE("Single phase branch and sequence shunt") {
+        YBus<asymmetric_t> const ybus{topo, param};
+        auto const& admittance = ybus.admittance();
+
+        check_exact(admittance[entry_of(ybus, 0, 0)], y_a);
+        check_exact(admittance[entry_of(ybus, 0, 1)], -y_a);
+        check_exact(admittance[entry_of(ybus, 1, 0)], -y_a);
+        check_exact(admittance[entry_of(ybus, 1, 1)], bus1_diagonal(y_shunt));
+    }
+
+    SUBCASE("Three phase parameters are masked per side") {
+        // not a valid network (the conductors on b and c would dangle), but it exercises the row and column masks
+        Tensor const y_full{(2.0 * y + 0.5) / 3.0, (0.5 - y) / 3.0};
+        param.branch_param = {{y_full, -y_full, -y_full, y_full}};
+        YBus<asymmetric_t> const ybus{topo, param};
+        auto const& admittance = ybus.admittance();
+
+        Tensor expected_01{0.0}; // row mask abc, column mask a
+        expected_01.col(0) = -y_full.col(0);
+        Tensor expected_10{0.0}; // row mask a, column mask abc
+        expected_10.row(0) = -y_full.row(0);
+        Tensor expected_11{0.0};
+        expected_11(0, 0) = y_full(0, 0) + y_shunt(0, 0);
+        expected_11(1, 1) = 1.0;
+        expected_11(2, 2) = 1.0;
+
+        check_exact(admittance[entry_of(ybus, 0, 0)], y_full);
+        check_exact(admittance[entry_of(ybus, 0, 1)], expected_01);
+        check_exact(admittance[entry_of(ybus, 1, 0)], expected_10);
+        check_exact(admittance[entry_of(ybus, 1, 1)], expected_11);
+
+        // flows into bus 1 are exactly zero on b and c
+        ComplexValueVector<asymmetric_t> const u{ComplexValue<asymmetric_t>{1.02 * std::polar(1.0, -0.01)},
+                                                 {0.95 * std::polar(1.0, -0.07), 0.0, 0.0}};
+        auto const branch_flow = ybus.calculate_branch_flow<BranchSolverOutput<asymmetric_t>>(u);
+        REQUIRE(branch_flow.size() == 1);
+        CHECK(branch_flow[0].i_t(1) == 0.0);
+        CHECK(branch_flow[0].i_t(2) == 0.0);
+        CHECK(branch_flow[0].s_t(1) == 0.0);
+        CHECK(branch_flow[0].s_t(2) == 0.0);
+        CHECK(cabs(branch_flow[0].i_t(0) - dot(y_full, u[1])(0) + dot(y_full, u[0])(0)) < numerical_tolerance);
+        // the from side is at a three phase bus and is not masked
+        CHECK(branch_flow[0].i_f(1) != 0.0);
+        auto const sc_branch_flow = ybus.calculate_branch_flow<BranchShortCircuitSolverOutput<asymmetric_t>>(u);
+        CHECK(sc_branch_flow[0].i_t(1) == 0.0);
+        CHECK(sc_branch_flow[0].i_t(2) == 0.0);
+    }
+
+    SUBCASE("Shunt flow on absent phases is exactly zero") {
+        YBus<asymmetric_t> const ybus{topo, param};
+        DoubleComplex const u1a = 0.95 * std::polar(1.0, -0.07);
+        ComplexValueVector<asymmetric_t> const u{ComplexValue<asymmetric_t>{1.0}, {u1a, 0.0, 0.0}};
+
+        auto const shunt_flow = ybus.calculate_shunt_flow<ApplianceSolverOutput<asymmetric_t>>(u);
+        REQUIRE(shunt_flow.size() == 1);
+        // without masking, the mutual term (ys0 - ys) / 3 would give a current on b and c
+        CHECK(y_shunt(1, 0) != 0.0);
+        CHECK(shunt_flow[0].i(1) == 0.0);
+        CHECK(shunt_flow[0].i(2) == 0.0);
+        CHECK(shunt_flow[0].s(1) == 0.0);
+        CHECK(shunt_flow[0].s(2) == 0.0);
+        CHECK(cabs(shunt_flow[0].i(0) + y_shunt(0, 0) * u1a) < numerical_tolerance);
+
+        auto const sc_shunt_flow = ybus.calculate_shunt_flow<ApplianceShortCircuitSolverOutput<asymmetric_t>>(u);
+        CHECK(sc_shunt_flow[0].i(1) == 0.0);
+        CHECK(sc_shunt_flow[0].i(2) == 0.0);
+
+        // the injection is exactly zero on the absent phases without any masking
+        auto const injection = ybus.calculate_injection(u);
+        CHECK(injection[1](1) == 0.0);
+        CHECK(injection[1](2) == 0.0);
+    }
+
+    SUBCASE("Non-finite values on absent phases are discarded") {
+        Tensor y_shunt_nan = y_shunt;
+        y_shunt_nan(1, 2) = nan;
+        y_shunt_nan(2, 0) = nan;
+        param.shunt_param = {y_shunt_nan};
+        YBus<asymmetric_t> const ybus{topo, param};
+        check_exact(ybus.admittance()[entry_of(ybus, 1, 1)], bus1_diagonal(y_shunt));
+    }
+
+    SUBCASE("Incremental update keeps the identity") {
+        YBus<asymmetric_t> ybus{topo, param};
+        constexpr DoubleComplex ys_new{0.7, 0.9};
+        Tensor const y_shunt_new{ys_new, 0.5 * ys_new};
+        MathModelParamIncrement<asymmetric_t> const increment{
+            .branch_param = {},
+            .shunt_param = {y_shunt_new},
+            .source_param = {},
+            .branch_param_to_change = {},
+            .shunt_param_to_change = {0},
+            .source_param_to_change = {},
+        };
+        ybus.update_admittance_increment(increment);
+        check_exact(ybus.admittance()[entry_of(ybus, 1, 1)], bus1_diagonal(y_shunt_new));
+        check_exact(ybus.admittance()[entry_of(ybus, 0, 0)], y_a);
+    }
+
+    SUBCASE("All buses with all phases give the unmasked admittance") {
+        param.branch_param[0] = {y_shunt, -y_shunt, -y_shunt, y_shunt};
+        topo.bus_phase_mask = {phase_mask_abc, phase_mask_abc};
+        MathModelTopology topo_ref = topo;
+        topo_ref.has_reduced_phase = false;
+        topo_ref.bus_phase_mask.clear();
+        YBus<asymmetric_t> const ybus_flagged{topo, param};
+        YBus<asymmetric_t> const ybus_ref{topo_ref, param};
+        REQUIRE(ybus_flagged.nnz() == ybus_ref.nnz());
+        for (Idx k = 0; k != ybus_ref.nnz(); ++k) {
+            check_exact(ybus_flagged.admittance()[k], ybus_ref.admittance()[k]);
+        }
+    }
+}
+
 TEST_CASE("Test counting_sort_element") {
     using math_solver::counting_sort_element;
     using math_solver::YBusElementMap;
