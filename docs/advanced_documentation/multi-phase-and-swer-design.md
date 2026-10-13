@@ -101,7 +101,7 @@ In this document `<core>` means `power_grid_model_c/power_grid_model/include/pow
 
 `average_of_off_diagonal_of_matrix` (`<core>/common/matrix_utils.hpp:16-18`) adds `matrix(1, 2)` twice and leaves
 out `matrix(0, 2)`. `AsymLine::sym_calc_param` uses it, so symmetric results for any non-transposed `asym_line`
-are slightly wrong. This should be fixed separately (milestone M0).
+are slightly wrong. This is fixed in milestone M0.
 
 ### What is generated and what is written by hand
 
@@ -358,7 +358,7 @@ assume three phases. A source on a reduced-phase node raises an error.
 
 | # | Milestone | Main files | Tests | Effort / risk |
 |---|-----------|-----------|-------|---------------|
-| M0 | Fix `average_of_off_diagonal_of_matrix` | `<core>/common/matrix_utils.hpp` | Non-symmetric matrix case in `tests/cpp_unit_tests/component/test_asym_line.cpp`; regenerate affected `sym_output.json` under `tests/data/power_flow/asym-line/` | XS / low |
+| M0 | Fix `average_of_off_diagonal_of_matrix` | `<core>/common/matrix_utils.hpp` | Corrected expected values in `tests/cpp_unit_tests/component/test_asym_line.cpp` (which reproduced the bug); new `tests/cpp_unit_tests/common/test_matrix_utils.cpp` | XS / low |
 | M1 | Phase-mask topology (mask always full; no behaviour change) | `<core>/calculation_parameters.hpp`, `<core>/component/edge.hpp`, `<core>/main_core/topology.hpp`, `<core>/topology.hpp` | `tests/cpp_unit_tests/test_topology.cpp`: hand-built incidences, partial-winding error | M / medium |
 | M2 | Solver masking | `<core>/math_solver/y_bus.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp`, `iterative_pf_solver.hpp`, `common_solver_functions.hpp`, `short_circuit_solver.hpp`, `math_solver.hpp` (state-estimation rejection), `<core>/main_core/output.hpp`, `<core>/component/node.hpp` | Math solver unit tests with a forced mask; all existing validation cases unchanged | M / **high** (core numerics) |
 | M3 | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,swer-a}` with OpenDSS `test.dss`; short-circuit cases | M / medium |

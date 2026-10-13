@@ -39,10 +39,10 @@ void execute_subcases(const AsymLineInput& input, const ComplexTensor<asymmetric
 
     DoubleComplex const y1_series =
         (y_series(0, 0) + y_series(1, 1) + y_series(2, 2)) / 3.0 -
-        (y_series(0, 1) + y_series(1, 2) + y_series(1, 0) + y_series(1, 2) + y_series(2, 0) + y_series(2, 1)) / 6.0;
+        (y_series(0, 1) + y_series(0, 2) + y_series(1, 0) + y_series(1, 2) + y_series(2, 0) + y_series(2, 1)) / 6.0;
     DoubleComplex const y1_shunt =
         (y_shunt(0, 0) + y_shunt(1, 1) + y_shunt(2, 2)) / 3.0 -
-        (y_shunt(0, 1) + y_shunt(1, 2) + y_shunt(1, 0) + y_shunt(1, 2) + y_shunt(2, 0) + y_shunt(2, 1)) / 6.0;
+        (y_shunt(0, 1) + y_shunt(0, 2) + y_shunt(1, 0) + y_shunt(1, 2) + y_shunt(2, 0) + y_shunt(2, 1)) / 6.0;
 
     // symmetric
     DoubleComplex const yff1 = y1_series + 0.5 * y1_shunt;
