@@ -98,6 +98,12 @@ class DanglingConductor : public PowerGridError {
                                      branch_type, branch_idx, dangling_phases, from_node_phases, to_node_phases)} {}
 };
 
+class ReducedPhaseNotSupported : public PowerGridError {
+  public:
+    explicit ReducedPhaseNotSupported(std::string_view feature)
+        : PowerGridError{std::format("{} is not supported in a network with one- or two-phase nodes.\n", feature)} {}
+};
+
 class SparseMatrixError : public PowerGridError {
   public:
     SparseMatrixError(Idx err, std::string_view msg = "")

@@ -145,6 +145,7 @@ J.L -= -dQ_cal_m/dV
 */
 
 #include "block_matrix.hpp"
+#include "common_solver_functions.hpp"
 #include "iterative_pf_solver.hpp"
 #include "sparse_lu_solver.hpp"
 #include "y_bus.hpp"
@@ -260,6 +261,7 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
 
         const bool has_usable_limits = set_bus_types_and_q_limits(input);
         limit_check_countdown_ = has_usable_limits ? limit_check_at_iteration : no_limit_check;
+        check_no_voltage_control_at_absent_phase_bus(y_bus.math_topology());
 
         switch (input.initialization) {
             using enum CalculationInitialization;
@@ -273,6 +275,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             make_linear_start(y_bus, input, output.u);
             break;
         }
+        // absent phase slots start, and stay, at exactly zero: V = 0 is invariant under V += V * dV
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u);
 
         set_reference_voltage_for_pv_buses(output.u);
 
@@ -325,7 +329,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
         for (auto const& [bus_number, load_gens, sources] :
              enumerated_zip_sequence(load_gens_per_bus, sources_per_bus)) {
             Idx const diagonal_position = bus_entry[bus_number];
-            add_linear_initial_guess_loads(load_gens, data_jac_[diagonal_position], input);
+            add_linear_initial_guess_loads(load_gens, data_jac_[diagonal_position], input,
+                                           y_bus.math_topology().bus_phase(bus_number));
             add_linear_initial_guess_sources(sources, data_jac_[diagonal_position], del_x_pq_[bus_number], y_bus,
                                              input);
         }
@@ -352,6 +357,7 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             build_jacobian_and_rhs(y_bus, input, u, true);
         }
         apply_pv_constraints(y_bus);
+        apply_absent_phase_constraints(y_bus);
     }
 
     // Solve the linear Equations
@@ -622,6 +628,60 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
         }
     }
 
+    // a voltage-controlled (PV) bus must have all phases
+    void check_no_voltage_control_at_absent_phase_bus(MathModelTopology const& topo) const {
+        if constexpr (!is_symmetric_v<sym>) {
+            if (!topo.has_reduced_phase) {
+                return;
+            }
+            for (Idx bus = 0; bus != this->n_bus_; ++bus) {
+                if (bus_control_[bus].type == BusType::pv && !topo.bus_phase(bus).all()) {
+                    throw ReducedPhaseNotSupported{"Voltage regulation at a node without all phases"};
+                }
+            }
+        }
+    }
+
+    // Replace the P and Q equations of each absent phase slot by the identity: del_theta = 0 and del_V / V = 0.
+    // This keeps the Jacobian non-singular; the voltage of an absent slot is exactly zero and stays zero because
+    // V += V * del_V / V. The columns of an absent slot are zero as well, because Y-bus columns of absent slots are
+    // masked and the voltage of that slot is zero. Idempotent, so it is safe after a partial rebuild.
+    void apply_absent_phase_constraints(YBus<sym> const& y_bus) {
+        if constexpr (!is_symmetric_v<sym>) {
+            MathModelTopology const& topo = y_bus.math_topology();
+            if (!topo.has_reduced_phase) {
+                return;
+            }
+            IdxVector const& indptr = y_bus.row_indptr_lu();
+            IdxVector const& indices = y_bus.col_indices_lu();
+            // block layout: rows 0-2 are the P equations, rows 3-5 the Q equations of phase a, b, c;
+            // columns 0-2 are theta, columns 3-5 are V of phase a, b, c
+            constexpr Idx q_offset = 3;
+            for (Idx row = 0; row != this->n_bus_; ++row) {
+                PhaseMask const phases = topo.bus_phase(row);
+                if (phases.all()) {
+                    continue;
+                }
+                for (Idx phase = 0; phase != 3; ++phase) {
+                    if (phases.has(phase)) {
+                        continue;
+                    }
+                    for (Idx k = indptr[row]; k != indptr[row + 1]; ++k) {
+                        data_jac_[k].row(phase).setZero();
+                        data_jac_[k].row(q_offset + phase).setZero();
+                        if (indices[k] == row) {
+                            data_jac_[k](phase, phase) = 1.0;
+                            data_jac_[k](q_offset + phase, q_offset + phase) = 1.0;
+                        }
+                    }
+                    // del_x_pq_ rows 0-2 are P, rows 3-5 are Q
+                    del_x_pq_[row](phase) = 0.0;
+                    del_x_pq_[row](q_offset + phase) = 0.0;
+                }
+            }
+        }
+    }
+
     static LimitViolation violated_limit(RealValue<sym> const& q, double const& q_min, double const& q_max) {
         double q_total;
         if constexpr (is_symmetric_v<sym>) {
@@ -740,7 +800,7 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
     }
 
     void add_linear_initial_guess_loads(IdxRange const& load_gens, PFJacBlock<sym>& block,
-                                        PowerFlowInput<sym> const& input) {
+                                        PowerFlowInput<sym> const& input, PhaseMask phases) {
         for (Idx const load_number : load_gens) {
             auto const& s_input = input.s_injection[load_number];
 
@@ -769,7 +829,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             //                   coeff of Ui in Real Eq = -B = imag(Y_load) = Q
             //                   coeff of Ur in Imag Eq = B = -imag(Y_load) = -Q
             //                   coeff of Ui in Imag Eq = G = real(Y_load) = P
-            ComplexValue<sym> const y_load = -conj(s);
+            // a load on an absent phase is ignored, so that the identity of that slot in the Y-bus is kept
+            ComplexValue<sym> const y_load = detail::absent_phases_masked<sym>(-conj(s), phases);
             add_diag(block.real_imag(), -imag(y_load));
             add_diag(block.real_real(), real(y_load));
             add_diag(block.imag_imag(), real(y_load));

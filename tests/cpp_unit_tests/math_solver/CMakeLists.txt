@@ -10,6 +10,7 @@ add_executable(
     "test_math_solver_se_iterative_linear.cpp"
     "test_math_solver_pf_iterative_current.cpp"
     "test_math_solver_pf_linear.cpp"
+    "test_math_solver_pf_reduced_phase.cpp"
     "test_math_solver_sc.cpp"
     "test_sparse_lu_solver.cpp"
     "test_observability.cpp"

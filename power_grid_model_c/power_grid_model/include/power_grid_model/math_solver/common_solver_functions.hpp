@@ -41,10 +41,45 @@ inline void add_sources(IdxRange const& sources, Idx /* bus_number */, YBus<sym>
     }
 }
 
+// set the absent phase slots of each bus to exactly zero
+// no-op for a symmetric calculation or if all buses have all phases
+template <symmetry_tag sym>
+inline void mask_absent_phase_values(MathModelTopology const& topo, ComplexValueVector<sym>& values) {
+    if constexpr (!is_symmetric_v<sym>) {
+        if (!topo.has_reduced_phase) {
+            return;
+        }
+        assert(std::ssize(values) == topo.n_bus());
+        for (Idx bus = 0; bus != topo.n_bus(); ++bus) {
+            if (PhaseMask const phases = topo.bus_phase(bus); !phases.all()) {
+                mask_absent_phases(values[bus], phases);
+            }
+        }
+    }
+}
+
+// the value with its absent phase slots set to exactly zero; the value itself if the bus has all phases
+template <symmetry_tag sym>
+inline ComplexValue<sym> absent_phases_masked(ComplexValue<sym> value, [[maybe_unused]] PhaseMask phases) {
+    if constexpr (!is_symmetric_v<sym>) {
+        if (!phases.all()) {
+            mask_absent_phases(value, phases);
+        }
+    }
+    return value;
+}
+
 template <symmetry_tag sym>
 inline void add_linear_loads(IdxRange const& load_gens_per_bus, Idx /* bus_number */, PowerFlowInput<sym> const& input,
-                             ComplexTensor<sym>& diagonal_element) {
+                             ComplexTensor<sym>& diagonal_element, [[maybe_unused]] PhaseMask phases) {
     for (auto load_number : load_gens_per_bus) {
+        if constexpr (!is_symmetric_v<sym>) {
+            if (!phases.all()) {
+                // a load on an absent phase is ignored, so that the identity of that slot in the Y-bus is kept
+                add_diag(diagonal_element, absent_phases_masked<sym>(-conj(input.s_injection[load_number]), phases));
+                continue;
+            }
+        }
         // YBus_diag += -conj(S_base) // NOSONAR(S125)
         add_diag(diagonal_element, -conj(input.s_injection[load_number]));
     }
@@ -60,7 +95,7 @@ inline void prepare_linear_matrix_and_rhs(YBus<sym> const& y_bus, PowerFlowInput
         Idx const diagonal_position = bus_entry[bus_number];
         auto& diagonal_element = mat_data[diagonal_position];
         auto& u_bus = output.u[bus_number];
-        add_linear_loads(load_gens, bus_number, input, diagonal_element);
+        add_linear_loads(load_gens, bus_number, input, diagonal_element, y_bus.math_topology().bus_phase(bus_number));
         add_sources(sources, bus_number, y_bus, input.source, diagonal_element, u_bus);
     }
 }
@@ -408,6 +443,25 @@ inline void calculate_load_gen_result(IdxRange const& load_gens, Idx bus_number,
     }
 }
 
+// a load_gen on an absent phase is ignored: its power and current are exactly zero there (i = conj(s / u) is not
+// finite at u = 0, hence the select-based masking)
+template <symmetry_tag sym>
+    requires(!is_symmetric_v<sym>)
+inline void mask_absent_phase_load_gen_result(MathModelTopology const& topo, Idx bus_number, IdxRange const& load_gens,
+                                              SolverOutput<sym>& output) {
+    if (!topo.has_reduced_phase) {
+        return;
+    }
+    PhaseMask const phases = topo.bus_phase(bus_number);
+    if (phases.all()) {
+        return;
+    }
+    for (Idx const load_gen : load_gens) {
+        mask_absent_phases(output.load_gen[load_gen].s, phases);
+        mask_absent_phases(output.load_gen[load_gen].i, phases);
+    }
+}
+
 template <symmetry_tag sym, typename LoadGenFunc>
     requires std::invocable<std::remove_cvref_t<LoadGenFunc>, Idx> &&
              std::same_as<std::invoke_result_t<LoadGenFunc, Idx>, LoadGenType>
@@ -440,6 +494,9 @@ inline void calculate_pf_result(YBus<sym> const& y_bus, PowerFlowInput<sym> cons
     for (auto const& [bus_number, sources, load_gens] : enumerated_zip_sequence(sources_per_bus, load_gens_per_bus)) {
         calculate_load_gen_result<sym>(load_gens, bus_number, input, output,
                                        [&load_gen_func](Idx idx) { return load_gen_func(idx); });
+        if constexpr (!is_symmetric_v<sym>) {
+            mask_absent_phase_load_gen_result(y_bus.math_topology(), bus_number, load_gens, output);
+        }
         calculate_voltage_regulator_result<sym>(bus_number, input, output, load_gens, loadgen_to_regulator);
         calculate_source_result<sym>(sources, bus_number, y_bus, input, output, load_gens);
     }

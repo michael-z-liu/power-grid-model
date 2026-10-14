@@ -95,6 +95,7 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     void initialize_derived_solver(YBus<sym> const& y_bus, PowerFlowInput<sym> const& input,
                                    SolverOutput<sym>& output) {
         this->make_average_source_start(input, output.u);
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u);
 
         auto const& sources_per_bus = this->sources_per_bus_.get();
         IdxVector const& bus_entry = y_bus.lu_diag();
@@ -138,6 +139,8 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
             add_loads(load_gens, bus_number, input, load_gen_type, u);
             add_sources(sources, bus_number, y_bus, input);
         }
+        // a load on an absent phase is ignored; its current conj(s / u) is not finite at u = 0
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), rhs_u_);
     }
 
     // Solve the linear equations I_inj = YU
