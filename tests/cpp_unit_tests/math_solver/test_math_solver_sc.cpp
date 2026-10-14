@@ -538,6 +538,7 @@ TEST_CASE("Short circuit solver with absent phases") {
     auto const check_absent_phases_zero = [](ShortCircuitSolverOutput<asymmetric_t> const& output) {
         for (Idx phase = 1; phase != 3; ++phase) {
             CHECK(output.u_bus[1](phase) == 0.0);
+            CHECK(std::arg(output.u_bus[1](phase)) == 0.0); // the node output u_angle is 0, not pi
             CHECK(output.branch[0].i_t(phase) == 0.0);
         }
     };

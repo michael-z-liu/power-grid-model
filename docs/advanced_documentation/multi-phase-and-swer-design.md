@@ -8,7 +8,8 @@ SPDX-License-Identifier: MPL-2.0
 
 ```{note}
 This is a design and investigation document. It describes what is needed to support one- and two-phase
-components in power flow and short-circuit calculations. None of it is implemented yet.
+components in power flow and short-circuit calculations. Milestones M0 to M2 are implemented; they are internal
+and not yet reachable from the input data, which starts with M3.
 ```
 
 ## Context
@@ -150,13 +151,23 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
        winding are present. Otherwise a winding could back-feed an absent slot and create a floating, singular
        sub-problem.
      * **Links and supernodes:** on the v2 path, nodes are merged before the topology is built, so a merged node
-       carries the union. On the legacy path, a link is a per-phase abc branch, which gives the same union.
-  3. Validate after the fixed point, so that the outcome does not depend on the visit order. A connected winding side
-     (also of a branch that is connected on one side only) whose node has only some of the winding's terminals raises
-     `MissingPhaseForWinding`. A winding with none of its terminals present is allowed.
+       carries the union. On the legacy path, a link reports the coupling `PhaseCoupling::link` (abc → abc). It
+       propagates like a per-phase branch, which gives the same union, but it is an ideal connection that carries
+       whatever phases its nodes have, so it is never validated as dangling (decision D2).
+  3. Validate after the fixed point (`check_branch_phases`), so that the outcome does not depend on the visit order:
+     * **Windings.** A connected winding side (also of a branch that is connected on one side only) must have *all*
+       of its terminals present at its node. Otherwise it raises `MissingPhaseForWinding`. A winding with none of its
+       terminals present is an error as well (decision D1): it would stamp its admittance on absent slots.
+     * **Dangling conductors.** At every connected side of a per-phase branch whose node is in a math model, the
+       branch terminals must be a subset of the node phases. Otherwise it raises `DanglingConductor` with the branch
+       index, the dangling phases and the phases at both ends. This covers a three-phase line between two separately
+       fed single-phase nodes, a `b` line off an `a` node, and an abc stub hanging from an `a` node. For a per-phase
+       branch connected on both sides, propagation already makes the present terminals equal at both ends, so a
+       conductor is either present at both ends or dangling at both ends.
+     * **Links** are skipped.
   4. Write the masks. A math model gets `has_reduced_phase` and a mask vector only if at least one of its buses is not
-     abc. A bus that no phase reaches is kept with the mask `none`; the output for such a bus is decided with the solver
-     changes.
+     abc. With the two rules above, every bus in a math model is reached by at least one phase from a source, so a bus
+     with the mask `none` cannot occur.
 * **Rebuilds.** `phases` and the connection attributes are input-only. The mask therefore changes only through
   status updates, which already trigger a topology rebuild.
 
@@ -164,16 +175,17 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 
 | Area | Change |
 |------|--------|
-| Y-bus (`<core>/math_solver/y_bus.hpp:444`, `update_admittance_entries`) | After a diagonal block is summed, add `1.0` at `(p, p)` for each absent `p`. Branch parameters are exactly zero on absent slots, so that row and column are otherwise empty. The incremental update path reuses the same function. |
-| Newton-Raphson (`newton_raphson_pf_solver.hpp`) | New `apply_absent_phase_constraints()`, modelled on `apply_pv_constraints()` (line 585). Set `H(p,p) = L(p,p) = 1`, zero the rest of the absent rows, and set the mismatch to 0. The update keeps $V_p = 0$ and never divides by it. |
-| Newton-Raphson starts (`make_flat_start`, `make_linear_start`, lines 289-339) | The flat start multiplies by the mask and uses `bus_slot_angle`. The linear start works as is, because of the identity in Y. |
-| Iterative current (`iterative_current_pf_solver.hpp:172-195`), `iterative_pf_solver.hpp:110-117` | Mask the load right-hand side, which would otherwise be `0/0`, and the initial voltage. |
-| Linear power flow | No change; the identity in Y gives $U_p = 0$. |
-| Results (`common_solver_functions.hpp`) | Mask `conj(s/u)` to 0 on absent slots. |
-| Short circuit | The Y-bus identity is enough. Fault substitution only touches fault phases, which are validated to be present (see [Short-circuit specifics](#short-circuit-specifics)). |
-| State estimation | Not supported at first: throw `NotImplementedError` when `has_reduced_phase`. The observability check works per bus, not per phase, and pivot perturbation would hide modelling errors. |
-| Voltage regulators / PV buses | Not supported on reduced-phase buses at first. |
-| Outputs (`<core>/main_core/output.hpp`, `<core>/component/node.hpp`) | Absent-phase `u`, `u_pu` and `u_angle` become NaN. Currents and powers are naturally 0. See the [open questions](#open-questions). |
+| Y-bus (`<core>/math_solver/y_bus.hpp`, `update_admittance_entries`) | Asymmetric only. **Mask, then identity:** every entry $(i, j)$ becomes $M_i Y_{ij} M_j$, and on the diagonal $(p, p)$ is *overwritten* with 1 for each absent `p`. Adding 1.0 would only be correct if every contribution were exactly zero on absent slots, which sequence-based shunts (mutual terms) and legacy links (1e6 on the diagonal) break. With masking, each absent row is exactly $e_p$ whatever the component data. The incremental update path reuses the same function. Branch and shunt flows are masked by the phases of the bus they flow into. Masking is by assignment, never by multiplication, so a NaN in an absent slot is discarded too. The identity rows are part of `YBus::admittance()` (decision D8, open). |
+| Newton-Raphson (`newton_raphson_pf_solver.hpp`) | New `apply_absent_phase_constraints()`, called after `apply_pv_constraints()`. For each absent slot it zeroes the P and Q rows in all entries of the bus row, sets $H(p,p) = L(p,p) = 1$ and sets the mismatch to 0. The update keeps $V_p = 0$ and never divides by it. A PV bus (voltage regulator) on a bus without all phases raises `ReducedPhaseNotSupported`. |
+| Newton-Raphson starts | The flat, average-source and linear starts mask the initial voltage of absent slots to exactly 0. The linear start also masks the load admittance per bus. Slot angles (`bus_slot_angle`) come with the split-phase work (M6). |
+| Iterative current (`iterative_current_pf_solver.hpp`) | Mask the initial voltage and, after the load and source loop, the right-hand side (which holds `conj(s/0)` = NaN on absent slots). The prefactorised matrix already has the identity rows. `linear_current` is covered as well. |
+| Linear power flow (`common_solver_functions.hpp`, `add_linear_loads`) | The load admittance $-\overline{s}$ is masked per bus. Otherwise it would be added to the identity on absent slots and give $(1 - \overline{s_p}) U_p = 0$, which is singular for $s_p = 1$. |
+| Results (`common_solver_functions.hpp`) | The load/gen `s` and `i` (`conj(s/u)`) are set to 0 on absent slots. Bus injection is exactly 0 there because $U_p = 0$. |
+| Short circuit (`short_circuit_solver.hpp`) | The Y-bus identity carries through `copy_y_bus`. Fault substitution only touches fault phases. In a reduced-phase model the solver checks that the fault phases are present at the faulted bus and raises `InvalidShortCircuitPhases` otherwise, so a three-phase fault, or a fault on an absent phase, at a reduced bus is rejected instead of silently giving zero fault current. The ID-based check in input preparation follows in M8. |
+| State estimation (`math_solver.hpp`) | Not supported at first: `MathSolver::run_state_estimation` raises `ReducedPhaseNotSupported` when `has_reduced_phase`, for both symmetries and all methods. The observability check works per bus, not per phase, and pivot perturbation would hide modelling errors. |
+| Symmetric calculations (`math_solver.hpp`) | The positive-sequence Y-bus cannot represent absent phases. `MathSolver<symmetric_t>` raises `ReducedPhaseNotSupported` for power flow and short circuit on a reduced-phase model. This is a permanent backstop behind the model-level guard of M4. |
+| Voltage regulators / PV buses | Not supported on reduced-phase buses at first (see Newton-Raphson). |
+| Outputs (`<core>/main_core/output.hpp`, `<core>/component/node.hpp`) | No change. The solvers leave every absent slot at exactly 0, so the node reports 0 for `u`, `u_pu`, `u_angle` ($\arg 0 = 0$), `p` and `q`, and every flow (branch, shunt, load/gen) is 0. See [Absent-phase output](#absent-phase-output). |
 
 ### Alternatives considered
 
@@ -188,6 +200,51 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
   about one third of the unknowns on SWER buses.
 
 The identity approach costs one trivial pivot per absent slot. It costs nothing when `has_reduced_phase` is false.
+
+### Absent-phase output
+
+**Policy: 0 everywhere.** An absent phase slot reports exactly 0 for every output field: node `u`, `u_pu`,
+`u_angle`, `p` and `q`, and all branch, shunt and appliance flows. This is the same convention as for a
+de-energised component (`Node::get_null_output`). In PGM, NaN means "input not provided", not "no conductor".
+
+* **Why not NaN for absent voltages.** NaN would keep "absent" apart from "present at 0 V", which matters most in
+  short-circuit results. But it would make NaN mean something new in output, need NaN-aware comparison in the
+  Python and C++ validation tooling (per-element `equal_nan`, a non-NaN angle reference, a per-phase instead of
+  per-element skip), and force users who aggregate voltages to use NaN-aware min/max.
+* **How to tell absent from 0 V.** The node phases are derived from the input (`asym_line.phases` and the
+  transformer windings), not reported. If users need the distinction, a future output attribute could expose the
+  derived node phases.
+* **Implementation.** No output code is needed. The solvers keep absent slots at exactly 0 (a positive zero, so
+  $\arg 0 = 0$ and never $\pi$), and the node and branch output formulas map 0 to 0. Flows stay physically exact,
+  so `loading`, `pf` and per-phase sums stay finite.
+
+### Decisions
+
+Taken in M2:
+
+* **D1. Winding without terminals at a connected side is an error.** This overturns the M1 rule that allowed it.
+  Otherwise the winding would stamp its admittance on absent slots, and a bus with mask `none`, whose loads are
+  dropped silently, could appear.
+* **D2. `PhaseCoupling::link`.** Legacy-path links are phase-agnostic and exempt from the dangling check. Without
+  it, a link between two SWER nodes on the legacy path (models with node-injection sensors) would raise
+  `DanglingConductor`.
+* **D5. Absent-phase output** is 0 everywhere (see above), not the NaN-for-voltages hybrid that was proposed.
+* **D6. One exception class.** `ReducedPhaseNotSupported` is used for state estimation, symmetric calculations and
+  voltage control on reduced-phase buses. M4 reuses it instead of adding `SymmetricCalculationNotSupported`; the
+  Python error mapping is added in M4.
+
+Still open, for M3 and M4:
+
+* **D3. Load/gen power on an absent phase** (for example a `sym_load` on a SWER node, which in an asymmetric
+  calculation puts $s/3$ on phases b and c). At math level it is ignored exactly. Recommendation: a model-level error
+  with the component ID in M3 (`<core>/main_core/calculation_input_preparation.hpp`), so that load is not dropped
+  silently.
+* **D4. Shunt on a reduced-phase node.** M2 keeps the present-phase block of the shunt through Y-bus masking (its
+  absent legs drop out). Recommendation: an M3 error until an asymmetric shunt exists, consistent with D3.
+* **D7. Order of M3 and M4.** Once M3 makes reduced-phase models possible, a short circuit where every fault is
+  three-phase still goes to the symmetric solver and hits the M2 backstop. Land M4 together with M3, or before it.
+* **D8. Identity rows in the Y-bus.** `YBus::admittance()` contains the identity rows of absent slots. Future
+  state-estimation work will need the unmasked physics; document this or expose the mask when that work starts.
 
 ## Component models (phase domain)
 
@@ -333,14 +390,15 @@ assume three phases. A source on a reduced-phase node raises an error.
 
 ## Calculation behaviour
 
-* **Symmetric power flow and state estimation** throw a new `SymmetricCalculationNotSupported` error (or
-  `NotImplementedError`) if the model contains any of:
+* **Symmetric power flow and state estimation** throw `ReducedPhaseNotSupported` (decision D6) if the model
+  contains any of:
   * an `asym_line` with `phases != abc`;
   * a `single_phase_transformer`;
   * (optionally) a delta `asym_load` or `asym_gen`.
 
   `phases` is input-only, so the check is a flag cached at model construction. Add it next to the existing
-  method checks in `<core>/main_model_impl.hpp`. `AsymLine::sym_calc_param()` also throws as a backstop.
+  method checks in `<core>/main_model_impl.hpp`. `MathSolver<symmetric_t>` already throws as a backstop (M2), and
+  `AsymLine::sym_calc_param()` can throw as well.
 * **Short circuit.** Change the symmetry selection at `main_model_impl.hpp:362-368` to
   `is_three_phase && !has_reduced_phase_components`. A three-phase fault on a three-phase node of a mixed network
   then runs through the asymmetric solver, which already supports `three_phase`.
@@ -350,7 +408,9 @@ assume three phases. A source on a reduced-phase node raises an error.
 * **Fault phase validity.**
   * In `prepare_short_circuit_input` (`<core>/main_core/calculation_input_preparation.hpp`), check that the fault
     phases are a subset of the node's phase mask. Otherwise throw `InvalidShortCircuitPhases`
-    (`<core>/common/exception.hpp:248`) with an extended message.
+    (`<core>/common/exception.hpp`) with an extended message. Since M2 the short-circuit solver already rejects
+    fault phases that are absent at the faulted bus, with the constructor
+    `InvalidShortCircuitPhases(fault_phases, node_phases)`; M8 adds the check with the fault ID.
   * Default phases (single-phase faults on a, two-phase faults on bc; `<core>/component/fault.hpp:171-194`)
     are unchanged. They work on SWER nodes and fail with a clear error on split-phase nodes.
 * **Valid cases:**
@@ -378,7 +438,7 @@ assume three phases. A source on a reduced-phase node raises an error.
 |---|-----------|-----------|-------|---------------|
 | M0 | Fix `average_of_off_diagonal_of_matrix` | `<core>/common/matrix_utils.hpp` | Corrected expected values in `tests/cpp_unit_tests/component/test_asym_line.cpp` (which reproduced the bug); new `tests/cpp_unit_tests/common/test_matrix_utils.cpp` | XS / low |
 | M1 | Phase-mask topology (mask always full; no behaviour change) | `<core>/calculation_parameters.hpp`, `<core>/common/exception.hpp`, `<core>/component/edge.hpp`, `<core>/component/transformer.hpp`, `<core>/component/generic_branch.hpp`, `<core>/main_core/topology.hpp`, `<core>/topology.hpp` | `tests/cpp_unit_tests/test_topology.cpp`: hand-built incidences, partial-winding error | M / medium |
-| M2 | Solver masking | `<core>/math_solver/y_bus.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp`, `iterative_pf_solver.hpp`, `common_solver_functions.hpp`, `short_circuit_solver.hpp`, `math_solver.hpp` (state-estimation rejection), `<core>/main_core/output.hpp`, `<core>/component/node.hpp` | Math solver unit tests with a forced mask; all existing validation cases unchanged | M / **high** (core numerics) |
+| M2 | Solver masking (dangling-conductor and winding validation; Y-bus mask and identity; power-flow and short-circuit masking; state-estimation, symmetric and absent-phase-fault guards; output 0 on absent phases) | `<core>/topology.hpp`, `<core>/calculation_parameters.hpp`, `<core>/common/exception.hpp`, `<core>/component/link.hpp`, `<core>/math_solver/y_bus.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp`, `common_solver_functions.hpp`, `short_circuit_solver.hpp`, `math_solver.hpp` | `tests/cpp_unit_tests/test_topology.cpp`; `math_solver/test_y_bus.cpp`; new `math_solver/test_math_solver_pf_reduced_phase.cpp` (hand-computed single- and two-phase cases, equivalence with a full-phase network, bit-identical check with an all-abc mask, guards); `math_solver/test_math_solver_sc.cpp`; `component/test_node.cpp`; all existing validation cases unchanged | M / **high** (core numerics) |
 | M3 | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,swer-a}` with OpenDSS `test.dss`; short-circuit cases | M / medium |
 | M4 | Symmetric-calculation guards | `<core>/main_model_impl.hpp`, `<core>/common/exception.hpp`, `src/power_grid_model/_core/error_handling.py`, `errors.py` | C++ main-model tests; Python error-mapping tests | S / low |
 | M5 | `single_phase_transformer` (two windings, earthing, phase shift) | New `<core>/component/single_phase_transformer.hpp`; `<core>/all_components.hpp`; `<core>/main_core/main_model_type.hpp`; `input.json` and `dataset_definitions.json` (input, update, output and short-circuit output as a branch); enum `WindingConnection1P` | `test_single_phase_transformer.cpp` (compare with hand-computed $C^T Y C$); validation case 22 kV a-b → 12.7 kV SWER → 240 V against OpenDSS | L / **high** |
@@ -412,8 +472,8 @@ assume three phases. A source on a reduced-phase node raises an error.
 
 ## Open questions
 
-1. **Absent-phase output.** Should absent-phase voltages be NaN (proposed) or 0? NaN is more honest; 0 matches the
-   current convention for non-energised nodes.
+1. **Absent-phase output.** Resolved in M2: 0 everywhere, consistent with de-energised output. See
+   [Absent-phase output](#absent-phase-output).
 2. **Delta loads in symmetric calculations.** A delta load has a well-defined positive-sequence equivalent. Should
    symmetric calculations allow it?
 3. **Sources on SWER or split-phase nodes.** Needed, for example, for islanded single-phase studies?

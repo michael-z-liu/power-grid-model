@@ -235,6 +235,8 @@ void check_absent_slots_zero(SolverOutput<asymmetric_t> const& output, MathModel
         for (Idx phase = 0; phase != 3; ++phase) {
             if (!phases.has(phase)) {
                 CHECK(output.u[bus](phase) == 0.0);
+                // a positive zero, so that the node output u_angle is arg(0) = 0 and not pi
+                CHECK(std::arg(output.u[bus](phase)) == 0.0);
                 CHECK(output.bus_injection[bus](phase) == 0.0);
             }
         }
