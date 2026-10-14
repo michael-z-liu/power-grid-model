@@ -44,6 +44,8 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
                                      Logger& log, CalculationMethod calculation_method, YBus<sym> const& y_bus) final {
         using enum CalculationMethod;
 
+        check_symmetric_calculation_supported();
+
         // set method to always linear if all load_gens have const_y
         calculation_method = all_const_y_ ? linear : calculation_method;
 
@@ -68,6 +70,10 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
                                            YBus<sym> const& y_bus) final {
         using enum CalculationMethod;
 
+        if (topo_ptr_->has_reduced_phase) {
+            throw ReducedPhaseNotSupported{"State estimation"};
+        }
+
         switch (calculation_method) {
         case default_method:
             [[fallthrough]]; // use iterative linear by default
@@ -83,6 +89,8 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
     ShortCircuitSolverOutput<sym> run_short_circuit(ShortCircuitInput const& input, Logger& log,
                                                     CalculationMethod calculation_method,
                                                     YBus<sym> const& y_bus) final {
+        check_symmetric_calculation_supported();
+
         if (calculation_method != CalculationMethod::default_method &&
             calculation_method != CalculationMethod::iec60909) {
             throw InvalidCalculationMethod{};
@@ -120,6 +128,16 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
     std::optional<IterativeLinearSESolver<sym>> iterative_linear_se_solver_;
     std::optional<NewtonRaphsonSESolver<sym>> newton_raphson_se_solver_;
     std::optional<ShortCircuitSolver<sym>> iec60909_sc_solver_;
+
+    // the symmetric (positive-sequence) Y-bus cannot represent absent phases, so a math model with one- or two-phase
+    // buses can only be calculated asymmetrically; this is the backstop behind the model-level checks
+    void check_symmetric_calculation_supported() const {
+        if constexpr (is_symmetric_v<sym>) {
+            if (topo_ptr_->has_reduced_phase) {
+                throw ReducedPhaseNotSupported{"Symmetric calculation"};
+            }
+        }
+    }
 
     SolverOutput<sym> run_power_flow_newton_raphson(PowerFlowInput<sym> const& input, double err_tol, Idx max_iter,
                                                     bool cache_run, Logger& log, YBus<sym> const& y_bus) {

@@ -43,6 +43,7 @@ template <symmetry_tag sym> class ShortCircuitSolver {
 
     ShortCircuitSolverOutput<sym> run_short_circuit(YBus<sym> const& y_bus, ShortCircuitInput const& input) {
         check_input_valid(input);
+        check_fault_phases_present(y_bus.math_topology(), input);
 
         auto const [fault_type, fault_phase] = extract_fault_type_phase(input.faults);
 
@@ -452,6 +453,47 @@ template <symmetry_tag sym> class ShortCircuitSolver {
             if (first.fault_type == FaultType::nan || first.fault_phase == FaultPhase::default_value ||
                 first.fault_phase == FaultPhase::nan) {
                 throw InvalidShortCircuitPhaseOrType{};
+            }
+        }
+    }
+
+    // the phases that a short circuit with the given fault phases is applied to
+    static constexpr PhaseMask fault_phase_mask(FaultPhase fault_phase) {
+        using enum FaultPhase;
+
+        switch (fault_phase) {
+        case abc:
+            return phase_mask_abc;
+        case a:
+            return phase_mask_a;
+        case b:
+            return phase_mask_b;
+        case c:
+            return phase_mask_c;
+        case ab:
+            return phase_mask_ab;
+        case ac:
+            return phase_mask_ac;
+        case bc:
+            return phase_mask_bc;
+        default:
+            throw MissingCaseForEnumError{"fault_phase_mask", fault_phase};
+        }
+    }
+
+    // in a math model with one- or two-phase buses, a short circuit must only involve phases present at its bus;
+    // otherwise it would silently result in a zero fault current
+    static void check_fault_phases_present(MathModelTopology const& topo, ShortCircuitInput const& input) {
+        if (!topo.has_reduced_phase) {
+            return;
+        }
+        for (auto const& [bus_number, faults] : enumerated_zip_sequence(input.fault_buses)) {
+            PhaseMask const bus_phases = topo.bus_phase(bus_number);
+            for (Idx const fault_number : faults) {
+                PhaseMask const fault_phases = fault_phase_mask(input.faults[fault_number].fault_phase);
+                if (!bus_phases.contains(fault_phases)) {
+                    throw InvalidShortCircuitPhases{phase_letters(fault_phases), phase_letters(bus_phases)};
+                }
             }
         }
     }

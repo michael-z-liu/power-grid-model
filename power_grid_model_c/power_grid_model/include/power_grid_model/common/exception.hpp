@@ -276,6 +276,10 @@ class InvalidShortCircuitPhases : public PowerGridError {
         : PowerGridError{std::format("The short circuit phases ({}) do not match the short circuit type ({})\n",
                                      std::to_underlying(short_circuit_phases),
                                      std::to_underlying(short_circuit_type))} {}
+    InvalidShortCircuitPhases(std::string_view short_circuit_phases, std::string_view node_phases)
+        : PowerGridError{std::format("The short circuit phases ({}) are not all present at the faulted node (node "
+                                     "phases: {}); this short circuit type cannot be applied there\n",
+                                     short_circuit_phases, node_phases)} {}
 };
 
 class InvalidShortCircuitPhaseOrType : public PowerGridError {

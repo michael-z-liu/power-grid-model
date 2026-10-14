@@ -505,4 +505,94 @@ TEST_CASE("Short circuit source admittance follows the voltage factor") {
     CHECK(cabs(maximum_output.fault[0].i_fault - high_voltage_minimum_output.fault[0].i_fault) < numerical_tolerance);
 }
 
+TEST_CASE("Short circuit solver with absent phases") {
+    // source -- bus0 (abc) -- line on phase a only -- bus1 (a)
+    MathModelTopology topo;
+    topo.slack_bus = 0;
+    topo.phase_shift = {0.0, 0.0};
+    topo.branch_bus_idx = {{0, 1}};
+    topo.sources_per_bus = {from_sparse, {0, 1, 1}};
+    topo.shunts_per_bus = {from_sparse, {0, 0, 0}};
+    topo.load_gens_per_bus = {from_sparse, {0, 0, 0}};
+    topo.has_reduced_phase = true;
+    topo.bus_phase_mask = {phase_mask_abc, phase_mask_a};
+
+    double const vref = 1.1;
+    DoubleComplex const yref{10.0 - 50.0i};
+    DoubleComplex const zref_scaled{vref / yref}; // source impedance at the voltage factor, diagonal since y1 == y0
+    DoubleComplex const y_line{1.0 - 2.0i};
+    DoubleComplex const z_line{1.0 / y_line};
+    DoubleComplex const z_fault{1.0 + 1.0i};
+    DoubleComplex const y_fault_solid{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+
+    MathModelParam<asymmetric_t> param;
+    ComplexTensor<asymmetric_t> y_line_a{0.0};
+    y_line_a(0, 0) = y_line;
+    param.branch_param = {{y_line_a, -y_line_a, -y_line_a, y_line_a}};
+    param.source_param = {SourceCalcParam{.y1 = yref, .y0 = yref}};
+
+    YBus<asymmetric_t> const y_bus{topo, param};
+    ShortCircuitSolver<asymmetric_t> solver{y_bus, topo};
+    ComplexValue<asymmetric_t> const u_source{vref}; // (vref, vref a^2, vref a)
+
+    auto const check_absent_phases_zero = [](ShortCircuitSolverOutput<asymmetric_t> const& output) {
+        for (Idx phase = 1; phase != 3; ++phase) {
+            CHECK(output.u_bus[1](phase) == 0.0);
+            CHECK(output.branch[0].i_t(phase) == 0.0);
+        }
+    };
+
+    SUBCASE("Single phase to ground on the present phase") {
+        for (DoubleComplex const z_f : {z_fault, DoubleComplex{0.0}}) {
+            DoubleComplex const y_f = z_f == 0.0 ? y_fault_solid : 1.0 / z_f;
+            DoubleComplex const i_f = vref / (zref_scaled + z_line + z_f);
+            ComplexValue<asymmetric_t> const i_abc{i_f, 0.0, 0.0};
+            ComplexValue<asymmetric_t> const u0{vref - i_f * zref_scaled, u_source(1), u_source(2)};
+            ComplexValue<asymmetric_t> const u1{u0(0) - i_f * z_line, 0.0, 0.0};
+            auto const sc_output_ref = create_math_sc_output<asymmetric_t>(u0, u1, i_abc);
+
+            auto const sc_input = create_sc_test_input(single_phase_to_ground, FaultPhase::a, y_f, vref,
+                                                       DenseGroupedIdxVector{from_sparse, {0, 0, 1}});
+            auto const output = solver.run_short_circuit(y_bus, sc_input);
+            assert_sc_output<asymmetric_t>(output, sc_output_ref);
+            check_absent_phases_zero(output);
+            CHECK(output.fault[0].i_fault(1) == 0.0);
+            CHECK(output.fault[0].i_fault(2) == 0.0);
+        }
+    }
+
+    SUBCASE("Three phase fault at a bus with all phases") {
+        // no current flows into the single phase branch, because bus1 has no source
+        ComplexValue<asymmetric_t> const i_abc = u_source / (zref_scaled + z_fault);
+        ComplexValue<asymmetric_t> const u0 = i_abc * z_fault;
+        ShortCircuitSolverOutput<asymmetric_t> sc_output_ref;
+        sc_output_ref.u_bus = {u0, ComplexValue<asymmetric_t>{u0(0), 0.0, 0.0}};
+        sc_output_ref.fault = {{i_abc}};
+        sc_output_ref.branch = {BranchShortCircuitSolverOutput<asymmetric_t>{}};
+        sc_output_ref.source = {{i_abc}};
+
+        auto const sc_input = create_sc_test_input(three_phase, FaultPhase::abc, 1.0 / z_fault, vref,
+                                                   DenseGroupedIdxVector{from_sparse, {0, 1, 1}});
+        auto const output = solver.run_short_circuit(y_bus, sc_input);
+        assert_sc_output<asymmetric_t>(output, sc_output_ref);
+        check_absent_phases_zero(output);
+    }
+
+    SUBCASE("Short circuit on an absent phase") {
+        DenseGroupedIdxVector const fault_buses{from_sparse, {0, 0, 1}};
+        auto const fault_on_b =
+            create_sc_test_input(single_phase_to_ground, FaultPhase::b, 1.0 / z_fault, vref, fault_buses);
+        CHECK_THROWS_AS(solver.run_short_circuit(y_bus, fault_on_b), InvalidShortCircuitPhases);
+        CHECK_THROWS_WITH(solver.run_short_circuit(y_bus, fault_on_b),
+                          doctest::Contains("phases (b) are not all present at the faulted node (node phases: a)"));
+
+        auto const three_phase_fault =
+            create_sc_test_input(three_phase, FaultPhase::abc, 1.0 / z_fault, vref, fault_buses);
+        CHECK_THROWS_AS(solver.run_short_circuit(y_bus, three_phase_fault), InvalidShortCircuitPhases);
+
+        auto const two_phase_fault = create_sc_test_input(two_phase, FaultPhase::ab, y_fault_solid, vref, fault_buses);
+        CHECK_THROWS_AS(solver.run_short_circuit(y_bus, two_phase_fault), InvalidShortCircuitPhases);
+    }
+}
+
 } // namespace power_grid_model::math_solver

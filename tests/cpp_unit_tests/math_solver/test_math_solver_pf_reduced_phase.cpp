@@ -20,13 +20,16 @@
 #include <power_grid_model/common/three_phase_tensor.hpp>
 #include <power_grid_model/math_solver/iterative_current_pf_solver.hpp>
 #include <power_grid_model/math_solver/linear_pf_solver.hpp>
+#include <power_grid_model/math_solver/math_solver.hpp>
 #include <power_grid_model/math_solver/newton_raphson_pf_solver.hpp>
 #include <power_grid_model/math_solver/y_bus.hpp>
 
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <complex>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -136,11 +139,11 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
     grid.topo.sources_per_bus = {from_sparse, {0, 1, 1}};
     grid.topo.shunts_per_bus = {from_sparse, {0, 0, n_shunt}};
     grid.topo.load_gens_per_bus = {from_sparse, {0, n_load_per_bus, 2 * n_load_per_bus}};
-    grid.topo.load_gen_type = const_y_only ? std::vector<LoadGenType>{const_y, const_y}
-                                           : std::vector<LoadGenType>{const_pq, const_i, const_y,
-                                                                      const_pq, const_i, const_y};
+    grid.topo.load_gen_type = const_y_only
+                                  ? std::vector<LoadGenType>{const_y, const_y}
+                                  : std::vector<LoadGenType>{const_pq, const_i, const_y, const_pq, const_i, const_y};
     grid.topo.voltage_regulators_per_load_gen = {from_sparse,
-                                                  IdxVector(static_cast<size_t>(2 * n_load_per_bus + 1), 0)};
+                                                 IdxVector(static_cast<size_t>(2 * n_load_per_bus + 1), 0)};
     grid.topo.has_reduced_phase = true;
     grid.topo.bus_phase_mask = {phase_mask_abc, rpc.mask1};
 
@@ -205,12 +208,12 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
         expected.shunt = {{.s = rpc.u1 * conj(i_shunt), .i = i_shunt}};
     }
     for (Idx load = 0; load != n_load_per_bus; ++load) {
-        expected.load_gen.push_back({.s = s_load0 / static_cast<double>(n_load_per_bus),
-                                     .i = i_load0 / static_cast<double>(n_load_per_bus)});
+        expected.load_gen.push_back(
+            {.s = s_load0 / static_cast<double>(n_load_per_bus), .i = i_load0 / static_cast<double>(n_load_per_bus)});
     }
     for (Idx load = 0; load != n_load_per_bus; ++load) {
-        expected.load_gen.push_back({.s = s_load1 / static_cast<double>(n_load_per_bus),
-                                     .i = i_load1 / static_cast<double>(n_load_per_bus)});
+        expected.load_gen.push_back(
+            {.s = s_load1 / static_cast<double>(n_load_per_bus), .i = i_load1 / static_cast<double>(n_load_per_bus)});
     }
     return grid;
 }
@@ -477,8 +480,8 @@ TEST_CASE("Test math solver - PF with absent phases rejects voltage regulation")
         return PowerFlowInput<asymmetric_t>{
             .source = {1.0},
             .s_injection = {Value{{0.1, 0.0}, 0.0, 0.0}},
-            .voltage_regulator = {{.status = regulator_status, .u_ref = 1.0, .q_min = nan, .q_max = nan,
-                                   .generator_id = 42}},
+            .voltage_regulator =
+                {{.status = regulator_status, .u_ref = 1.0, .q_min = nan, .q_max = nan, .generator_id = 42}},
             .load_gen_status = {1}};
     };
 
@@ -496,6 +499,68 @@ TEST_CASE("Test math solver - PF with absent phases rejects voltage regulation")
         REQUIRE_NOTHROW(output = solver.run_power_flow(y_bus, input(0), 1e-12, 20, cache_run, log));
         CHECK(output.u[1](1) == 0.0);
         CHECK(output.u[1](2) == 0.0);
+    }
+}
+
+TEST_CASE("Test math solver - reduced phase guards") {
+    // source -- bus0 (abc) --a-- bus1 (a)
+    ReducedPhaseGrid const grid = make_grid(single_phase_case(), false);
+    auto const topo_ptr = std::make_shared<MathModelTopology const>(grid.topo);
+    NoLogger log;
+    constexpr bool cache_run = false;
+
+    SUBCASE("Asymmetric power flow is supported") {
+        YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        for (auto const method : {CalculationMethod::newton_raphson, CalculationMethod::iterative_current}) {
+            SolverOutput<asymmetric_t> output;
+            REQUIRE_NOTHROW(output =
+                                solver.run_power_flow(grid.input, err_tol, max_iter, cache_run, log, method, y_bus));
+            check_reduced_phase_grid(grid, output);
+        }
+    }
+
+    SUBCASE("State estimation is not supported") {
+        YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        StateEstimationInput<asymmetric_t> const se_input{};
+        for (auto const method : {CalculationMethod::default_method, CalculationMethod::iterative_linear,
+                                  CalculationMethod::newton_raphson}) {
+            CHECK_THROWS_AS(solver.run_state_estimation(se_input, err_tol, max_iter, log, method, y_bus),
+                            ReducedPhaseNotSupported);
+        }
+    }
+
+    SUBCASE("Symmetric calculations are not supported") {
+        DoubleComplex const y_branch{2.0, -4.0};
+        MathModelParam<symmetric_t> param_sym;
+        param_sym.branch_param = {{y_branch, -y_branch, -y_branch, y_branch}};
+        param_sym.source_param = {{.y1 = y_ref, .y0 = y_ref}};
+        YBus<symmetric_t> const y_bus{*topo_ptr, param_sym};
+        MathSolver<symmetric_t> solver{topo_ptr};
+
+        PowerFlowInput<symmetric_t> const pf_input{.source = {u_ref},
+                                                   .s_injection = ComplexValueVector<symmetric_t>(6, -0.1),
+                                                   .voltage_regulator = {},
+                                                   .load_gen_status = {},
+                                                   .initialization = CalculationInitialization::default_initialization};
+        CHECK_THROWS_AS(solver.run_power_flow(pf_input, err_tol, max_iter, cache_run, log,
+                                              CalculationMethod::newton_raphson, y_bus),
+                        ReducedPhaseNotSupported);
+
+        StateEstimationInput<symmetric_t> const se_input{};
+        CHECK_THROWS_AS(
+            solver.run_state_estimation(se_input, err_tol, max_iter, log, CalculationMethod::iterative_linear, y_bus),
+            ReducedPhaseNotSupported);
+
+        ShortCircuitInput sc_input;
+        sc_input.fault_buses = {from_sparse, {0, 0, 1}};
+        sc_input.source = {u_ref};
+        sc_input.faults = {{.y_fault = DoubleComplex{1.0, -1.0},
+                            .fault_type = FaultType::three_phase,
+                            .fault_phase = FaultPhase::abc}};
+        CHECK_THROWS_AS(solver.run_short_circuit(sc_input, log, CalculationMethod::iec60909, y_bus),
+                        ReducedPhaseNotSupported);
     }
 }
 

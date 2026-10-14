@@ -290,6 +290,15 @@ TEST_CASE("Exceptions") {
               "The short circuit phases (0) do not match the short circuit type (2)\n");
         CHECK(std::string{InvalidShortCircuitPhases{FaultType::two_phase_to_ground, FaultPhase::abc}.what()} ==
               "The short circuit phases (0) do not match the short circuit type (3)\n");
+        auto const msg = std::string{InvalidShortCircuitPhases{"abc", "a"}.what()};
+        CHECK(msg == "The short circuit phases (abc) are not all present at the faulted node (node phases: a); this "
+                     "short circuit type cannot be applied there\n");
+        CHECK(msg.find("short circuit type") != std::string::npos); // mapped like the other constructor in Python
+    }
+    SUBCASE("ReducedPhaseNotSupported") {
+        auto const msg = std::string{ReducedPhaseNotSupported{"State estimation"}.what()};
+        CHECK(msg == "State estimation is not supported in a network with one- or two-phase nodes.\n");
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
     }
     SUBCASE("InvalidShortCircuitPhaseOrType") {
         CHECK(std::string{InvalidShortCircuitPhaseOrType{}.what()} ==
