@@ -386,6 +386,7 @@ template <symmetry_tag sym> class ShortCircuitSolver {
             }
         }
 
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u_bus);
         output.branch = y_bus.template calculate_branch_flow<BranchShortCircuitSolverOutput<sym>>(output.u_bus);
         output.shunt = y_bus.template calculate_shunt_flow<ApplianceShortCircuitSolverOutput<sym>>(output.u_bus);
     }

@@ -339,6 +339,7 @@ class Topology {
             auto const [i, j] = branch_node_idx;
             auto const [i_status, j_status] = branch_connected;
             assert(incidence.coupling == PhaseCoupling::winding || incidence.from == incidence.to);
+            assert(!incidence.from.none() && !incidence.to.none());
             if (i_status != 0 && j_status != 0 && i != j) {
                 edges.emplace_back(narrow_cast<GraphIdx>(i), narrow_cast<GraphIdx>(j));
                 arcs.push_back({.feeding = incidence.from, .fed = incidence.to, .coupling = incidence.coupling});

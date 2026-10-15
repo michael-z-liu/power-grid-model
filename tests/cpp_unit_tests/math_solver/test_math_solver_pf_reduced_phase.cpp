@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <vector>
 
 namespace power_grid_model::math_solver {
@@ -289,6 +290,89 @@ ReducedPhaseCase two_phase_case() {
             .u1 = {0.95 * std::polar(1.0, -4.0 * deg), 0.96 * std::polar(1.0, -125.0 * deg), 0.0}};
 }
 
+// meshed network with a single phase bus that is eliminated first, so that the LU factorization has a fill-in
+// between two three-phase buses:
+//   bus0 (a) --a-- bus1 (abc) --abc-- bus3 (abc, source)
+//   bus0 (a) --a-- bus2 (abc) --abc-- bus3
+// - loads: bus0 const_pq, const_i, const_y (with junk on the absent phases), bus1 const_pq, bus2 const_pq generator;
+//   all const_y for the linear solver
+// - with_regulator: the generator at bus2 regulates the voltage
+MathModelTopology make_meshed_topo(bool const_y_only, bool with_regulator) {
+    using enum LoadGenType;
+    MathModelTopology topo;
+    topo.slack_bus = 3;
+    topo.is_radial = false;
+    topo.phase_shift = {0.0, 0.0, 0.0, 0.0};
+    topo.branch_bus_idx = {{0, 1}, {0, 2}, {1, 3}, {2, 3}};
+    topo.fill_in = {{1, 2}};
+    topo.sources_per_bus = {from_sparse, {0, 0, 0, 0, 1}};
+    topo.shunts_per_bus = {from_sparse, {0, 0, 0, 0, 0}};
+    topo.load_gens_per_bus = {from_sparse, {0, 3, 4, 5, 5}};
+    topo.load_gen_type = const_y_only ? std::vector<LoadGenType>(5, const_y)
+                                      : std::vector<LoadGenType>{const_pq, const_i, const_y, const_pq, const_pq};
+    topo.voltage_regulators_per_load_gen = {from_sparse,
+                                            with_regulator ? IdxVector{0, 0, 0, 0, 0, 1} : IdxVector{0, 0, 0, 0, 0, 0}};
+    topo.has_reduced_phase = true;
+    topo.bus_phase_mask = {phase_mask_a, phase_mask_abc, phase_mask_abc, phase_mask_abc};
+    return topo;
+}
+
+MathModelParam<asymmetric_t> make_meshed_param() {
+    MathModelParam<asymmetric_t> param;
+    Tensor const y_a = single_phase_branch({3.0, -6.0});
+    Tensor const y_abc{DoubleComplex{4.0, -9.0}, DoubleComplex{-0.5, 1.0}};
+    param.branch_param = {
+        {y_a, -y_a, -y_a, y_a}, {y_a, -y_a, -y_a, y_a}, {y_abc, -y_abc, -y_abc, y_abc}, {y_abc, -y_abc, -y_abc, y_abc}};
+    param.source_param = {SourceCalcParam{.y1 = y_ref, .y0 = DoubleComplex{5.0, -30.0}}};
+    return param;
+}
+
+PowerFlowInput<asymmetric_t> make_meshed_input(std::optional<double> q_max) {
+    PowerFlowInput<asymmetric_t> input;
+    input.source = {u_ref};
+    // the loads of bus0 have junk on the absent phases b and c, including negative values
+    input.s_injection = {Value{{-0.1, -0.05}, {-1.0, 0.5}, {0.7, -0.3}},
+                         Value{{-0.05, -0.02}, {-0.3, 0.2}, {0.2, -0.1}},
+                         Value{{-0.05, -0.01}, {-0.3, -0.2}, {-0.2, -0.1}},
+                         Value{{-0.2, -0.1}, {-0.15, -0.05}, {-0.1, -0.02}}, Value{{0.1, 0.0}, {0.1, 0.0}, {0.1, 0.0}}};
+    input.load_gen_status = {1, 1, 1, 1, 1};
+    if (q_max.has_value()) {
+        input.voltage_regulator = {
+            {.status = 1, .u_ref = 1.06, .q_min = -q_max.value(), .q_max = q_max.value(), .generator_id = 1}};
+    }
+    return input;
+}
+
+// the power flow equation on every present phase: the specified (load_gen and source) injections equal the bus
+// injection, which equals the sum of the flows into the branches
+void check_meshed_power_balance(SolverOutput<asymmetric_t> const& output, MathModelTopology const& topo) {
+    std::vector<Value> branch_flow(static_cast<size_t>(topo.n_bus()), Value{});
+    for (auto const& [branch, buses] : std::views::zip(output.branch, topo.branch_bus_idx)) {
+        branch_flow[static_cast<size_t>(buses[0])] += branch.s_f;
+        branch_flow[static_cast<size_t>(buses[1])] += branch.s_t;
+    }
+    for (auto const& [bus, sources, load_gens] :
+         enumerated_zip_sequence(topo.sources_per_bus, topo.load_gens_per_bus)) {
+        CAPTURE(bus);
+        Value specified{};
+        for (Idx const source : sources) {
+            specified += output.source[source].s;
+        }
+        for (Idx const load_gen : load_gens) {
+            specified += output.load_gen[load_gen].s;
+        }
+        PhaseMask const phases = topo.bus_phase(bus);
+        for (Idx phase = 0; phase != 3; ++phase) {
+            if (phases.has(phase)) {
+                CAPTURE(phase);
+                CHECK(cabs(specified(phase) - output.bus_injection[bus](phase)) < result_tol);
+                CHECK(cabs(branch_flow[static_cast<size_t>(bus)](phase) - output.bus_injection[bus](phase)) <
+                      result_tol);
+            }
+        }
+    }
+}
+
 void check_solver_output_exact(SolverOutput<asymmetric_t> const& output, SolverOutput<asymmetric_t> const& ref) {
     auto const equal = [](Value const& x, Value const& y) { return (x == y).all(); };
     REQUIRE(output.u.size() == ref.u.size());
@@ -455,6 +539,56 @@ TEST_CASE_TEMPLATE("Test math solver - PF with all phases flagged as reduced is 
         auto const output_ref = run_case<SolverCaseType>(topo_ref, grid.param(), input);
         auto const output_flagged = run_case<SolverCaseType>(topo_flagged, grid.param(), input);
         check_solver_output_exact(output_flagged, output_ref);
+    }
+}
+
+TEST_CASE_TEMPLATE("Test math solver - PF with absent phases in a meshed network with fill-in", SolverCaseType,
+                   NewtonRaphsonLinearStart, NewtonRaphsonFlatStart, NewtonRaphsonAverageSourceStart, IterativeCurrent,
+                   Linear) {
+    constexpr bool const_y_only = !SolverCaseType::Solver::is_iterative;
+    MathModelTopology const topo = make_meshed_topo(const_y_only, false);
+    MathModelParam<asymmetric_t> const param = make_meshed_param();
+    PowerFlowInput<asymmetric_t> const input = make_meshed_input(std::nullopt);
+
+    auto const output = run_case<SolverCaseType>(topo, param, input);
+    check_absent_slots_zero(output, topo);
+    check_meshed_power_balance(output, topo);
+    for (Idx phase = 1; phase != 3; ++phase) {
+        for (Idx branch = 0; branch != 2; ++branch) {
+            CHECK(output.branch[branch].s_f(phase) == 0.0);
+            CHECK(output.branch[branch].i_f(phase) == 0.0);
+        }
+    }
+
+    // every solver and start agrees with the Newton-Raphson linear start; for the linear solver all loads are const_y,
+    // for which the linear solver is exact
+    auto const reference = run_case<NewtonRaphsonLinearStart>(topo, param, input);
+    assert_output(output, reference, false, result_tol);
+}
+
+TEST_CASE("Test math solver - NR with absent phases and Q limits on a regulated bus") {
+    // the regulated generator is at the three-phase bus2 of the meshed network
+    MathModelTopology const topo = make_meshed_topo(false, true);
+    MathModelParam<asymmetric_t> const param = make_meshed_param();
+
+    SUBCASE("Limit not hit") {
+        auto const output = run_case<NewtonRaphsonLinearStart>(topo, param, make_meshed_input(100.0));
+        for (Idx phase = 0; phase != 3; ++phase) {
+            CHECK(cabs(output.u[2](phase)) == doctest::Approx(1.06).epsilon(result_tol));
+        }
+        CHECK(output.bus[2].q_limit_violated == LimitViolation::none);
+        check_absent_slots_zero(output, topo);
+        check_meshed_power_balance(output, topo);
+    }
+
+    SUBCASE("Limit hit, partial rebuild") {
+        auto const output = run_case<NewtonRaphsonLinearStart>(topo, param, make_meshed_input(0.01));
+        CHECK(output.bus[2].q_limit_violated != LimitViolation::none);
+        for (Idx phase = 0; phase != 3; ++phase) {
+            CHECK(cabs(output.u[2](phase)) < 1.06);
+        }
+        check_absent_slots_zero(output, topo);
+        check_meshed_power_balance(output, topo);
     }
 }
 

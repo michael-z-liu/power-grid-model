@@ -367,6 +367,9 @@ template <symmetry_tag sym> class YBus {
     constexpr MathModelTopology const& math_topology() const { return math_topology_.get(); }
     constexpr MathModelParam<sym> const& math_model_param() const { return math_model_param_; }
 
+    // in a math model with one- or two-phase buses the rows and columns of absent slots are masked and their diagonal
+    // is one (see update_admittance_entries); consumers that need the physical admittance (future state estimation)
+    // must mask these slots
     constexpr ComplexTensorVector<sym> const& admittance() const { return admittance_; }
     IdxVector const& bus_entry() const { return y_bus_structure().bus_entry; }
     IdxVector const& lu_diag() const { return y_bus_structure().diag_lu; }

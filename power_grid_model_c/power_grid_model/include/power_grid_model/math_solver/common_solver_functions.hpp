@@ -473,6 +473,9 @@ inline void calculate_pf_result(YBus<sym> const& y_bus, PowerFlowInput<sym> cons
 
     auto const& voltage_regulators_per_load_gen = y_bus.math_topology().voltage_regulators_per_load_gen;
 
+    // the solvers keep absent phase slots at zero; enforce it exactly for every result derived from u
+    mask_absent_phase_values<sym>(y_bus.math_topology(), output.u);
+
     // call y bus
     output.branch = y_bus.template calculate_branch_flow<BranchSolverOutput<sym>>(output.u);
     output.shunt = y_bus.template calculate_shunt_flow<ApplianceSolverOutput<sym>>(output.u);
@@ -483,6 +486,7 @@ inline void calculate_pf_result(YBus<sym> const& y_bus, PowerFlowInput<sym> cons
     output.voltage_regulator.resize(voltage_regulators_per_load_gen.element_size());
     output.bus_injection.resize(sources_per_bus.size());
     output.bus_injection = y_bus.calculate_injection(output.u);
+    mask_absent_phase_values<sym>(y_bus.math_topology(), output.bus_injection);
 
     std::map<Idx, Idx> loadgen_to_regulator; // save mapping from generator to its regulator
     for (auto const& [load_gen, regulators] : enumerated_zip_sequence(voltage_regulators_per_load_gen)) {
