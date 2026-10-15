@@ -1,0 +1,9 @@
+{
+  "calculation_method": [
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-07,
+  "atol": 1e-07,
+  "experimental_features": "enabled"
+}

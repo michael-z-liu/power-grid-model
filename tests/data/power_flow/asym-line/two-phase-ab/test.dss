@@ -1,0 +1,11 @@
+Clear
+Set DefaultBaseFrequency=50
+New Circuit.c phases=3 basekv=10.0 pu=1.0 angle=0 bus1=n1 Z1=[0.09950371902099893, 0.9950371902099893] Z0=[0.09950371902099893, 0.9950371902099893]
+New Line.l101 phases=2 bus1=n1.1.2 bus2=n2.1.2 length=1 units=km rmatrix=[0.7485752307692307 | 0.14507953846153845 0.742530923076923] xmatrix=[1.0842318461538463 | 0.34952630769230764 1.1129173846153848] cmatrix=[26.999999999999996 | -4.5 27.599999999999998]
+New Load.ld301_a bus1=n2.1 phases=1 conn=wye model=2 kV=5.773502691896257 kW=150.0 kvar=40.0 vminpu=0.1 vmaxpu=2
+New Load.ld301_b bus1=n2.2 phases=1 conn=wye model=2 kV=5.773502691896257 kW=100.0 kvar=30.0 vminpu=0.1 vmaxpu=2
+Set VoltageBases=[10.0]
+CalcVoltageBases
+Set Tolerance=1e-12
+Set MaxIterations=200
+Solve
