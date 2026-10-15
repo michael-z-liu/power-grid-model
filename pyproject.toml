@@ -193,6 +193,8 @@ combine-as-imports = true
 # Ignore private member access: _model_ptr, _all_component_count...
 "src/power_grid_model/_core/*.py" = ["SLF001"]
 "tests/unit/test_error_handling.py" = ["SLF001"]
+# Standalone generator scripts of validation data: they use the experimental private API and plain tolerances
+"tests/data/generators/*.py" = ["SLF001", "PLR2004"]
 
 [tool.mypy]
 follow_imports = "silent"
