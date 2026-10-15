@@ -19,6 +19,7 @@ from power_grid_model.errors import (
     AutomaticTapInputError,
     ConflictID,
     ConflictVoltage,
+    DanglingConductor,
     ExperimentalFeature,
     IDNotFound,
     IDWrongType,
@@ -28,10 +29,12 @@ from power_grid_model.errors import (
     InvalidTransformerClock,
     IterationDiverge,
     MaxIterationReached,
+    MissingPhaseForWinding,
     NotObservableError,
     PowerGridBatchError,
     PowerGridError,
     PowerGridSerializationError,
+    ReducedPhaseNotSupported,
     SparseMatrixError,
     UnsupportedLoadGenTypeForVoltageRegulator,
     UnsupportedRegulatorCombinationError,
@@ -88,6 +91,9 @@ KNOWN_EXCEPTIONS: dict[str, type[BaseException] | None] = {
         UnsupportedRegulatorCombinationError,
         UnsupportedVoltageRegulatorSourceCombinationError,
         ExperimentalFeature,
+        ReducedPhaseNotSupported,
+        DanglingConductor,
+        MissingPhaseForWinding,
     )
 }
 KNOWN_EXCEPTIONS["Failed"] = _Failed

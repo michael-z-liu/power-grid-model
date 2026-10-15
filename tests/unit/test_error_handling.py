@@ -8,6 +8,7 @@ import pytest
 
 from power_grid_model import PowerGridModel
 from power_grid_model._core.dataset_definitions import AttributeType as AT, ComponentType as CT, DatasetType
+from power_grid_model._core.error_handling import _interpret_error
 from power_grid_model._core.power_grid_meta import initialize_array
 from power_grid_model.enum import (
     AngleMeasurementType,
@@ -21,6 +22,7 @@ from power_grid_model.errors import (
     ConflictID,
     ConflictingAngleMeasurementType,
     ConflictVoltage,
+    DanglingConductor,
     IDNotFound,
     IDWrongType,
     InvalidBranch,
@@ -31,7 +33,10 @@ from power_grid_model.errors import (
     InvalidTransformerClock,
     IterationDiverge,
     MissingCaseForEnumError,
+    MissingPhaseForWinding,
     NotObservableError,
+    PowerGridError,
+    ReducedPhaseNotSupported,
 )
 
 from .utils import PowerGridModelWithExt
@@ -510,3 +515,52 @@ def test_deprecated_invalid_branch_error():
 def test_deprecated_invalid_branch3_error():
     with pytest.deprecated_call():
         InvalidBranch3()
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_type"),
+    [
+        pytest.param(
+            "State estimation is not supported in a network with one- or two-phase nodes.\n",
+            ReducedPhaseNotSupported,
+            id="reduced_phase_state_estimation",
+        ),
+        pytest.param(
+            "Symmetric power flow is not supported in a network with one- or two-phase nodes.\n",
+            ReducedPhaseNotSupported,
+            id="reduced_phase_symmetric_power_flow",
+        ),
+        pytest.param(
+            "Voltage regulation at a node without all phases is not supported in a network with one- or two-phase "
+            "nodes.\n",
+            ReducedPhaseNotSupported,
+            id="reduced_phase_voltage_regulation",
+        ),
+        pytest.param(
+            "Conductors of branch #2 on phases (bc) are not present at any of its connected nodes (from node phases: "
+            "a, to node phases: open). Every conductor must be present at the nodes it connects.\n",
+            DanglingConductor,
+            id="dangling_conductor_index",
+        ),
+        pytest.param(
+            "Conductors of asym_line with ID 42 on phases (b) are not present at any of its connected nodes (from node "
+            "phases: a, to node phases: open). Every conductor must be present at the nodes it connects.\n",
+            DanglingConductor,
+            id="dangling_conductor_id",
+        ),
+        pytest.param(
+            "Winding of branch #3 has phases (abc) that are not all present at its node (node phases: a). A connected "
+            "winding must have all of its phases present.\n",
+            MissingPhaseForWinding,
+            id="missing_phase_for_winding_index",
+        ),
+        pytest.param(
+            "Winding of branch3 with ID 7 has phases (abc) that are not all present at its node (node phases: a). A "
+            "connected winding must have all of its phases present.\n",
+            MissingPhaseForWinding,
+            id="missing_phase_for_winding_id",
+        ),
+    ],
+)
+def test_interpret_reduced_phase_errors(message: str, expected_type: type[PowerGridError]):
+    assert type(_interpret_error(message)) is expected_type

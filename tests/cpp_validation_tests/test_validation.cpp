@@ -176,6 +176,12 @@ class Subcase {
              std::regex{"Nodes with a source and a voltage regulated load/generator are not supported when both are "
                         "enabled. Found at node with id (-?\\d+)"}},
             {"ExperimentalFeature", std::regex{" is an experimental feature"}}, // multiple different flavors
+            {"ReducedPhaseNotSupported",
+             std::regex{" is not supported in a network with one- or two-phase nodes"}}, // multiple different flavors
+            {"DanglingConductor",
+             std::regex{"Conductors of .+ on phases \\([^)]*\\) are not present at any of its connected nodes"}},
+            {"MissingPhaseForWinding",
+             std::regex{"Winding of .+ has phases \\([^)]*\\) that are not all present at its node"}},
             {"PowerGridDatasetError", std::regex{"Dataset error: "}},           // multiple different flavors
             {"PowerGridUnreachableHit",
              std::regex{"Unreachable code hit when executing "}}, // multiple different flavors

@@ -230,8 +230,15 @@ Taken in M2:
   `DanglingConductor`.
 * **D5. Absent-phase output** is 0 everywhere (see above), not the NaN-for-voltages hybrid that was proposed.
 * **D6. One exception class.** `ReducedPhaseNotSupported` is used for state estimation, symmetric calculations and
-  voltage control on reduced-phase buses. M4 reuses it instead of adding `SymmetricCalculationNotSupported`; the
-  Python error mapping is added in M4.
+  voltage control on reduced-phase buses. M4 reuses it instead of adding `SymmetricCalculationNotSupported`. M4 also
+  adds the Python error mapping (`power_grid_model.errors`) for `ReducedPhaseNotSupported`, `DanglingConductor` and
+  `MissingPhaseForWinding`.
+
+Taken in M4:
+
+* **D7. Order of M3 and M4.** M4 lands before M3, so that reduced-phase models are never routed to the symmetric
+  solver. A model with reduced-phase components always runs the asymmetric short circuit, also when every fault is
+  `three_phase` and when there is no fault at all.
 
 Still open, for M3 and M4:
 
@@ -241,8 +248,6 @@ Still open, for M3 and M4:
   silently.
 * **D4. Shunt on a reduced-phase node.** M2 keeps the present-phase block of the shunt through Y-bus masking (its
   absent legs drop out). Recommendation: an M3 error until an asymmetric shunt exists, consistent with D3.
-* **D7. Order of M3 and M4.** Once M3 makes reduced-phase models possible, a short circuit where every fault is
-  three-phase still goes to the symmetric solver and hits the M2 backstop. Land M4 together with M3, or before it.
 * **D8. Identity rows in the Y-bus.** `YBus::admittance()` contains the identity rows of absent slots. Future
   state-estimation work will need the unmasked physics; document this or expose the mask when that work starts.
 
@@ -390,18 +395,25 @@ assume three phases. A source on a reduced-phase node raises an error.
 
 ## Calculation behaviour
 
-* **Symmetric power flow and state estimation** throw `ReducedPhaseNotSupported` (decision D6) if the model
-  contains any of:
-  * an `asym_line` with `phases != abc`;
-  * a `single_phase_transformer`;
-  * (optionally) a delta `asym_load` or `asym_gen`.
+Implemented in M4 (`<core>/main_model_impl.hpp`):
 
-  `phases` is input-only, so the check is a flag cached at model construction. Add it next to the existing
-  method checks in `<core>/main_model_impl.hpp`. `MathSolver<symmetric_t>` already throws as a backstop (M2), and
-  `AsymLine::sym_calc_param()` can throw as well.
-* **Short circuit.** Change the symmetry selection at `main_model_impl.hpp:362-368` to
-  `is_three_phase && !has_reduced_phase_components`. A three-phase fault on a three-phase node of a mixed network
-  then runs through the asymmetric solver, which already supports `three_phase`.
+* **Flag.** `has_reduced_phase_components` is set at model construction when any branch reports a phase incidence
+  other than abc → abc (`Branch::phase_incidence()`). That covers an `asym_line` with `phases != abc` (M3) and, once
+  it exists, a `single_phase_transformer` (M5), without a per-type list. Delta loads (M7) would need an extra term.
+  `phases` is input-only, so the flag never changes after construction.
+* **Disconnected components count.** The flag looks at the input, not at the derived topology, so a reduced-phase
+  line that is switched off (or a whole de-energised reduced-phase feeder) still marks the model. This is
+  deterministic and independent of status updates in a batch.
+* **State estimation** throws `ReducedPhaseNotSupported` (decision D6) for both symmetries and all methods.
+* **Symmetric power flow** throws `ReducedPhaseNotSupported`.
+* **Short circuit.** The symmetry selection is `is_three_phase && !has_reduced_phase_components`. A three-phase fault
+  on a three-phase node of a mixed network runs through the asymmetric solver, which already supports
+  `three_phase`. This also covers a short-circuit calculation without faults, which used to go to the symmetric
+  solver.
+* **Batch.** The check runs in `calculate()`, so it also runs in the batch cache run and is reported as one regular
+  error, not as a batch error per scenario.
+* **Backstops.** `MathSolver<symmetric_t>` (M2) and `AsymLine::sym_calc_param()` (M3) throw as well; they cannot be
+  reached while the model-level check is in place.
 
 ## Short-circuit specifics
 
