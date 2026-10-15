@@ -666,6 +666,10 @@ struct ComponentConnections {
     DoubleVector branch_phase_shift;
     // one entry per branch_connected entry; empty means all branches are abc -> abc, per phase
     std::vector<BranchPhaseIncidence> branch_phase_incidence;
+    // IDs of the branches and 3-way branches, only filled together with branch_phase_incidence; used in the error
+    // messages of the phase validation, which use the index if they are empty
+    std::vector<ID> branch_id;
+    std::vector<ID> branch3_id;
     // 3-way branch, phase shift = phase_node_x - phase_internal_node
     std::vector<std::array<double, 3>> branch3_phase_shift;
     IntSVector source_connected;

@@ -48,16 +48,20 @@ constexpr void apply_registration(ComponentContainer const& components, std::vec
 
 // the incidence vector is only filled if at least one branch is not abc -> abc, per phase
 // empty means that all branches are abc -> abc, per phase
+// the branch IDs are registered together with the incidence, for the error messages of the phase validation
 template <std::derived_from<Edge> Component, class ComponentContainer>
     requires common::component_container_c<ComponentContainer, Component>
-constexpr void register_branch_phase_incidence(ComponentContainer const& components,
-                                               std::vector<BranchPhaseIncidence>& target) {
+constexpr void register_branch_phase_incidence(ComponentContainer const& components, ComponentConnections& comp_conn) {
     if (std::ranges::all_of(components.template citer<Component>(),
                             [](Edge const& edge) { return edge.phase_incidence().all_phases(); })) {
-        target.clear(); // fast path: nothing allocated
+        // fast path: nothing allocated
+        comp_conn.branch_phase_incidence.clear();
+        comp_conn.branch_id.clear();
         return;
     }
-    apply_registration<Component>(components, target, [](Edge const& edge) { return edge.phase_incidence(); });
+    apply_registration<Component>(components, comp_conn.branch_phase_incidence,
+                                  [](Edge const& edge) { return edge.phase_incidence(); });
+    apply_registration<Component>(components, comp_conn.branch_id, [](Edge const& edge) { return edge.id(); });
 }
 
 // TODO(mgovers): cleanup v2: remove use_legacy_topology path
@@ -279,7 +283,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Edge>(components, comp_conn.branch_phase_shift,
                              [](Edge const& edge) { return edge.phase_shift(); });
-    register_branch_phase_incidence<Edge>(components, comp_conn.branch_phase_incidence);
+    register_branch_phase_incidence<Edge>(components, comp_conn);
 }
 
 template <std::same_as<Branch3> Component, class ComponentContainer>
@@ -310,7 +314,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Component>(components, comp_conn.branch_phase_shift,
                                   [](Branch const& branch) { return branch.phase_shift(); });
-    register_branch_phase_incidence<Branch>(components, comp_conn.branch_phase_incidence);
+    register_branch_phase_incidence<Branch>(components, comp_conn);
 }
 
 // TODO(jguo): cleanup v2 node single link registration path
@@ -375,6 +379,10 @@ ComponentConnections construct_components_connections(typename ModelType::Compon
                 detail::register_connections_components<CompType>(components, comp_conn);
             }
         });
+    if (!comp_conn.branch_phase_incidence.empty()) {
+        detail::apply_registration<Branch3>(components, comp_conn.branch3_id,
+                                            [](Branch3 const& branch3) { return branch3.id(); });
+    }
     return comp_conn;
 }
 

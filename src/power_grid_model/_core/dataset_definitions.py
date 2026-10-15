@@ -166,6 +166,7 @@ class AttributeType(StrEnum, metaclass=_MetaEnum):
     p_specified = "p_specified"
     p_to = "p_to"
     pf = "pf"
+    phases = "phases"
     pk = "pk"
     pk_12 = "pk_12"
     pk_12_max = "pk_12_max"

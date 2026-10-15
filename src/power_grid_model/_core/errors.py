@@ -176,3 +176,7 @@ class DanglingConductor(PowerGridError):
 
 class MissingPhaseForWinding(PowerGridError):
     """A connected winding has phases that are not present at its node."""
+
+
+class InvalidPhaseConnection(PowerGridError):
+    """The phases of a reduced-phase component do not match its input values."""

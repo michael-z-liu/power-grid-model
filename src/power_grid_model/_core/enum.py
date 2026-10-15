@@ -323,6 +323,39 @@ class FaultPhase(IntEnum):
     """
 
 
+class PhaseConnection(IntEnum):
+    """The phases with a conductor of a reduced-phase (one- or two-phase) branch. Not provided means abc."""
+
+    abc = 0
+    """
+    All three phases have a conductor
+    """
+    a = 1
+    """
+    Only the first phase has a conductor
+    """
+    b = 2
+    """
+    Only the second phase has a conductor
+    """
+    c = 3
+    """
+    Only the third phase has a conductor
+    """
+    ab = 4
+    """
+    The first and second phase have a conductor
+    """
+    ac = 5
+    """
+    The first and third phase have a conductor
+    """
+    bc = 6
+    """
+    The second and third phase have a conductor
+    """
+
+
 class LoggerType(IntEnum):
     """Logger types for opt-in diagnostic output from calculations.
 

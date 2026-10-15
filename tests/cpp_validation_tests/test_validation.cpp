@@ -180,9 +180,10 @@ class Subcase {
              std::regex{" is not supported in a network with one- or two-phase nodes"}}, // multiple different flavors
             {"DanglingConductor",
              std::regex{"Conductors of .+ on phases \\([^)]*\\) are not present at any of its connected nodes"}},
+            {"InvalidPhaseConnection", std::regex{"Invalid phase connection for "}}, // multiple different flavors
             {"MissingPhaseForWinding",
              std::regex{"Winding of .+ has phases \\([^)]*\\) that are not all present at its node"}},
-            {"PowerGridDatasetError", std::regex{"Dataset error: "}},           // multiple different flavors
+            {"PowerGridDatasetError", std::regex{"Dataset error: "}}, // multiple different flavors
             {"PowerGridUnreachableHit",
              std::regex{"Unreachable code hit when executing "}}, // multiple different flavors
             {"PowerGridNotImplementedError",

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <vector>
 
 namespace power_grid_model::main_core {
 namespace {
@@ -80,6 +81,7 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
             CHECK(conn.branch_phase_shift.size() == 2);
         }
         CHECK(conn.branch_phase_incidence.empty());
+        CHECK(conn.branch_id.empty());
     }
 
     SUBCASE("Previously filled incidence is cleared when all branches are abc") {
@@ -89,8 +91,10 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
 
         ComponentConnections conn;
         conn.branch_phase_incidence.assign(3, three_phase_winding);
+        conn.branch_id.assign(3, ID{1});
         detail::register_connections_components<Branch>(components, conn);
         CHECK(conn.branch_phase_incidence.empty());
+        CHECK(conn.branch_id.empty());
     }
 
     SUBCASE("A reduced-phase branch fills the incidence vector") {
@@ -107,6 +111,8 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
         CHECK(conn.branch_phase_incidence[0] == BranchPhaseIncidence{});
         CHECK(conn.branch_phase_incidence[1] ==
               BranchPhaseIncidence{.from = phase_mask_a, .to = phase_mask_a, .coupling = PhaseCoupling::per_phase});
+        // the IDs are registered together with the incidence, for the error messages of the topology
+        CHECK(conn.branch_id == std::vector<ID>{3, 5});
     }
 
     SUBCASE("A reduced-phase branch fills the incidence vector on the legacy path with interleaved links") {
@@ -130,6 +136,9 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
 
         REQUIRE(conn.branch_connected.size() == 3);
         REQUIRE(conn.branch_phase_incidence.size() == conn.branch_connected.size());
+        REQUIRE(conn.branch_id.size() == conn.branch_connected.size());
+        CHECK(conn.branch_id[expected_idx] == 5);
+        CHECK(conn.branch_id[link_idx] == 4);
         REQUIRE(expected_idx < conn.branch_connected.size());
         CHECK(conn.branch_connected[expected_idx] == BranchConnected{1, 0});
         for (size_t idx = 0; idx < conn.branch_phase_incidence.size(); ++idx) {

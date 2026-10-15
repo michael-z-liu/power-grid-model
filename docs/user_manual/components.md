@@ -397,6 +397,7 @@ If the neutral values are not provided, the last row and column from the above m
 
 | name   | data type | unit       | description                       | required                     |  update  | valid values |
 |--------|-----------|------------|-----------------------------------|------------------------------|:--------:|:------------:|
+| `phases` | {py:class}`PhaseConnection <power_grid_model.enum.PhaseConnection>` | - | Phases with a conductor | &#10060; default `abc` | &#10060; | `abc`, `a`, `b`, `c`, `ab`, `ac`, `bc` |
 | `r_aa` | `double`  | ohm (Ω)    | Series serial resistance aa       | &#10004;                     | &#10060; |    `> 0`     |
 | `r_ba` | `double`  | ohm (Ω)    | Series serial resistance ba       | &#10004;                     | &#10060; |    `>= 0`    |
 | `r_bb` | `double`  | ohm (Ω)    | Series serial resistance bb       | &#10004;                     | &#10060; |    `> 0`     |
@@ -462,6 +463,35 @@ The table below provides guidance in providing valid input.
 | &#10004;      | &#10060; | &#10060; | &#10004; |                           |
 | &#10060;      | &#10004; | &#10060; | &#10060; | MultiFieldValidationError |
 | &#10060;      | &#10004; | &#10004; | &#10004; |                           |
+
+##### One- and two-phase lines
+
+```{warning}
+One- and two-phase lines are an experimental feature. A calculation on a model with an `asym_line` with `phases`
+other than `abc` requires experimental features to be enabled. The Python data validation
+(`validate_input_data`) does not support them yet and reports such lines as invalid.
+```
+
+With `phases` set to a single phase (`a`, `b` or `c`) or two phases (`ab`, `ac` or `bc`), the `asym_line` only has
+conductors on those phases. A single-wire earth return (SWER) line is a single-phase line whose self impedance
+includes the earth return.
+
+* Provide `r`, `x` and `c` values only for the present phases (and for the neutral, if any) and leave the values of
+  the absent phases empty. A neutral is present when `r_nn` or `x_nn` is provided; then the entries between the
+  neutral and the present phases are required as well. Every value between two present conductors is required
+  (a capacitance of 0 is allowed); a value that refers to an absent phase or a missing neutral is an error
+  (`InvalidPhaseConnection`).
+* `c0` and `c1` are only supported with `abc`; use the c matrix otherwise.
+* The phases of each node are derived from the lines connected to it. A conductor must be present at the nodes it
+  connects (`DanglingConductor`), and a transformer winding must have all of its phases present at its node
+  (`MissingPhaseForWinding`).
+* Symmetric calculations and state estimation are not supported for a model with one- or two-phase lines
+  (`ReducedPhaseNotSupported`). A short circuit is always calculated asymmetrically.
+* Loads and generators may not have power on a phase that is not present at their node, and shunts are not
+  supported at a node without all phases.
+* The output of an absent phase is 0.
+
+See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
 
 #### Electric Model
 

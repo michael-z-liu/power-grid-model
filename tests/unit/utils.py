@@ -25,6 +25,7 @@ from power_grid_model.errors import (
     IDWrongType,
     InvalidCalculationMethod,
     InvalidMeasuredObject,
+    InvalidPhaseConnection,
     InvalidRegulatedObject,
     InvalidTransformerClock,
     IterationDiverge,
@@ -94,6 +95,7 @@ KNOWN_EXCEPTIONS: dict[str, type[BaseException] | None] = {
         ReducedPhaseNotSupported,
         DanglingConductor,
         MissingPhaseForWinding,
+        InvalidPhaseConnection,
     )
 }
 KNOWN_EXCEPTIONS["Failed"] = _Failed

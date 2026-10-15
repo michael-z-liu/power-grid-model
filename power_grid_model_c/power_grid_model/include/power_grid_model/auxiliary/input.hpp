@@ -102,6 +102,7 @@ struct AsymLineInput {
     ID to_node{na_IntID};  // node IDs to which this branch is connected at both sides
     IntS from_status{na_IntS};  // whether the branch is connected at each side
     IntS to_status{na_IntS};  // whether the branch is connected at each side
+    PhaseConnection phases{static_cast<PhaseConnection>(na_IntS)};  // phases with a conductor; default abc
     double r_aa{nan};  // Lower triangle matrix values for R, X and C matrices
     double r_ba{nan};  // Lower triangle matrix values for R, X and C matrices
     double r_bb{nan};  // Lower triangle matrix values for R, X and C matrices

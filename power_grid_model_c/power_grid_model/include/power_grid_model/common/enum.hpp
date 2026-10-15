@@ -107,6 +107,9 @@ enum class FaultPhase : IntS {
     nan = na_IntS
 };
 
+// phases with a conductor of a reduced-phase branch; not provided (na) means abc
+enum class PhaseConnection : IntS { abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6 };
+
 enum class ShortCircuitVoltageScaling : IntS { minimum = 0, maximum = 1 };
 
 // Initialization of the calculation, only applicable if supported by the calculation type and method.

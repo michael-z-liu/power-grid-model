@@ -55,6 +55,7 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_from_node;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_to_node;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_from_status;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_to_status;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_phases;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_r_aa;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_r_ba;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_asym_line_r_bb;

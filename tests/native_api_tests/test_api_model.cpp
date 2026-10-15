@@ -1080,4 +1080,125 @@ TEST_CASE("API Model") {
     }
 }
 
+namespace {
+// node 1 (abc, source) --a-- node 2 (a); optionally with a three-phase fault at node 1
+auto reduced_phase_model_json(bool with_fault) {
+    using namespace std::string_literals;
+    std::string const fault = with_fault ? R"json(,
+    "fault": [
+      {"id": 6, "status": 1, "fault_type": 0, "fault_phase": 0, "fault_object": 1}
+    ])json"s
+                                         : ""s;
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 10000},
+      {"id": 2, "u_rated": 10000}
+    ],
+    "source": [
+      {"id": 3, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e8}
+    ],
+    "asym_line": [
+      {"id": 4, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "phases": 1,
+       "r_aa": 0.5, "x_aa": 0.4, "c_aa": 1e-8}
+    ],
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [1000, 0, 0], "q_specified": [0, 0, 0]}
+    ])json"s +
+           fault +
+           R"json(
+  }
+})json"s;
+}
+} // namespace
+
+TEST_CASE("API Model - reduced phase") {
+    using namespace std::string_literals;
+
+    auto const owning_input_dataset = load_dataset(reduced_phase_model_json(true));
+    Model model{50.0, owning_input_dataset.dataset};
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+
+    Buffer node_output{PGM_def_asym_output_node, 2};
+    node_output.set_nan();
+    DatasetMutable asym_output{"asym_output", false, 1};
+    asym_output.add_buffer("node", 2, 2, nullptr, node_output);
+
+    Buffer sym_node_output{PGM_def_sym_output_node, 2};
+    sym_node_output.set_nan();
+    DatasetMutable sym_output{"sym_output", false, 1};
+    sym_output.add_buffer("node", 2, 2, nullptr, sym_node_output);
+
+    SUBCASE("Asymmetric power flow") {
+        options.set_symmetric(0);
+        options.set_calculation_method(PGM_newton_raphson);
+        model.calculate(options, asym_output);
+        std::array<std::array<double, 3>, 2> u{};
+        node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+        CHECK(u[1][0] > 0.0);
+        CHECK(u[1][1] == 0.0);
+        CHECK(u[1][2] == 0.0);
+    }
+
+    SUBCASE("Experimental features are required") {
+        options.set_experimental_features(PGM_experimental_features_disabled);
+        options.set_symmetric(0);
+        check_throws_with([&model, &asym_output](auto const& opt) { model.calculate(opt, asym_output); },
+                          PGM_regular_error, "is an experimental feature"s, options);
+    }
+
+    SUBCASE("Symmetric power flow is not supported") {
+        check_throws_with([&model, &sym_output](auto const& opt) { model.calculate(opt, sym_output); },
+                          PGM_regular_error,
+                          "Symmetric power flow is not supported in a network with one- or two-phase nodes"s, options);
+    }
+
+    SUBCASE("State estimation is not supported") {
+        options.set_calculation_type(PGM_state_estimation);
+        for (Idx const symmetric : {0, 1}) {
+            options.set_symmetric(symmetric);
+            auto& output = symmetric == 0 ? asym_output : sym_output;
+            check_throws_with([&model, &output](auto const& opt) { model.calculate(opt, output); }, PGM_regular_error,
+                              "State estimation is not supported in a network with one- or two-phase nodes"s, options);
+        }
+    }
+
+    SUBCASE("Three-phase fault at a three-phase node") {
+        options.set_calculation_type(PGM_short_circuit);
+        options.set_calculation_method(PGM_iec60909);
+        Buffer fault_output{PGM_def_sc_output_fault, 1};
+        fault_output.set_nan();
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("fault", 1, 1, nullptr, fault_output);
+        model.calculate(options, sc_output);
+        std::array<std::array<double, 3>, 1> i_f{};
+        fault_output.get_value(PGM_def_sc_output_fault_i_f, i_f.data(), -1);
+        CHECK(i_f[0][0] > 0.0);
+        CHECK(i_f[0][1] == doctest::Approx(i_f[0][0]));
+        CHECK(i_f[0][2] == doctest::Approx(i_f[0][0]));
+    }
+
+    SUBCASE("Short circuit without faults") {
+        auto const owning_no_fault_dataset = load_dataset(reduced_phase_model_json(false));
+        Model no_fault_model{50.0, owning_no_fault_dataset.dataset};
+        options.set_calculation_type(PGM_short_circuit);
+        options.set_calculation_method(PGM_iec60909);
+        Buffer sc_node_output{PGM_def_sc_output_node, 2};
+        sc_node_output.set_nan();
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("node", 2, 2, nullptr, sc_node_output);
+        CHECK_NOTHROW(no_fault_model.calculate(options, sc_output));
+        std::array<std::array<double, 3>, 2> u{};
+        sc_node_output.get_value(PGM_def_sc_output_node_u, u.data(), -1);
+        CHECK(u[1][0] > 0.0);
+        CHECK(u[1][1] == 0.0);
+    }
+}
+
 } // namespace power_grid_model_cpp

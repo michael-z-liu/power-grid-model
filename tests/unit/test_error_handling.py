@@ -15,7 +15,10 @@ from power_grid_model.enum import (
     CalculationMethod,
     LoadGenType,
     MeasuredTerminalType,
+    PhaseConnection,
     TapChangingStrategy,
+    WindingType,
+    _ExperimentalFeatures,
 )
 from power_grid_model.errors import (
     AutomaticTapInputError,
@@ -23,12 +26,14 @@ from power_grid_model.errors import (
     ConflictingAngleMeasurementType,
     ConflictVoltage,
     DanglingConductor,
+    ExperimentalFeature,
     IDNotFound,
     IDWrongType,
     InvalidBranch,
     InvalidBranch3,
     InvalidCalculationMethod,
     InvalidMeasuredObject,
+    InvalidPhaseConnection,
     InvalidRegulatedObject,
     InvalidTransformerClock,
     IterationDiverge,
@@ -564,3 +569,156 @@ def test_deprecated_invalid_branch3_error():
 )
 def test_interpret_reduced_phase_errors(message: str, expected_type: type[PowerGridError]):
     assert type(_interpret_error(message)) is expected_type
+
+
+def _reduced_phase_input(line_phases: list[int], line_nodes: list[tuple[int, int]], n_node: int):
+    """node 0 is a three-phase source node; each line connects the given nodes with the given phases (a = 1, b = 2)"""
+    node_input = initialize_array(DatasetType.input, CT.node, n_node)
+    node_input[AT.id] = list(range(n_node))
+    node_input[AT.u_rated] = 10e3
+
+    source_input = initialize_array(DatasetType.input, CT.source, 1)
+    source_input[AT.id] = [100]
+    source_input[AT.node] = [0]
+    source_input[AT.status] = [1]
+    source_input[AT.u_ref] = [1.0]
+
+    line_input = initialize_array(DatasetType.input, CT.asym_line, len(line_phases))
+    line_input[AT.id] = [200 + k for k in range(len(line_phases))]
+    line_input[AT.from_node] = [nodes[0] for nodes in line_nodes]
+    line_input[AT.to_node] = [nodes[1] for nodes in line_nodes]
+    line_input[AT.from_status] = 1
+    line_input[AT.to_status] = 1
+    line_input["phases"] = line_phases
+    for k, phases in enumerate(line_phases):
+        phase = {PhaseConnection.a: "a", PhaseConnection.b: "b"}[PhaseConnection(phases)]
+        line_input[f"r_{phase}{phase}"][k] = 0.5
+        line_input[f"x_{phase}{phase}"][k] = 0.4
+        line_input[f"c_{phase}{phase}"][k] = 1e-8
+
+    load_input = initialize_array(DatasetType.input, CT.asym_load, 1)
+    load_input[AT.id] = [300]
+    load_input[AT.node] = [1]
+    load_input[AT.status] = [1]
+    load_input[AT.type] = [LoadGenType.const_power]
+    load_input[AT.p_specified] = [[1e3, 0.0, 0.0]]
+    load_input[AT.q_specified] = [[0.0, 0.0, 0.0]]
+
+    return {CT.node: node_input, CT.source: source_input, CT.asym_line: line_input, CT.asym_load: load_input}
+
+
+def test_reduced_phase_calculations():
+    model = PowerGridModelWithExt(_reduced_phase_input([PhaseConnection.a], [(0, 1)], 2))
+    enabled = _ExperimentalFeatures.enabled
+
+    result = model.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
+    assert result[CT.node][AT.u][1][0] > 0.0
+    assert result[CT.node][AT.u][1][1] == 0.0
+    assert result[CT.node][AT.u][1][2] == 0.0
+
+    with pytest.raises(ExperimentalFeature):
+        model.calculate_power_flow(symmetric=False)
+    with pytest.raises(ReducedPhaseNotSupported, match="Symmetric power flow"):
+        model.calculate_power_flow_with_ext(symmetric=True, experimental_features=enabled)
+    for symmetric in (True, False):
+        with pytest.raises(ReducedPhaseNotSupported, match="State estimation"):
+            model.calculate_state_estimation_with_ext(symmetric=symmetric, experimental_features=enabled)
+
+    # a short circuit without faults runs through the asymmetric calculation
+    sc_result = model.calculate_short_circuit_with_ext(experimental_features=enabled)
+    assert sc_result[CT.node][AT.u][1][0] > 0.0
+    assert sc_result[CT.node][AT.u][1][1] == 0.0
+
+
+def test_reduced_phase_dangling_conductor():
+    # a b line off an a node
+    model = PowerGridModelWithExt(_reduced_phase_input([PhaseConnection.a, PhaseConnection.b], [(0, 1), (1, 2)], 3))
+    with pytest.raises(DanglingConductor, match="branch with ID 201"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_missing_phase_for_winding():
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 3)
+    input_data[CT.node][AT.u_rated][2] = 400.0
+
+    transformer_input = initialize_array(DatasetType.input, CT.transformer, 1)
+    transformer_input[AT.id] = [400]
+    transformer_input[AT.from_node] = [1]
+    transformer_input[AT.to_node] = [2]
+    transformer_input[AT.from_status] = [1]
+    transformer_input[AT.to_status] = [1]
+    transformer_input[AT.u1] = [10e3]
+    transformer_input[AT.u2] = [400.0]
+    transformer_input[AT.sn] = [1e5]
+    transformer_input[AT.uk] = [0.05]
+    transformer_input[AT.pk] = [1e3]
+    transformer_input[AT.i0] = [0.01]
+    transformer_input[AT.p0] = [100.0]
+    transformer_input[AT.winding_from] = [WindingType.wye_n]
+    transformer_input[AT.winding_to] = [WindingType.wye_n]
+    transformer_input[AT.clock] = [0]
+    transformer_input[AT.tap_side] = [0]
+    transformer_input[AT.tap_pos] = [0]
+    transformer_input[AT.tap_min] = [0]
+    transformer_input[AT.tap_max] = [0]
+    transformer_input[AT.tap_size] = [100.0]
+    input_data[CT.transformer] = transformer_input
+
+    model = PowerGridModelWithExt(input_data)
+    with pytest.raises(MissingPhaseForWinding, match="branch with ID 400"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_missing_phase_for_three_winding_transformer():
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 4)
+    input_data[CT.node][AT.u_rated][2:] = 400.0
+
+    transformer_input = initialize_array(DatasetType.input, CT.three_winding_transformer, 1)
+    transformer_input[AT.id] = [400]
+    transformer_input[AT.node_1] = [1]
+    transformer_input[AT.node_2] = [2]
+    transformer_input[AT.node_3] = [3]
+    transformer_input[AT.status_1] = [1]
+    transformer_input[AT.status_2] = [1]
+    transformer_input[AT.status_3] = [1]
+    transformer_input[AT.u1] = [10e3]
+    transformer_input[AT.u2] = [400.0]
+    transformer_input[AT.u3] = [400.0]
+    transformer_input[AT.sn_1] = [1e5]
+    transformer_input[AT.sn_2] = [1e5]
+    transformer_input[AT.sn_3] = [1e5]
+    transformer_input[AT.uk_12] = [0.05]
+    transformer_input[AT.uk_13] = [0.05]
+    transformer_input[AT.uk_23] = [0.05]
+    transformer_input[AT.pk_12] = [1e3]
+    transformer_input[AT.pk_13] = [1e3]
+    transformer_input[AT.pk_23] = [1e3]
+    transformer_input[AT.i0] = [0.01]
+    transformer_input[AT.p0] = [100.0]
+    transformer_input[AT.winding_1] = [WindingType.wye_n]
+    transformer_input[AT.winding_2] = [WindingType.wye_n]
+    transformer_input[AT.winding_3] = [WindingType.wye_n]
+    transformer_input[AT.clock_12] = [0]
+    transformer_input[AT.clock_13] = [0]
+    transformer_input[AT.tap_side] = [0]
+    transformer_input[AT.tap_pos] = [0]
+    transformer_input[AT.tap_min] = [0]
+    transformer_input[AT.tap_max] = [0]
+    transformer_input[AT.tap_size] = [100.0]
+    input_data[CT.three_winding_transformer] = transformer_input
+
+    model = PowerGridModelWithExt(input_data)
+    with pytest.raises(MissingPhaseForWinding, match="branch3 with ID 400"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_invalid_phase_connection():
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 2)
+    input_data[CT.asym_line]["r_bb"] = [0.5]
+    with pytest.raises(InvalidPhaseConnection, match="r_bb"):
+        PowerGridModel(input_data)
+
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 2)
+    input_data[CT.asym_line]["phases"] = [9]
+    with pytest.raises(MissingCaseForEnumError):
+        PowerGridModel(input_data)

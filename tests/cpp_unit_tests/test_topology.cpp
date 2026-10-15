@@ -728,6 +728,33 @@ TEST_CASE("Test topology phase mask") {
         }
     }
 
+    SUBCASE("Errors name the component ID when the connections carry IDs") {
+        SUBCASE("Dangling conductor") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                      {.nodes = {0, 2}, .incidence = pp(phase_mask_a)},
+                                      {.nodes = {1, 2}}}};
+            network.comp_conn.branch_id = {10, 11, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), DanglingConductor);
+        }
+        SUBCASE("Branch winding") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                      {.nodes = {1, 2}, .incidence = three_phase_winding}}};
+            network.comp_conn.branch_id = {10, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), MissingPhaseForWinding);
+        }
+        SUBCASE("Branch3 leg") {
+            PhaseTestNetwork network{n_node, {0}, {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)}}};
+            network.add_branch3({1, 2, 3});
+            network.comp_conn.branch_id = {10};
+            network.comp_conn.branch3_id = {7};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch3 with ID 7"), MissingPhaseForWinding);
+        }
+    }
+
     SUBCASE("A winding at a node outside every math model is not validated") {
         SUBCASE("Branch with only its to side connected") {
             // node 2 has no connected branch and no source, so it is in no math model

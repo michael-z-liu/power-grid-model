@@ -108,6 +108,11 @@
       "base": "BranchInput",
       "attributes": [
         {
+          "data_type": "PhaseConnection",
+          "names": "phases",
+          "description": "phases with a conductor; default abc"
+        },
+        {
           "data_type": "double",
           "names": [
             "r_aa",

@@ -8,8 +8,8 @@ SPDX-License-Identifier: MPL-2.0
 
 ```{note}
 This is a design and investigation document. It describes what is needed to support one- and two-phase
-components in power flow and short-circuit calculations. Milestones M0 to M2 are implemented; they are internal
-and not yet reachable from the input data, which starts with M3.
+components in power flow and short-circuit calculations. Milestones M0 to M3 are implemented. M3 makes one- and
+two-phase lines reachable from the input data, as an experimental feature (decision D9).
 ```
 
 ## Context
@@ -175,7 +175,7 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 
 | Area | Change |
 |------|--------|
-| Y-bus (`<core>/math_solver/y_bus.hpp`, `update_admittance_entries`) | Asymmetric only. **Mask, then identity:** every entry $(i, j)$ becomes $M_i Y_{ij} M_j$, and on the diagonal $(p, p)$ is *overwritten* with 1 for each absent `p`. Adding 1.0 would only be correct if every contribution were exactly zero on absent slots, which sequence-based shunts (mutual terms) and legacy links (1e6 on the diagonal) break. With masking, each absent row is exactly $e_p$ whatever the component data. The incremental update path reuses the same function. Branch and shunt flows are masked by the phases of the bus they flow into. Masking is by assignment, never by multiplication, so a NaN in an absent slot is discarded too. The identity rows are part of `YBus::admittance()` (decision D8, open). |
+| Y-bus (`<core>/math_solver/y_bus.hpp`, `update_admittance_entries`) | Asymmetric only. **Mask, then identity:** every entry $(i, j)$ becomes $M_i Y_{ij} M_j$, and on the diagonal $(p, p)$ is *overwritten* with 1 for each absent `p`. Adding 1.0 would only be correct if every contribution were exactly zero on absent slots, which sequence-based shunts (mutual terms) and legacy links (1e6 on the diagonal) break. With masking, each absent row is exactly $e_p$ whatever the component data. The incremental update path reuses the same function. Branch and shunt flows are masked by the phases of the bus they flow into. Masking is by assignment, never by multiplication, so a NaN in an absent slot is discarded too. The identity rows are part of `YBus::admittance()` (decision D8). |
 | Newton-Raphson (`newton_raphson_pf_solver.hpp`) | New `apply_absent_phase_constraints()`, called after `apply_pv_constraints()`. For each absent slot it zeroes the P and Q rows in all entries of the bus row, sets $H(p,p) = L(p,p) = 1$ and sets the mismatch to 0. The update keeps $V_p = 0$ and never divides by it. A PV bus (voltage regulator) on a bus without all phases raises `ReducedPhaseNotSupported`. |
 | Newton-Raphson starts | The flat, average-source and linear starts mask the initial voltage of absent slots to exactly 0. The linear start also masks the load admittance per bus. Slot angles (`bus_slot_angle`) come with the split-phase work (M6). |
 | Iterative current (`iterative_current_pf_solver.hpp`) | Mask the initial voltage and, after the load and source loop, the right-hand side (which holds `conj(s/0)` = NaN on absent slots). The prefactorised matrix already has the identity rows. `linear_current` is covered as well. |
@@ -240,7 +240,32 @@ Taken in M4:
   solver. A model with reduced-phase components always runs the asymmetric short circuit, also when every fault is
   `three_phase` and when there is no fault at all.
 
-Still open, for M3 and M4:
+Taken in M3 (decided by recommendation, pending Michael's review where marked):
+
+* **D8. Identity rows in the Y-bus.** `YBus::admittance()` keeps the identity rows of absent slots; this is
+  documented at the accessor. Consumers that need the physical admittance (future state estimation) must mask these
+  slots.
+* **D9. Experimental gate** (decided by recommendation, pending Michael's review). Until the Python validation (M9)
+  exists, a calculation on a model with one- or two-phase branches raises `ExperimentalFeature` ("A network with
+  one- or two-phase branches is an experimental feature") unless experimental features are enabled. The gate is
+  checked by the C API before the calculation starts, so it runs *before* the M4 guard: with experimental features
+  disabled, every calculation type gives `ExperimentalFeature`; with them enabled, the M4 rules apply
+  (`ReducedPhaseNotSupported` for symmetric power flow and state estimation). Model construction, including the
+  `phases` validation below, is not gated, so invalid input is reported regardless.
+* **D10. `PhaseConnection` numbering** (decided by recommendation, pending Michael's review). The values are aligned
+  with `FaultPhase`: `abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6`. Not provided (`na`) means `abc`; there
+  is no `nan` enumerator.
+* **D11. Validation of `asym_line` input with `phases`** (decided by recommendation, pending Michael's review).
+  An entry of the r, x or c matrix is required if both of its conductors are present and must be empty otherwise.
+  A non-empty value on an absent phase is rejected rather than ignored, so that `phases = a` set by mistake on a
+  three-phase line does not silently drop two phases. The present c entries are required (0 is allowed), as for
+  `abc`. `c0`/`c1` are only allowed with `abc`. Errors raise `InvalidPhaseConnection` with the line ID. An unknown
+  `phases` value raises `MissingCaseForEnumError`.
+* **IDs in topology errors.** `DanglingConductor` and `MissingPhaseForWinding` name the branch by ID ("branch with
+  ID 42", "branch3 with ID 7") when the model registered the IDs, which it does whenever a branch is not abc → abc.
+  Hand-built topologies without IDs keep the index ("branch #2").
+
+Still open:
 
 * **D3. Load/gen power on an absent phase** (for example a `sym_load` on a SWER node, which in an asymmetric
   calculation puts $s/3$ on phases b and c). At math level it is ignored exactly. Recommendation: a model-level error
@@ -248,8 +273,6 @@ Still open, for M3 and M4:
   silently.
 * **D4. Shunt on a reduced-phase node.** M2 keeps the present-phase block of the shunt through Y-bus masking (its
   absent legs drop out). Recommendation: an M3 error until an asymmetric shunt exists, consistent with D3.
-* **D8. Identity rows in the Y-bus.** `YBus::admittance()` contains the identity rows of absent slots. Future
-  state-estimation work will need the unmasked physics; document this or expose the mask when that work starts.
 
 ## Component models (phase domain)
 
@@ -270,8 +293,9 @@ convention. It must be stated clearly in the Node section of `docs/user_manual/c
 
 ### `asym_line` with `phases`
 
-* **New attribute.** `phases`, of a new enum `PhaseConnection {abc = 0, ab, ac, bc, a, b, c}` (`IntS`,
-  input-only, default `abc`). Absent-phase impedances are left as NaN.
+* **New attribute.** `phases`, of a new enum `PhaseConnection {abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5,
+  bc = 6}` (`IntS`, input-only, default `abc`; decision D10). Absent-phase impedances are left as NaN (decision
+  D11).
 * **Series admittance.** Let $P$ be the set of present phases. Fill the absent rows and columns of $Z$ with the
   identity, invert, and then zero the absent rows and columns:
 
@@ -280,12 +304,18 @@ convention. It must be stated clearly in the Node section of `docs/user_manual/c
   $$
 
   Here $M_P$ is the diagonal 0/1 mask. The result is exact, because the absent block is decoupled. With a neutral,
-  do the same on the 4×4 matrix before `kron_reduction`. A shared helper `masked_inv(tensor, mask)` would live in
-  `<core>/component/line_utils.hpp`.
+  the absent phase conductors of the 4×4 matrix are replaced by an identity block before `kron_reduction`
+  (`mask_absent_phase_conductors`). The helper `masked_inv(tensor, mask)` lives in
+  `<core>/component/line_utils.hpp`. The neutral of a one- or two-phase line is present when `r_nn` or `x_nn` is
+  given (for `abc` the existing rule, based on `r_na`/`x_na`, is unchanged).
+* **Full-phase path.** For `abc` the constructor keeps the literal existing expressions, so three-phase results stay
+  bit for bit identical.
 * **Shunt.** Treat the capacitance matrix the same way. The `c0`/`c1` input form is only valid for `abc`.
 * **Single end connected** (`asym_line.hpp:105-116`). The open-end branch shunt
-  $\tfrac12 Y_{sh} + (Z + 2 Y_{sh}^{-1})^{-1}$ must also use `masked_inv`, and the
-  `(cabs(y_shunt) >= tol).all()` guard must become per-present-phase.
+  $\tfrac12 Y_{sh} + (Z + 2 Y_{sh}^{-1})^{-1}$ uses `masked_inv`, and the
+  `(cabs(y_shunt) >= tol).all()` guard is applied to the present entries only. For `abc` this guard drops the whole
+  open-end shunt when a *mutual* capacitance is 0; that pre-existing behaviour is kept and is a candidate for a
+  separate fix, because changing it changes three-phase results.
 * **SWER line.** A SWER line is `phases = a` (or `b` or `c`) with a 1×1 impedance whose self term already includes
   the Carson earth-return correction:
 
@@ -296,8 +326,10 @@ convention. It must be stated clearly in the Node section of `docs/user_manual/c
   $$
 
   No neutral or Kron reduction is needed. This matches an OpenDSS `Line` with `phases=1` and `bus1=X.1`.
-* **Symmetric parameters.** `sym_calc_param()` must throw for `phases != abc` (see
+* **Symmetric parameters.** `sym_calc_param()` throws `ReducedPhaseNotSupported` for `phases != abc` (see
   [Calculation behaviour](#calculation-behaviour)).
+* **Phase incidence.** `AsymLine::phase_incidence()` reports `phases → phases`, per phase; for `abc` this equals the
+  default, so a model without reduced-phase lines keeps the topology fast path.
 
 ### New component: `single_phase_transformer`
 
@@ -451,7 +483,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M0 | Fix `average_of_off_diagonal_of_matrix` | `<core>/common/matrix_utils.hpp` | Corrected expected values in `tests/cpp_unit_tests/component/test_asym_line.cpp` (which reproduced the bug); new `tests/cpp_unit_tests/common/test_matrix_utils.cpp` | XS / low |
 | M1 | Phase-mask topology (mask always full; no behaviour change) | `<core>/calculation_parameters.hpp`, `<core>/common/exception.hpp`, `<core>/component/edge.hpp`, `<core>/component/transformer.hpp`, `<core>/component/generic_branch.hpp`, `<core>/main_core/topology.hpp`, `<core>/topology.hpp` | `tests/cpp_unit_tests/test_topology.cpp`: hand-built incidences, partial-winding error | M / medium |
 | M2 | Solver masking (dangling-conductor and winding validation; Y-bus mask and identity; power-flow and short-circuit masking; state-estimation, symmetric and absent-phase-fault guards; output 0 on absent phases) | `<core>/topology.hpp`, `<core>/calculation_parameters.hpp`, `<core>/common/exception.hpp`, `<core>/component/link.hpp`, `<core>/math_solver/y_bus.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp`, `common_solver_functions.hpp`, `short_circuit_solver.hpp`, `math_solver.hpp` | `tests/cpp_unit_tests/test_topology.cpp`; `math_solver/test_y_bus.cpp`; new `math_solver/test_math_solver_pf_reduced_phase.cpp` (hand-computed single- and two-phase cases, equivalence with a full-phase network, bit-identical check with an all-abc mask, guards); `math_solver/test_math_solver_sc.cpp`; `component/test_node.cpp`; all existing validation cases unchanged | M / **high** (core numerics) |
-| M3 | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,swer-a}` with OpenDSS `test.dss`; short-circuit cases | M / medium |
+| M3 (implemented) | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,swer-a}` with OpenDSS `test.dss`; short-circuit cases | M / medium |
 | M4 | Symmetric-calculation guards | `<core>/main_model_impl.hpp`, `<core>/common/exception.hpp`, `src/power_grid_model/_core/error_handling.py`, `errors.py` | C++ main-model tests; Python error-mapping tests | S / low |
 | M5 | `single_phase_transformer` (two windings, earthing, phase shift) | New `<core>/component/single_phase_transformer.hpp`; `<core>/all_components.hpp`; `<core>/main_core/main_model_type.hpp`; `input.json` and `dataset_definitions.json` (input, update, output and short-circuit output as a branch); enum `WindingConnection1P` | `test_single_phase_transformer.cpp` (compare with hand-computed $C^T Y C$); validation case 22 kV a-b → 12.7 kV SWER → 240 V against OpenDSS | L / **high** |
 | M6 | Centre-tapped split-phase secondary | Same component; dynamic-size Kron reduction in `line_utils.hpp`; slot angles | OpenDSS centre-tap transformer (`phases=1 windings=3`, `bus2=X.1.0`, `bus3=X.0.2`) with unbalanced 240/480 V loads | M / medium-high |

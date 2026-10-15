@@ -24,6 +24,7 @@ from power_grid_model._core.errors import (
     InvalidArguments,
     InvalidCalculationMethod,
     InvalidMeasuredObject,
+    InvalidPhaseConnection,
     InvalidRegulatedObject,
     InvalidShortCircuitPhaseOrType,
     InvalidTransformerClock,
@@ -108,6 +109,7 @@ _REDUCED_PHASE_NOT_SUPPORTED_RE = re.compile(
 _DANGLING_CONDUCTOR_RE = re.compile(
     r"Conductors of .+ on phases \([^)]*\) are not present at any of its connected nodes"
 )
+_INVALID_PHASE_CONNECTION_RE = re.compile(r"Invalid phase connection for ")  # multiple different flavors
 _MISSING_PHASE_FOR_WINDING_RE = re.compile(r"Winding of .+ has phases \([^)]*\) that are not all present at its node")
 
 _ERROR_MESSAGE_PATTERNS = {
@@ -141,6 +143,7 @@ _ERROR_MESSAGE_PATTERNS = {
     _REDUCED_PHASE_NOT_SUPPORTED_RE: ReducedPhaseNotSupported,
     _DANGLING_CONDUCTOR_RE: DanglingConductor,
     _MISSING_PHASE_FOR_WINDING_RE: MissingPhaseForWinding,
+    _INVALID_PHASE_CONNECTION_RE: InvalidPhaseConnection,
 }
 
 

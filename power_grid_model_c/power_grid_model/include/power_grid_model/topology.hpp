@@ -30,10 +30,12 @@
 #include <cassert>
 #include <concepts>
 #include <cstddef>
+#include <format>
 #include <iterator>
 #include <map>
 #include <memory>
 #include <ranges>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -329,6 +331,14 @@ class Topology {
         assign_bus_phase_masks(node_phase);
     }
 
+    // "{type} with ID {id}" if the IDs are registered, "{type} #{idx}" otherwise
+    static std::string branch_label(std::string_view type, Idx idx, std::vector<ID> const& ids) {
+        if (ids.empty()) {
+            return std::format("{} #{}", type, idx);
+        }
+        return std::format("{} with ID {}", type, ids[narrow_cast<size_t>(idx)]);
+    }
+
     // same edge set as the global graph, with both directions of each edge
     PhaseGraph build_phase_graph() const {
         std::vector<std::pair<GraphIdx, GraphIdx>> edges;
@@ -410,22 +420,22 @@ class Topology {
     // under propagation T and N_from equals T and N_to for a per_phase branch that is connected at both sides, so a
     // dangling conductor is absent at both of its connected nodes
     // branch_idx is the position in ComponentConnections::branch_connected: on the legacy path this counts all Edges
-    // (links included), on the v2 path only Branches; M5 must map it back to an ID with the matching iteration
+    // (links included), on the v2 path only Branches; the errors use the matching ID if it is registered
     void check_branch_phases(std::vector<PhaseMask> const& node_phase) const {
         auto const in_math_model = [this](Idx node) { return comp_coup_.node[node].group != disconnected; };
-        auto const check_winding_side = [&in_math_model, &node_phase](std::string_view branch_type, Idx branch_idx,
-                                                                      Idx node, PhaseMask terminals) {
+        auto const check_winding_side = [&in_math_model, &node_phase](std::string const& winding_owner, Idx node,
+                                                                      PhaseMask terminals) {
             if (!in_math_model(node)) {
                 return;
             }
             PhaseMask const present = node_phase[node];
             if ((present & terminals) != terminals) {
-                throw MissingPhaseForWinding{branch_type, branch_idx, phase_letters(terminals), phase_letters(present)};
+                throw MissingPhaseForWinding{winding_owner, phase_letters(terminals), phase_letters(present)};
             }
         };
-        auto const check_per_phase = [&in_math_model, &node_phase](Idx branch_idx, BranchIdx const& nodes,
-                                                                   BranchConnected const& connected,
-                                                                   PhaseMask terminals) {
+        auto const check_per_phase = [this, &in_math_model, &node_phase](Idx branch_idx, BranchIdx const& nodes,
+                                                                         BranchConnected const& connected,
+                                                                         PhaseMask terminals) {
             PhaseMask dangling = phase_mask_none;
             std::array<std::string_view, 2> side_phases{"open", "open"};
             for (size_t side = 0; side != 2; ++side) {
@@ -438,7 +448,8 @@ class Topology {
             assert(connected[0] == 0 || connected[1] == 0 || !in_math_model(nodes[0]) ||
                    (terminals & node_phase[nodes[0]]) == (terminals & node_phase[nodes[1]]));
             if (!dangling.none()) {
-                throw DanglingConductor{"branch", branch_idx, phase_letters(dangling), side_phases[0], side_phases[1]};
+                throw DanglingConductor{branch_label("branch", branch_idx, comp_conn_.branch_id),
+                                        phase_letters(dangling), side_phases[0], side_phases[1]};
             }
         };
 
@@ -455,17 +466,20 @@ class Topology {
             }
             assert(incidence.coupling == PhaseCoupling::winding);
             if (branch_connected[0] != 0) {
-                check_winding_side("branch", branch_idx, branch_node_idx[0], incidence.from);
+                check_winding_side(branch_label("branch", branch_idx, comp_conn_.branch_id), branch_node_idx[0],
+                                   incidence.from);
             }
             if (branch_connected[1] != 0) {
-                check_winding_side("branch", branch_idx, branch_node_idx[1], incidence.to);
+                check_winding_side(branch_label("branch", branch_idx, comp_conn_.branch_id), branch_node_idx[1],
+                                   incidence.to);
             }
         }
         for (auto const& [branch3_idx, branch3_node_idx, branch3_connected] : std::views::zip(
                  std::views::iota(Idx{0}), by_const_ref(comp_topo_.branch3_node_idx), comp_conn_.branch3_connected)) {
             for (Idx m = 0; m != 3; ++m) {
                 if (branch3_connected[m] != 0) {
-                    check_winding_side("branch3", branch3_idx, branch3_node_idx[m], phase_mask_abc);
+                    check_winding_side(branch_label("branch3", branch3_idx, comp_conn_.branch3_id), branch3_node_idx[m],
+                                       phase_mask_abc);
                 }
             }
         }

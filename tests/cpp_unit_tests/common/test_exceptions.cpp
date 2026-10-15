@@ -114,18 +114,27 @@ TEST_CASE("Exceptions") {
               "Invalid clock for transformer -2147483648, clock -128\n");
     }
     SUBCASE("MissingPhaseForWinding") {
-        auto const msg = std::string{MissingPhaseForWinding{"branch", Idx{3}, "ab", "a"}.what()};
+        auto const msg = std::string{MissingPhaseForWinding{"branch #3", "ab", "a"}.what()};
         CHECK(msg.find("branch #3") != std::string::npos);
         CHECK(msg.find("(ab)") != std::string::npos);
         CHECK(msg.find("node phases: a") != std::string::npos);
         CHECK(msg.find(" is not implemented for ") == std::string::npos);
         CHECK(msg.find("not all present") != std::string::npos);
+        CHECK(std::string{MissingPhaseForWinding{"branch with ID 7", "abc", "a"}.what()} ==
+              "Winding of branch with ID 7 has phases (abc) that are not all present at its node (node phases: "
+              "a). A connected winding must have all of its phases present.\n");
     }
     SUBCASE("DanglingConductor") {
-        auto const msg = std::string{DanglingConductor{"branch", Idx{2}, "bc", "a", "open"}.what()};
+        auto const msg = std::string{DanglingConductor{"branch #2", "bc", "a", "open"}.what()};
         CHECK(msg ==
               "Conductors of branch #2 on phases (bc) are not present at any of its connected nodes (from node phases: "
               "a, to node phases: open). Every conductor must be present at the nodes it connects.\n");
+        CHECK(std::string{DanglingConductor{"branch with ID 42", "b", "a", "open"}.what()}.starts_with(
+            "Conductors of branch with ID 42 on phases (b) are not present"));
+    }
+    SUBCASE("InvalidPhaseConnection") {
+        CHECK(std::string{InvalidPhaseConnection{"asym_line", ID{5}, "a", "r_bb is required"}.what()} ==
+              "Invalid phase connection for asym_line 5 with phases (a): r_bb is required\n");
     }
     SUBCASE("SparseMatrixError") {
         CHECK(std::string{SparseMatrixError{}.what()} ==
