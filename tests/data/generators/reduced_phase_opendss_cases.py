@@ -7,8 +7,8 @@
 Each case is defined once. The script writes the PGM input (input.json, params.json, update_batch.json), the OpenDSS
 model (test.dss) and the reference output computed by OpenDSS, plus a .license file per file. It generates:
 
-- tests/data/power_flow/asym-line/{single-phase-a, two-phase-ab, swer-a, reduced-phase-feeder,
-  reduced-phase-feeder-linear, reduced-phase-symmetric-not-supported}
+- tests/data/power_flow/asym-line/{single-phase-a, two-phase-ab, two-phase-bc-neutral-opendss-kron, swer-a,
+  reduced-phase-feeder, reduced-phase-feeder-linear, reduced-phase-symmetric-not-supported}
 - tests/data/state_estimation/reduced-phase-not-supported
 - tests/data/short_circuit/{asym-line-reduced-phase, asym-line-swer-a}
 
@@ -24,7 +24,8 @@ Modelling choices:
 - source: Vsource with Z1/Z0 in ohm from sk, rx_ratio and z01_ratio, exactly as PGM computes them; in a short
   circuit the voltage is c * u_rated (pu=1.1) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM)
 - lines: explicit R/X/C matrices of the present phases; a line with a neutral gets the numpy Kron-reduced matrix,
-  which is cross-checked against an OpenDSS LineCode with Kron=yes
+  which is cross-checked against an OpenDSS LineCode with Kron=yes; the exception is a line with opendss_kron=True,
+  which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
 - loads: every PGM load (also a sym_load) becomes single-phase wye loads with kV = u_rated / sqrt(3) exactly;
   const_pq -> model=1, const_y -> model=2, const_i -> model=5; a generator is a load with negative power
 - a branch side with status 0 is connected to its own dummy bus in OpenDSS (the open-end pi model); PGM reports
@@ -96,6 +97,8 @@ class Line:
     swer: bool = False
     from_status: int = 1
     to_status: int = 1
+    # let OpenDSS Kron-reduce the neutral itself (LineCode with Kron=yes) instead of giving it the numpy-reduced matrix
+    opendss_kron: bool = False
 
     def idx(self):
         return ["abc".index(p) for p in self.phases]
@@ -305,6 +308,21 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
         bus1 = f"n{line.from_node}" if line.from_status else f"open_l{line.id}_from"
         bus2 = f"n{line.to_node}" if line.to_status else f"open_l{line.id}_to"
         nodes = nodes_of(line.phases)
+        if line.opendss_kron:
+            assert line.neutral
+            assert not line.swer
+            z4 = line.z_full() / line.length
+            n = z4.shape[0]
+            lines.append(
+                f"New LineCode.lc{line.id} nphases={n} units=km rmatrix={fmt_matrix(z4.real)}"
+                f" xmatrix={fmt_matrix(z4.imag)} cmatrix={fmt_matrix(np.zeros((n, n)))} Neutral={n} Kron=yes"
+            )
+            lines.append(
+                f"New Line.l{line.id} phases={len(line.phases)} bus1={bus1}{nodes} bus2={bus2}{nodes}"
+                f" linecode=lc{line.id} length={line.length!r} units=km"
+                f" cmatrix={fmt_matrix(c_nf / line.length)}"
+            )
+            continue
         lines.append(
             f"New Line.l{line.id} phases={len(line.phases)} bus1={bus1}{nodes} bus2={bus2}{nodes} length=1 units=km"
             f" rmatrix={fmt_matrix(z.real)} xmatrix={fmt_matrix(z.imag)} cmatrix={fmt_matrix(c_nf)}"
@@ -346,11 +364,35 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
     return lines
 
 
-def run_dss(script):
+def run_dss(script, case: Case | None = None):
     dss.Basic.ClearAll()
     for command in script:
         dss.Text.Command(command)
     assert dss.Solution.Converged(), "OpenDSS did not converge"
+    if case is not None:
+        check_opendss_kron_lines(case)
+
+
+def check_opendss_kron_lines(case: Case):
+    """a line with opendss_kron is reduced by OpenDSS itself, to the phases only, and equals the numpy Kron"""
+    for line in case.lines:
+        if not line.opendss_kron:
+            continue
+        n = len(line.phases)
+        dss.Circuit.SetActiveElement(f"Line.l{line.id}")
+        assert dss.CktElement.NumPhases() == n, f"OpenDSS line {line.id} has {dss.CktElement.NumPhases()} phases"
+        assert dss.CktElement.NumConductors() == n, f"OpenDSS line {line.id} still has a neutral conductor"
+        assert dss.CktElement.NumTerminals() == 2
+        assert dss.Lines.Phases() == n
+        dss.LineCodes.Name(f"lc{line.id}")
+        assert dss.LineCodes.Phases() == n, f"OpenDSS did not Kron-reduce the LineCode of line {line.id}"
+        dss.Circuit.SetActiveElement(f"Line.l{line.id}")
+        r = np.array(dss.Lines.RMatrix()).reshape(n, n) * line.length
+        x = np.array(dss.Lines.XMatrix()).reshape(n, n) * line.length
+        expected = line.z_phase()
+        dev = np.max(np.abs(r + 1j * x - expected))
+        assert dev < 1e-12 * np.max(np.abs(expected)), f"OpenDSS Kron differs from numpy for line {line.id}: {dev}"
+        print(f"  OpenDSS-reduced line {line.id}: {n} phases, matches numpy Kron (max dev {dev:.1e} ohm)")
 
 
 def check_kron_against_opendss(case: Case):
@@ -538,7 +580,7 @@ def generate(case: Case, root: Path):
 
     if case.calculation == "power_flow":
         script = dss_script(case, None, 1.0, with_loads=True)
-        run_dss(script)
+        run_dss(script, case)
         write_text(target / "test.dss", "\n".join(script) + "\n")
         write_json(target / "asym_output.json", output_dataset("asym_output", pf_reference(case)))
         return
@@ -547,7 +589,7 @@ def generate(case: Case, root: Path):
     references = []
     for fault in case.faults:
         script = dss_script(case, fault, 1.1, with_loads=False)
-        run_dss(script)
+        run_dss(script, case)
         scripts.append(script)
         references.append(sc_reference(case, fault))
     dss_text = []
@@ -664,6 +706,15 @@ CASES = [
         lines=[Line(101, 1, 2, "ab", 3.0, neutral=True)],
         loads=[Load(301, 2, "asym_load", "const_y", [150e3, 100e3, 0.0], [40e3, 30e3, 0.0])],
         params=pf_params(["linear", "linear_current", "newton_raphson", "iterative_current"], 1e-8, 1e-8),
+    ),
+    Case(
+        # the only case where OpenDSS Kron-reduces the neutral itself (a LineCode with Kron=yes)
+        path="power_flow/asym-line/two-phase-bc-neutral-opendss-kron",
+        u_rated=10e3,
+        nodes=[1, 2],
+        lines=[Line(101, 1, 2, "bc", 4.0, neutral=True, opendss_kron=True)],
+        loads=[Load(301, 2, "asym_load", "const_pq", [0.0, 180e3, 90e3], [0.0, 50e3, 20e3])],
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-8),
     ),
     Case(
         path="power_flow/asym-line/swer-a",
