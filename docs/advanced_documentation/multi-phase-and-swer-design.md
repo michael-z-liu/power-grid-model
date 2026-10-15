@@ -73,8 +73,9 @@ In this document `<core>` means `power_grid_model_c/power_grid_model/include/pow
 * **`asym_line`** (`<core>/component/asym_line.hpp`) is the only branch built natively in abc.
   * It always inverts the full 3×3 series impedance (`y_series_abc_ = inv(z_series)`, line 39). A missing phase
     makes this inverse singular or NaN.
-  * The open-end shunt is only applied when *every* element of $Y_{shunt}$ is non-zero (line 110). Known pre-existing behaviour; Michael decided
-    (2026-10-15) to leave it as it is for now.
+  * The open-end shunt is only applied when *every* element of $Y_{shunt}$ is non-zero (line 110 at the time;
+    now `asym_line.hpp:269`). Known pre-existing behaviour; Michael decided (2026-10-15) to leave it as it is for
+    now.
   * The neutral is removed by Kron reduction (`<core>/component/line_utils.hpp:12-19`), which assumes the neutral
     is at zero volts.
 * **Sequence-domain components** (line, link, shunt, source and transformer) build their abc matrices from

@@ -898,6 +898,9 @@ def test_reduced_phase_shunt_left_on_in_one_scenario():
         experimental_features=_ExperimentalFeatures.enabled,
     )
     assert result[CT.node][AT.u][1, 1, 0] > 0.0
+    assert model.batch_error is not None
+    assert model.batch_error.failed_scenarios.tolist() == [0]
+    assert model.batch_error.errors[0].__class__ is ShuntAtReducedPhaseNode
 
     with pytest.raises(PowerGridBatchError) as error:
         model.calculate_power_flow_with_ext(

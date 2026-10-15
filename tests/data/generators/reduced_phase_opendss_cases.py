@@ -619,7 +619,7 @@ def generate(case: Case, root: Path):
 # cases
 
 # Tolerances: per case, the smallest round rtol (with atol <= 1e-6), then the smallest round atol, for which the worst
-# |actual - expected| / (atol + rtol |expected|) is below 0.1 (a 10x margin); see compare_reduced_phase_cases.py.
+# |actual - expected| / (atol + rtol |expected|) is below 0.1 (a 10x margin); see reduced_phase_compare_pgm.py.
 # PGM and OpenDSS agree to about 3.4e-10 relative everywhere; the cases with iterative_current are limited by its
 # convergence criterion (error_tolerance 1e-8 on the voltage gives up to 2e-8 relative on the power).
 SC_PARAMS = {
