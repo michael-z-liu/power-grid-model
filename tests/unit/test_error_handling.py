@@ -45,6 +45,7 @@ from power_grid_model.errors import (
     PowerGridBatchError,
     PowerGridError,
     ReducedPhaseNotSupported,
+    ShuntAtReducedPhaseNode,
 )
 
 from .utils import PowerGridModelWithExt
@@ -570,10 +571,16 @@ def test_deprecated_invalid_branch3_error():
         ),
         pytest.param(
             "Load or generator 12 has a non-zero specified power on phases (bc) that are not present at its node (node "
-            "phases: a). A sym_load or sym_gen is a balanced three-phase load; at a node without all phases, use an "
-            "asym_load or asym_gen with zero power on the absent phases.\n",
+            "phases: a). Use an asym_load or asym_gen with zero power on the absent phases; a sym_load or sym_gen "
+            "puts power on all three phases.\n",
             LoadGenOnAbsentPhase,
             id="load_gen_on_absent_phase",
+        ),
+        pytest.param(
+            "Shunt 500 is connected to a node without all phases. A shunt at a node without all phases is not "
+            "supported.\n",
+            ShuntAtReducedPhaseNode,
+            id="shunt_at_reduced_phase_node",
         ),
     ],
 )
@@ -839,8 +846,62 @@ def test_reduced_phase_shunt(calculation):
             )
         return model.calculate_short_circuit_with_ext(experimental_features=_ExperimentalFeatures.enabled)
 
-    with pytest.raises(ReducedPhaseNotSupported, match="Shunt 500 at a node without all phases"):
+    with pytest.raises(ShuntAtReducedPhaseNode, match="Shunt 500 is connected to a node without all phases"):
         calculate(PowerGridModelWithExt(input_data))
 
     input_data[CT.shunt][AT.status] = [0]
     calculate(PowerGridModelWithExt(input_data))
+
+
+def _single_phase_node_shunt_input(status: int = 1):
+    """node 0 (abc, source) --a-- node 1 (a) with a shunt at node 1"""
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 2)
+    shunt_input = initialize_array(DatasetType.input, CT.shunt, 1)
+    shunt_input[AT.id] = [500]
+    shunt_input[AT.node] = [1]
+    shunt_input[AT.status] = [status]
+    shunt_input[AT.g1] = [0.0]
+    shunt_input[AT.b1] = [1e-4]
+    shunt_input[AT.g0] = [0.0]
+    shunt_input[AT.b0] = [1e-4]
+    input_data[CT.shunt] = shunt_input
+    return input_data
+
+
+def test_reduced_phase_shunt_switched_off_in_every_scenario():
+    # the cache run with the base input sees an energised shunt, but every scenario switches it off
+    model = PowerGridModelWithExt(_single_phase_node_shunt_input())
+
+    update = initialize_array(DatasetType.update, CT.shunt, (2, 1))
+    update[AT.id] = 500
+    update[AT.status] = 0
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False, update_data={CT.shunt: update}, experimental_features=_ExperimentalFeatures.enabled
+    )
+    assert result[CT.node][AT.u].shape == (2, 2, 3)
+
+    # a single, non-batch calculation on the same model still raises
+    with pytest.raises(ShuntAtReducedPhaseNode, match="Shunt 500 is connected to a node without all phases"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_shunt_left_on_in_one_scenario():
+    model = PowerGridModelWithExt(_single_phase_node_shunt_input())
+
+    update = initialize_array(DatasetType.update, CT.shunt, (2, 1))
+    update[AT.id] = 500
+    update[AT.status] = [[1], [0]]
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False,
+        update_data={CT.shunt: update},
+        continue_on_batch_error=True,
+        experimental_features=_ExperimentalFeatures.enabled,
+    )
+    assert result[CT.node][AT.u][1, 1, 0] > 0.0
+
+    with pytest.raises(PowerGridBatchError) as error:
+        model.calculate_power_flow_with_ext(
+            symmetric=False, update_data={CT.shunt: update}, experimental_features=_ExperimentalFeatures.enabled
+        )
+    assert error.value.failed_scenarios.tolist() == [0]
+    assert error.value.errors[0].__class__ is ShuntAtReducedPhaseNode

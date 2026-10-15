@@ -240,22 +240,22 @@ Taken in M4:
   solver. A model with reduced-phase components always runs the asymmetric short circuit, also when every fault is
   `three_phase` and when there is no fault at all.
 
-Taken in M3 (decided by recommendation, pending Michael's review where marked):
+Taken in M3 (decided by recommendation; the points marked "decided by Michael" were reviewed on 2026-10-15):
 
 * **D8. Identity rows in the Y-bus.** `YBus::admittance()` keeps the identity rows of absent slots; this is
   documented at the accessor. Consumers that need the physical admittance (future state estimation) must mask these
   slots.
-* **D9. Experimental gate** (decided by recommendation, pending Michael's review). Until the Python validation (M9)
+* **D9. Experimental gate** (decided by Michael). Until the Python validation (M9)
   exists, a calculation on a model with one- or two-phase branches raises `ExperimentalFeature` ("A network with
   one- or two-phase branches is an experimental feature") unless experimental features are enabled. The gate is
   checked by the C API before the calculation starts, so it runs *before* the M4 guard: with experimental features
   disabled, every calculation type gives `ExperimentalFeature`; with them enabled, the M4 rules apply
   (`ReducedPhaseNotSupported` for symmetric power flow and state estimation). Model construction, including the
   `phases` validation below, is not gated, so invalid input is reported regardless.
-* **D10. `PhaseConnection` numbering** (decided by recommendation, pending Michael's review). The values are aligned
+* **D10. `PhaseConnection` numbering** (decided by Michael). The values are aligned
   with `FaultPhase`: `abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6`. Not provided (`na`) means `abc`; there
   is no `nan` enumerator.
-* **D11. Validation of `asym_line` input with `phases`** (decided by recommendation, pending Michael's review).
+* **D11. Validation of `asym_line` input with `phases`** (decided by Michael).
   An entry of the r, x or c matrix is required if both of its conductors are present and must be empty otherwise.
   A non-empty value on an absent phase is rejected rather than ignored, so that `phases = a` set by mistake on a
   three-phase line does not silently drop two phases. The present c entries are required (0 is allowed), as for
@@ -274,18 +274,22 @@ Taken in M3, for loads and shunts:
     and not 0 (an exact test). NaN and 0 both mean "no power". A component with status off has no injection, and a
     de-energised component is skipped.
   * **`sym_load`/`sym_gen` on a node without all phases is rejected** when its power is not 0 (decided by
-    recommendation, pending Michael's review). A `sym_load` is a balanced three-phase load: in an asymmetric
+    Michael). A `sym_load` is a balanced three-phase load: in an asymmetric
     calculation it puts $s/3$ on every phase. The alternatives (ignore the absent phases, or spread the power over
     the present phases) would silently drop load, or make one `sym_load` change meaning between scenarios when the
     node phases change with a status update. Rejecting first is forward-compatible. The message tells the user to
     use an `asym_load`/`asym_gen` with zero power on the absent phases.
   * **Batch:** the check runs per scenario on the updated values. The batch cache run swallows
-    `LoadGenOnAbsentPhase` (decided by recommendation, pending Michael's review), like `SparseMatrixError`, because
+    `LoadGenOnAbsentPhase` (decided by Michael), like `SparseMatrixError`, because
     the update data may fix the value; a value that no scenario fixes then fails each scenario on its own.
-* **D4. A shunt with status on at a node without all phases raises `ReducedPhaseNotSupported`** ("Shunt {id} at a
-  node without all phases ..."), in the asymmetric power-flow and the short-circuit input preparation, until an
-  asymmetric shunt exists. A shunt with status off is allowed. The Y-bus masking of M2 stays as a defensive layer.
-  It is not swallowed in the batch cache run, because it is structural.
+* **D4. A shunt with status on at a node without all phases raises `ShuntAtReducedPhaseNode`** ("Shunt {id} is
+  connected to a node without all phases. A shunt at a node without all phases is not supported."), in the asymmetric
+  power-flow and the short-circuit input preparation, until an asymmetric shunt exists. A shunt with status off is
+  allowed. The Y-bus masking of M2 stays as a defensive layer. The error has its own class, so that the batch cache
+  run can swallow it like `LoadGenOnAbsentPhase` without swallowing `ReducedPhaseNotSupported`. Each scenario is then
+  judged on its own: a base model with an energised shunt at a reduced-phase node succeeds in a batch where every
+  scenario switches the shunt off (decided by Michael: consistent with loads; revisit if a use case needs
+  otherwise).
 
 ## Component models (phase domain)
 

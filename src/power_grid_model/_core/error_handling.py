@@ -42,6 +42,7 @@ from power_grid_model._core.errors import (
     PowerGridSerializationError,
     PowerGridUnreachableHitError,
     ReducedPhaseNotSupported,
+    ShuntAtReducedPhaseNode,
     SparseMatrixError,
     TapSearchStrategyIncompatibleError,
     UnsupportedLoadGenTypeForVoltageRegulator,
@@ -113,6 +114,7 @@ _DANGLING_CONDUCTOR_RE = re.compile(
 _LOAD_GEN_ON_ABSENT_PHASE_RE = re.compile(r"Load or generator (-?\d+) has a non-zero specified power on phases")
 _INVALID_PHASE_CONNECTION_RE = re.compile(r"Invalid phase connection for ")  # multiple different flavors
 _MISSING_PHASE_FOR_WINDING_RE = re.compile(r"Winding of .+ has phases \([^)]*\) that are not all present at its node")
+_SHUNT_AT_REDUCED_PHASE_NODE_RE = re.compile(r"Shunt (-?\d+) is connected to a node without all phases")
 
 _ERROR_MESSAGE_PATTERNS = {
     _MISSING_CASE_FOR_ENUM_RE: MissingCaseForEnumError,
@@ -147,6 +149,7 @@ _ERROR_MESSAGE_PATTERNS = {
     _MISSING_PHASE_FOR_WINDING_RE: MissingPhaseForWinding,
     _INVALID_PHASE_CONNECTION_RE: InvalidPhaseConnection,
     _LOAD_GEN_ON_ABSENT_PHASE_RE: LoadGenOnAbsentPhase,
+    _SHUNT_AT_REDUCED_PHASE_NODE_RE: ShuntAtReducedPhaseNode,
 }
 
 

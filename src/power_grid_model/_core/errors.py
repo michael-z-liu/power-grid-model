@@ -184,3 +184,7 @@ class InvalidPhaseConnection(PowerGridError):
 
 class LoadGenOnAbsentPhase(PowerGridError):
     """A load or generator has a non-zero specified power on a phase that is not present at its node."""
+
+
+class ShuntAtReducedPhaseNode(PowerGridError):
+    """A shunt that is switched on is connected to a node without all phases."""

@@ -37,6 +37,7 @@ from power_grid_model.errors import (
     PowerGridError,
     PowerGridSerializationError,
     ReducedPhaseNotSupported,
+    ShuntAtReducedPhaseNode,
     SparseMatrixError,
     UnsupportedLoadGenTypeForVoltageRegulator,
     UnsupportedRegulatorCombinationError,
@@ -98,6 +99,7 @@ KNOWN_EXCEPTIONS: dict[str, type[BaseException] | None] = {
         MissingPhaseForWinding,
         InvalidPhaseConnection,
         LoadGenOnAbsentPhase,
+        ShuntAtReducedPhaseNode,
     )
 }
 KNOWN_EXCEPTIONS["Failed"] = _Failed

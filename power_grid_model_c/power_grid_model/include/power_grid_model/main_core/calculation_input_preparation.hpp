@@ -212,7 +212,7 @@ inline void check_no_shunt_at_reduced_phase_bus(main_model_state_c auto const& s
             continue;
         }
         if (Shunt const& shunt = get_component_by_sequence<Shunt>(state.components, i); shunt.status()) {
-            throw ReducedPhaseNotSupported{std::format("Shunt {} at a node without all phases", shunt.id())};
+            throw ShuntAtReducedPhaseNode{shunt.id()};
         }
     }
 }

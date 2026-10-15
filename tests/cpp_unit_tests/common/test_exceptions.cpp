@@ -136,6 +136,13 @@ TEST_CASE("Exceptions") {
         auto const msg = std::string{LoadGenOnAbsentPhase{ID{12}, "bc", "a"}.what()};
         CHECK(msg.starts_with("Load or generator 12 has a non-zero specified power on phases (bc) that are not present "
                               "at its node (node phases: a)."));
+        CHECK(msg.find("sym_load or sym_gen puts power on all three phases") != std::string::npos);
+        CHECK(msg.find("balanced") == std::string::npos);
+    }
+    SUBCASE("ShuntAtReducedPhaseNode") {
+        CHECK(std::string{ShuntAtReducedPhaseNode{ID{500}}.what()} ==
+              "Shunt 500 is connected to a node without all phases. A shunt at a node without all phases is not "
+              "supported.\n");
     }
     SUBCASE("InvalidPhaseConnection") {
         CHECK(std::string{InvalidPhaseConnection{"asym_line", ID{5}, "a", "r_bb is required"}.what()} ==
