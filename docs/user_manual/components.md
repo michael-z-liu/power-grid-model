@@ -307,6 +307,100 @@ $$
 \end{aligned}
 $$
 
+### Single-Phase Transformer
+
+* type name: `single_phase_transformer`
+
+`single_phase_transformer` is a [branch](#branch) with one winding on each side, for example a SWER isolating
+transformer (`ab` → `a`), a SWER distribution transformer (`a` → `a`) or a single-phase transformer on two phases of
+a three-phase network (`bc` → `a`). Each winding is connected between two phases of its node, or between one phase
+and earth.
+
+```{warning}
+The single-phase transformer is an experimental feature. A calculation on a model with a `single_phase_transformer`
+requires experimental features to be enabled. The Python data validation (`validate_input_data`) does not support
+it yet: it does not check its attributes, and it may report nodes that are only connected through it as invalid.
+```
+
+#### Input
+
+| name               | data type                                                                   | unit             | description                                                                         |                 required                 |  update  |                valid values                |
+| ------------------ | --------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- | :--------------------------------------: | :------: | :----------------------------------------: |
+| `u1`               | `double`                                                                    | volt (V)         | rated winding voltage at from-side, across the terminals of the winding             |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `u2`               | `double`                                                                    | volt (V)         | rated winding voltage at to-side, across the terminals of the winding               |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `sn`               | `double`                                                                    | volt-ampere (VA) | rated power                                                                         |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `uk`               | `double`                                                                    | -                | relative short circuit voltage, `0.1` means 10%                                     |                 &#10004;                 | &#10060; |      `>= pk / sn` and `> 0` and `< 1`      |
+| `pk`               | `double`                                                                    | watt (W)         | short circuit (copper) loss                                                         |                 &#10004;                 | &#10060; |                   `>= 0`                   |
+| `i0`               | `double`                                                                    | -                | relative no-load (magnetizing) current                                              |                 &#10004;                 | &#10060; |           `>= p0 / sn` and `< 1`           |
+| `p0`               | `double`                                                                    | watt (W)         | no-load (iron / magnetizing) loss                                                   |                 &#10004;                 | &#10060; |                   `>= 0`                   |
+| `from_connection`  | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the from-side winding                                                     |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`          |
+| `to_connection`    | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the to-side winding                                                       |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`          |
+| `clock`            | `int8_t`                                                                    | -                | relative polarity: `6` reverses the to-side winding                                 |           &#10060; default `0`           | &#10060; |       `0` or `6` (modulo 12)               |
+| `tap_side`         | {py:class}`BranchSide <power_grid_model.enum.BranchSide>`                   | -                | side of tap changer                                                                 |       &#10060; default `from_side`       | &#10060; |                                            |
+| `tap_pos`          | `int8_t`                                                                    | -                | current position of tap changer                                                     |        &#10060; default `tap_nom`        | &#10004; |                                            |
+| `tap_min`          | `int8_t`                                                                    | -                | position of tap changer at minimum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
+| `tap_max`          | `int8_t`                                                                    | -                | position of tap changer at maximum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
+| `tap_nom`          | `int8_t`                                                                    | -                | nominal position of tap changer                                                     |           &#10060; default `0`           | &#10060; |                                            |
+| `tap_size`         | `double`                                                                    | volt (V)         | size of each tap of the tap changer                                                 |           &#10060; default `0`           | &#10060; |                   `>= 0`                   |
+| `uk_min`           | `double`                                                                    | -                | relative short circuit voltage at minimum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_min / sn` and `> 0` and `< 1`    |
+| `uk_max`           | `double`                                                                    | -                | relative short circuit voltage at maximum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_max / sn` and `> 0` and `< 1`    |
+| `pk_min`           | `double`                                                                    | watt (W)         | short circuit (copper) loss at minimum tap                                          |      &#10060; default same as `pk`       | &#10060; |                   `>= 0`                   |
+| `pk_max`           | `double`                                                                    | watt (W)         | short circuit (copper) loss at maximum tap                                          |      &#10060; default same as `pk`       | &#10060; |                   `>= 0`                   |
+| `r_grounding_from` | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal of a phase-to-earth from-side winding and earth |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `x_grounding_from` | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal of a phase-to-earth from-side winding and earth  |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `r_grounding_to`   | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal of a phase-to-earth to-side winding and earth   |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `x_grounding_to`   | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal of a phase-to-earth to-side winding and earth    |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+
+* **Connections.** `a`, `b` and `c` are phase-to-earth windings; `ab`, `ac` and `bc` are phase-to-phase windings,
+  whose first phase is the positive terminal (`ab` is $U_a - U_b$). An unknown or missing connection raises
+  `MissingCaseForEnumError`. The phases of a winding must be present at its node (`MissingPhaseForWinding`); the
+  phases of a node behind the transformer are derived from its windings, so a SWER node behind an `ab` → `a`
+  transformer only has phase `a`.
+* **Winding voltages.** `u1` and `u2` are the rated voltages across the winding terminals, for example 22 kV for an
+  `ab` winding, 12.7 kV for an `a` SWER winding and 240 V for an `a` low-voltage winding. The `u_rated` of every node
+  stays $\sqrt3$ × the phase-to-earth voltage (22 kV for a 12.7 kV SWER node, 415 V for a 240 V node), so the
+  nominal winding voltage implied by a node is $u_{\text{rated}} / \sqrt3$ for a phase-to-earth winding and
+  $u_{\text{rated}}$ for a phase-to-phase winding. Other values give an off-nominal ratio; this is not checked.
+* **Earthing.** The earthed end of a phase-to-earth winding is connected to earth through `r_grounding_<side>` +
+  j `x_grounding_<side>`; not provided means solidly earthed. For a SWER isolating transformer this is the earth
+  electrode, which carries the entire SWER load current. A phase-to-phase winding has no earthed terminal, so its
+  `r_grounding` and `x_grounding` must be left empty (`InvalidPhaseConnection`); its common-mode voltage is held by a
+  very small admittance to earth, as for the zero sequence of a delta winding of `transformer`. The two windings of
+  an `a` → `a` transformer each have their own earthing impedance; a shared electrode is not supported.
+* **Polarity and phase shift.** `clock` 6 reverses the polarity of the to-side winding (for example `ac` with
+  `clock` 6 is a `ca` winding); any value other than 0 or 6 (modulo 12) raises `InvalidTransformerClock`. The output
+  angles are physical: a SWER node behind an `ab` → `a` transformer has a voltage angle of about +30°.
+* **Taps.** All tap attributes are optional; without them the ratio is nominal. The tap changer works as for
+  [transformer](#transformer) and `tap_pos` can be updated, but a tap limit that is not provided does not limit the
+  tap position, neither at construction nor in an update. `uk_min`/`pk_min` only apply when `tap_min` is provided
+  and `uk_max`/`pk_max` only when `tap_max` is provided. A reversed tap changer (`tap_min > tap_max`) needs both
+  limits. The automatic tap changer (`transformer_tap_regulator`) does not support this component.
+* **Calculations.** As for [one- and two-phase lines](#asym-line), symmetric calculations and state
+  estimation are not supported (`ReducedPhaseNotSupported`) and a short circuit is always calculated
+  asymmetrically. The output of a phase that is not part of a winding is 0.
+
+#### Steady state output
+
+The output is the standard [branch output](#branch). The `loading` is the larger of the apparent powers of the two
+sides divided by `sn`, where the apparent power of a side is the absolute value of the complex sum of its per-phase
+powers: $\max(|\sum_p \underline{S}_{\text{from},p}|, |\sum_p \underline{S}_{\text{to},p}|) / s_n$.
+
+#### Electric Model
+
+The series impedance and the magnetizing admittance are computed from `uk`, `pk`, `i0` and `p0` as for
+[transformer](#transformer), in ohm and siemens referred to the to side. With $n$ the ratio of the (tap-adjusted)
+winding voltages $u_1 / u_2$, the admittance of the two windings is
+
+$$
+   Y_{\text{prim}} = y_{\text{series}} \begin{bmatrix} 1/n^2 & -1/n \\ -1/n & 1 \end{bmatrix}
+   + \frac{y_{\text{shunt}}}{2} \begin{bmatrix} 1/n^2 & 0 \\ 0 & 1 \end{bmatrix}
+$$
+
+It is mapped onto the phases of the two nodes by the terminals of the windings, the earthing impedances are added
+and eliminated, and the result is converted to per unit with the phase-to-earth base voltage $u_{\text{rated}} /
+\sqrt3$ of each node. With one side disconnected, the connected winding sees the open-end shunt of the $\pi$ model.
+See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
+
 ### Generic Branch
 
 * type name: `generic_branch`

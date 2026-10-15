@@ -14,10 +14,13 @@ from power_grid_model._core.power_grid_meta import initialize_array
 from power_grid_model.enum import (
     AngleMeasurementType,
     CalculationMethod,
+    FaultPhase,
+    FaultType,
     LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
     TapChangingStrategy,
+    WindingConnection1P,
     WindingType,
     _ExperimentalFeatures,
 )
@@ -908,3 +911,126 @@ def test_reduced_phase_shunt_left_on_in_one_scenario():
         )
     assert error.value.failed_scenarios.tolist() == [0]
     assert error.value.errors[0].__class__ is ShuntAtReducedPhaseNode
+
+
+def _single_phase_transformer_input(behind_line: bool = False):
+    """node 0 (abc, 22 kV, source) -- single_phase_transformer 400 ab -> a (22 kV / 12.7 kV, earth electrode 5 ohm)
+    -- last node (SWER, u_rated 22 kV) with a load on phase a; behind_line: the from node is the a node 1 behind
+    asym_line 200"""
+    from_node = 1 if behind_line else 0
+    n_node = 3 if behind_line else 2
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], n_node)
+    input_data[CT.node][AT.u_rated] = 22e3
+    if not behind_line:
+        del input_data[CT.asym_line]
+    input_data[CT.asym_load][AT.node] = [n_node - 1]
+    input_data[CT.asym_load][AT.p_specified] = [[50e3, 0.0, 0.0]]
+
+    transformer_input = initialize_array(DatasetType.input, CT.single_phase_transformer, 1)
+    transformer_input[AT.id] = [400]
+    transformer_input[AT.from_node] = [from_node]
+    transformer_input[AT.to_node] = [n_node - 1]
+    transformer_input[AT.from_status] = [1]
+    transformer_input[AT.to_status] = [1]
+    transformer_input[AT.u1] = [22e3]
+    transformer_input[AT.u2] = [12.7e3]
+    transformer_input[AT.sn] = [200e3]
+    transformer_input[AT.uk] = [0.04]
+    transformer_input[AT.pk] = [2e3]
+    transformer_input[AT.i0] = [0.0]
+    transformer_input[AT.p0] = [0.0]
+    transformer_input["from_connection"] = [WindingConnection1P.ab]
+    transformer_input["to_connection"] = [WindingConnection1P.a]
+    transformer_input[AT.r_grounding_to] = [5.0]
+    input_data[CT.single_phase_transformer] = transformer_input
+    return input_data
+
+
+def test_winding_connection_1p_exported():
+    assert [(member.name, member.value) for member in WindingConnection1P] == [
+        ("a", 1),
+        ("b", 2),
+        ("c", 3),
+        ("ab", 4),
+        ("ac", 5),
+        ("bc", 6),
+    ]
+
+
+def test_single_phase_transformer_calculations():
+    model = PowerGridModelWithExt(_single_phase_transformer_input())
+    enabled = _ExperimentalFeatures.enabled
+
+    result = model.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
+    u = result[CT.node][AT.u][1]
+    assert u[0] > 0.0
+    assert u[1] == 0.0
+    assert u[2] == 0.0
+    # the SWER voltage follows U_a - U_b, which leads U_a by 30 degrees
+    assert result[CT.node][AT.u_angle][1][0] == pytest.approx(np.pi / 6.0, abs=0.05)
+    p_to = result[CT.single_phase_transformer][AT.p_to][0]
+    assert p_to[0] < 0.0
+    assert p_to[1] == 0.0
+    assert p_to[2] == 0.0
+    assert result[CT.single_phase_transformer][AT.loading][0] > 0.0
+
+    with pytest.raises(ExperimentalFeature):
+        model.calculate_power_flow(symmetric=False)
+    with pytest.raises(ReducedPhaseNotSupported, match="Symmetric power flow"):
+        model.calculate_power_flow_with_ext(symmetric=True, experimental_features=enabled)
+
+    fault_input = initialize_array(DatasetType.input, CT.fault, 1)
+    fault_input[AT.id] = [600]
+    fault_input[AT.status] = [1]
+    fault_input[AT.fault_type] = [FaultType.single_phase_to_ground]
+    fault_input[AT.fault_phase] = [FaultPhase.a]
+    fault_input[AT.fault_object] = [1]
+    input_data = _single_phase_transformer_input()
+    input_data[CT.fault] = fault_input
+    sc_result = PowerGridModelWithExt(input_data).calculate_short_circuit_with_ext(experimental_features=enabled)
+    assert sc_result[CT.fault][AT.i_f][0][0] > 0.0
+    assert sc_result[CT.single_phase_transformer][AT.i_to][0][0] > 0.0
+
+
+def test_single_phase_transformer_missing_phase_for_winding():
+    # an ab primary at the a node behind asym_line 200
+    model = PowerGridModelWithExt(_single_phase_transformer_input(behind_line=True))
+    with pytest.raises(MissingPhaseForWinding, match="branch with ID 400"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_single_phase_transformer_invalid_input():
+    input_data = _single_phase_transformer_input()
+    input_data[CT.single_phase_transformer][AT.r_grounding_from] = [5.0]
+    with pytest.raises(InvalidPhaseConnection, match="r_grounding_from"):
+        PowerGridModel(input_data)
+
+    input_data = _single_phase_transformer_input()
+    input_data[CT.single_phase_transformer]["from_connection"] = [0]
+    with pytest.raises(MissingCaseForEnumError):
+        PowerGridModel(input_data)
+
+    input_data = _single_phase_transformer_input()
+    input_data[CT.single_phase_transformer][AT.clock] = [3]
+    with pytest.raises(InvalidTransformerClock):
+        PowerGridModel(input_data)
+
+
+def test_single_phase_transformer_tap_batch():
+    # the tap limits are not provided, so the updated tap positions are not limited
+    input_data = _single_phase_transformer_input()
+    input_data[CT.single_phase_transformer][AT.tap_size] = [220.0]
+    model = PowerGridModelWithExt(input_data)
+
+    update = initialize_array(DatasetType.update, CT.single_phase_transformer, (3, 1))
+    update[AT.id] = 400
+    update[AT.tap_pos] = [[-2], [0], [2]]
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False,
+        update_data={CT.single_phase_transformer: update},
+        experimental_features=_ExperimentalFeatures.enabled,
+    )
+    u = result[CT.node][AT.u][:, 1, 0]
+    # a higher tap position on the from side raises u1 and lowers the secondary voltage in proportion
+    assert u[0] / u[1] == pytest.approx(22e3 / 21.56e3, rel=1e-3)
+    assert u[1] / u[2] == pytest.approx(22.44e3 / 22e3, rel=1e-3)

@@ -327,8 +327,17 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
 * **D18. Working fixed taps.** `tap_side`, `tap_pos`, `tap_min`, `tap_max`, `tap_nom`, `tap_size`, `uk_min`,
   `uk_max`, `pk_min` and `pk_max` work as for `transformer` (the same tap-adjusted voltages and
   `tap_adjust_impedance`), and `tap_pos` can be updated through `TransformerUpdate`. Unlike `transformer`, all tap
-  fields are optional: `tap_size`, `tap_min`, `tap_max` and `tap_nom` default to 0, `tap_pos` to `tap_nom` and
-  `tap_side` to from, which gives the nominal ratio. The tap regulator stays "Later".
+  fields are optional: `tap_size` and `tap_nom` default to 0, `tap_pos` to `tap_nom` and `tap_side` to from, which
+  gives the nominal ratio. A tap limit that is not provided does not limit the tap position (M5b, so that a given
+  `tap_pos` is not silently clamped to 0): `tap_min` and `tap_max` then take the values $\min(t, t_{nom})$ and
+  $\max(t, t_{nom})$ for the current tap position $t$, at construction and again after every update, so an updated
+  `tap_pos` outside the earlier range is not limited either. Not provided is remembered (stored as `na`), and the
+  effective value is computed in the `tap_min()`/`tap_max()` getters and in the limiting of a new tap position. A
+  provided limit still limits as for `transformer`. Without both limits the tap direction is taken from the effective
+  values, which is increasing for a normally numbered tap changer; a reversed tap changer
+  (`tap_min > tap_max`) needs both limits. `uk_min`/`pk_min` only apply when `tap_min` is provided and
+  `uk_max`/`pk_max` only when `tap_max` is provided; otherwise the short circuit parameters stay at `uk`/`pk` on that
+  side of `tap_nom`. The tap regulator stays "Later".
 
 ## Component models (phase domain)
 

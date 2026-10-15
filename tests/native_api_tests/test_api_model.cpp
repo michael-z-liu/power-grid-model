@@ -18,9 +18,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <exception> // NOLINT(misc-include-cleaner)
 #include <map>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1198,6 +1200,112 @@ TEST_CASE("API Model - reduced phase") {
         sc_node_output.get_value(PGM_def_sc_output_node_u, u.data(), -1);
         CHECK(u[1][0] > 0.0);
         CHECK(u[1][1] == 0.0);
+    }
+}
+
+namespace {
+// node 1 (abc, 22 kV, source) -- single_phase_transformer ab -> a (22 kV / 12.7 kV, earth electrode 5 ohm) -- node 2
+// (SWER, u_rated 22 kV) with a load on phase a and a single-phase-to-earth fault
+auto single_phase_transformer_model_json() {
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 22000},
+      {"id": 2, "u_rated": 22000}
+    ],
+    "source": [
+      {"id": 3, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e9}
+    ],
+    "single_phase_transformer": [
+      {"id": 4, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "u1": 22000, "u2": 12700,
+       "sn": 200000, "uk": 0.04, "pk": 2000, "i0": 0, "p0": 0, "from_connection": 4, "to_connection": 1,
+       "r_grounding_to": 5}
+    ],
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [50000, 0, 0], "q_specified": [0, 0, 0]}
+    ],
+    "fault": [
+      {"id": 6, "status": 1, "fault_type": 1, "fault_phase": 1, "fault_object": 2}
+    ]
+  }
+})json";
+}
+} // namespace
+
+TEST_CASE("API Model - single phase transformer") {
+    using namespace std::string_literals;
+
+    auto const owning_input_dataset = load_dataset(single_phase_transformer_model_json());
+    Model model{50.0, owning_input_dataset.dataset};
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+    options.set_symmetric(0);
+    options.set_calculation_method(PGM_newton_raphson);
+
+    Buffer node_output{PGM_def_asym_output_node, 2};
+    node_output.set_nan();
+    Buffer transformer_output{PGM_def_asym_output_single_phase_transformer, 1};
+    transformer_output.set_nan();
+    DatasetMutable asym_output{"asym_output", false, 1};
+    asym_output.add_buffer("node", 2, 2, nullptr, node_output);
+    asym_output.add_buffer("single_phase_transformer", 1, 1, nullptr, transformer_output);
+
+    SUBCASE("Asymmetric power flow") {
+        model.calculate(options, asym_output);
+        std::array<std::array<double, 3>, 2> u{};
+        std::array<std::array<double, 3>, 2> u_angle{};
+        node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+        node_output.get_value(PGM_def_asym_output_node_u_angle, u_angle.data(), -1);
+        CHECK(u[1][0] > 0.0);
+        CHECK(u[1][1] == 0.0);
+        CHECK(u[1][2] == 0.0);
+        // the SWER voltage follows U_a - U_b, which leads U_a by 30 degrees
+        CHECK(std::abs(u_angle[1][0] - std::numbers::pi / 6.0) < 0.05);
+
+        std::array<std::array<double, 3>, 1> p_to{};
+        std::array<double, 1> loading{};
+        transformer_output.get_value(PGM_def_asym_output_single_phase_transformer_p_to, p_to.data(), -1);
+        transformer_output.get_value(PGM_def_asym_output_single_phase_transformer_loading, loading.data(), -1);
+        CHECK(p_to[0][0] < 0.0);
+        CHECK(p_to[0][1] == 0.0);
+        CHECK(p_to[0][2] == 0.0);
+        CHECK(loading[0] > 0.0);
+    }
+
+    SUBCASE("Experimental features are required") {
+        options.set_experimental_features(PGM_experimental_features_disabled);
+        check_throws_with([&model, &asym_output](auto const& opt) { model.calculate(opt, asym_output); },
+                          PGM_regular_error, "is an experimental feature"s, options);
+    }
+
+    SUBCASE("Symmetric power flow is not supported") {
+        Buffer sym_node_output{PGM_def_sym_output_node, 2};
+        DatasetMutable sym_output{"sym_output", false, 1};
+        sym_output.add_buffer("node", 2, 2, nullptr, sym_node_output);
+        options.set_symmetric(1);
+        check_throws_with([&model, &sym_output](auto const& opt) { model.calculate(opt, sym_output); },
+                          PGM_regular_error,
+                          "Symmetric power flow is not supported in a network with one- or two-phase nodes"s, options);
+    }
+
+    SUBCASE("Single-phase-to-earth fault at the SWER node") {
+        options.set_calculation_type(PGM_short_circuit);
+        options.set_calculation_method(PGM_iec60909);
+        Buffer fault_output{PGM_def_sc_output_fault, 1};
+        fault_output.set_nan();
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("fault", 1, 1, nullptr, fault_output);
+        model.calculate(options, sc_output);
+        std::array<std::array<double, 3>, 1> i_f{};
+        fault_output.get_value(PGM_def_sc_output_fault_i_f, i_f.data(), -1);
+        CHECK(i_f[0][0] > 0.0);
+        CHECK(i_f[0][1] == 0.0);
+        CHECK(i_f[0][2] == 0.0);
     }
 }
 

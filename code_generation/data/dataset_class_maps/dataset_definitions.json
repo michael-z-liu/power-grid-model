@@ -29,6 +29,10 @@
           "class_name": "TransformerInput"
         },
         {
+          "names": ["single_phase_transformer"],
+          "class_name": "SinglePhaseTransformerInput"
+        },
+        {
           "names": ["transformer_tap_regulator"],
           "class_name": "TransformerTapRegulatorInput"
         },
@@ -79,7 +83,7 @@
           "class_name": "NodeOutput"
         },
         {
-          "names": ["line", "link", "transformer", "generic_branch", "asym_line"],
+          "names": ["line", "link", "transformer", "generic_branch", "asym_line", "single_phase_transformer"],
           "class_name": "BranchOutput"
         },
         {
@@ -141,6 +145,10 @@
           "class_name": "TransformerUpdate"
         },
         {
+          "names": ["single_phase_transformer"],
+          "class_name": "TransformerUpdate"
+        },
+        {
           "names": ["transformer_tap_regulator"],
           "class_name": "TransformerTapRegulatorUpdate"
         },
@@ -191,7 +199,7 @@
           "class_name": "NodeShortCircuitOutput"
         },
         {
-          "names": ["line", "link", "transformer", "asym_line"],
+          "names": ["line", "link", "transformer", "asym_line", "single_phase_transformer"],
           "class_name": "BranchShortCircuitOutput"
         },
         {

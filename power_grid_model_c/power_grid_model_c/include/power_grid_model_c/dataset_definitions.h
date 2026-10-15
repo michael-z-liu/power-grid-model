@@ -142,6 +142,38 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_input_transformer_r_ground
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_transformer_x_grounding_from;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_transformer_r_grounding_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_transformer_x_grounding_to;
+// component single_phase_transformer
+PGM_API extern PGM_MetaComponent const* const PGM_def_input_single_phase_transformer;
+// attributes of input single_phase_transformer
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_id;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_node;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_node;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_status;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_status;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_u1;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_u2;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_sn;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_i0;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_p0;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_connection;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_connection;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_clock;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_side;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_pos;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_min;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_max;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_nom;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_size;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_min;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_max;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_min;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_max;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_r_grounding_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_x_grounding_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_r_grounding_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_x_grounding_to;
 // component transformer_tap_regulator
 PGM_API extern PGM_MetaComponent const* const PGM_def_input_transformer_tap_regulator;
 // attributes of input transformer_tap_regulator
@@ -425,6 +457,20 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_p_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_q_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_i_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_s_to;
+// component single_phase_transformer
+PGM_API extern PGM_MetaComponent const* const PGM_def_sym_output_single_phase_transformer;
+// attributes of sym_output single_phase_transformer
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_id;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_energized;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_loading;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_p_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_q_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_i_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_s_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_p_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_q_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_i_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_s_to;
 // component transformer_tap_regulator
 PGM_API extern PGM_MetaComponent const* const PGM_def_sym_output_transformer_tap_regulator;
 // attributes of sym_output transformer_tap_regulator
@@ -648,6 +694,20 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_p_to
 PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_q_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_i_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_s_to;
+// component single_phase_transformer
+PGM_API extern PGM_MetaComponent const* const PGM_def_asym_output_single_phase_transformer;
+// attributes of asym_output single_phase_transformer
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_id;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_energized;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_loading;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_p_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_q_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_i_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_s_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_p_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_q_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_i_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_s_to;
 // component transformer_tap_regulator
 PGM_API extern PGM_MetaComponent const* const PGM_def_asym_output_transformer_tap_regulator;
 // attributes of asym_output transformer_tap_regulator
@@ -820,6 +880,13 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_update_transformer_id;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_update_transformer_from_status;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_update_transformer_to_status;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_update_transformer_tap_pos;
+// component single_phase_transformer
+PGM_API extern PGM_MetaComponent const* const PGM_def_update_single_phase_transformer;
+// attributes of update single_phase_transformer
+PGM_API extern PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_id;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_from_status;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_to_status;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_tap_pos;
 // component transformer_tap_regulator
 PGM_API extern PGM_MetaComponent const* const PGM_def_update_transformer_tap_regulator;
 // attributes of update transformer_tap_regulator
@@ -993,6 +1060,15 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_from
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_from_angle;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_to;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_to_angle;
+// component single_phase_transformer
+PGM_API extern PGM_MetaComponent const* const PGM_def_sc_output_single_phase_transformer;
+// attributes of sc_output single_phase_transformer
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_id;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_energized;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_from;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_from_angle;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_to;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_to_angle;
 // component three_winding_transformer
 PGM_API extern PGM_MetaComponent const* const PGM_def_sc_output_three_winding_transformer;
 // attributes of sc_output three_winding_transformer

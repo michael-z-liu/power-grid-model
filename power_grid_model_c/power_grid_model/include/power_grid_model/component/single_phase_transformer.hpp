@@ -83,14 +83,14 @@ class SinglePhaseTransformer : public Branch {
           to_{winding_of(transformer_input.to_connection)},
           clock_{checked_clock(id(), transformer_input.clock)},
           tap_side_{is_nan(transformer_input.tap_side) ? BranchSide::from : transformer_input.tap_side},
-          tap_min_{zero_if_nan(transformer_input.tap_min)},
-          tap_max_{zero_if_nan(transformer_input.tap_max)},
+          tap_min_{transformer_input.tap_min},
+          tap_max_{transformer_input.tap_max},
           tap_nom_{zero_if_nan(transformer_input.tap_nom)},
-          tap_direction_{tap_max_ > tap_min_ ? IntS{1} : IntS{-1}},
-          uk_min_{is_nan(transformer_input.uk_min) ? uk_ : transformer_input.uk_min},
-          uk_max_{is_nan(transformer_input.uk_max) ? uk_ : transformer_input.uk_max},
-          pk_min_{is_nan(transformer_input.pk_min) ? pk_ : transformer_input.pk_min},
-          pk_max_{is_nan(transformer_input.pk_max) ? pk_ : transformer_input.pk_max},
+          // the tap dependent short circuit parameters at a limit only apply when that limit is provided
+          uk_min_{is_nan(transformer_input.uk_min) || tap_min_ == na_IntS ? uk_ : transformer_input.uk_min},
+          uk_max_{is_nan(transformer_input.uk_max) || tap_max_ == na_IntS ? uk_ : transformer_input.uk_max},
+          pk_min_{is_nan(transformer_input.pk_min) || tap_min_ == na_IntS ? pk_ : transformer_input.pk_min},
+          pk_max_{is_nan(transformer_input.pk_max) || tap_max_ == na_IntS ? pk_ : transformer_input.pk_max},
           base_u_from_{u1_rated / sqrt3},
           base_u_to_{u2_rated / sqrt3},
           base_i_from_{base_power_3p / u1_rated / sqrt3},
@@ -127,8 +127,9 @@ class SinglePhaseTransformer : public Branch {
     // getters
     constexpr IntS tap_pos() const { return tap_pos_; }
     constexpr BranchSide tap_side() const { return tap_side_; }
-    constexpr IntS tap_min() const { return tap_min_; }
-    constexpr IntS tap_max() const { return tap_max_; }
+    // a tap limit that is not provided follows the tap position, so it never limits it
+    constexpr IntS tap_min() const { return tap_min_ == na_IntS ? std::min(tap_pos_, tap_nom_) : tap_min_; }
+    constexpr IntS tap_max() const { return tap_max_ == na_IntS ? std::max(tap_pos_, tap_nom_) : tap_max_; }
     constexpr IntS tap_nom() const { return tap_nom_; }
     constexpr IntS clock() const { return clock_; }
 
@@ -173,10 +174,9 @@ class SinglePhaseTransformer : public Branch {
     IntS clock_;
     BranchSide tap_side_;
     IntS tap_pos_{};
-    IntS tap_min_;
-    IntS tap_max_;
+    IntS tap_min_; // na_IntS: not provided, see tap_min()
+    IntS tap_max_; // na_IntS: not provided, see tap_max()
     IntS tap_nom_;
-    IntS tap_direction_;
     double uk_min_;
     double uk_max_;
     double pk_min_;
@@ -241,11 +241,18 @@ class SinglePhaseTransformer : public Branch {
         return {is_nan(r) ? 0.0 : r, is_nan(x) ? 0.0 : x};
     }
 
+    // limit the tap position as transformer does; a limit that is not provided takes the value of tap_min() or
+    // tap_max() for the new tap position, so only the provided limits can limit it
     constexpr IntS tap_limit(IntS new_tap) const {
-        new_tap = std::min(new_tap, std::max(tap_max_, tap_min_));
-        new_tap = std::max(new_tap, std::min(tap_max_, tap_min_));
+        IntS const lower = tap_min_ == na_IntS ? std::min(new_tap, tap_nom_) : tap_min_;
+        IntS const upper = tap_max_ == na_IntS ? std::max(new_tap, tap_nom_) : tap_max_;
+        new_tap = std::min(new_tap, std::max(upper, lower));
+        new_tap = std::max(new_tap, std::min(upper, lower));
         return new_tap;
     }
+
+    // as transformer: a higher tap position raises the voltage of the tapped winding when tap_max > tap_min
+    constexpr IntS tap_direction() const { return tap_max() > tap_min() ? IntS{1} : IntS{-1}; }
 
     // terminals of a winding at the side with the given slot offset and earthing electrode
     static Terminals terminals_of(Winding const& winding, Idx offset, Idx electrode, DoubleComplex const& z_grounding) {
@@ -275,13 +282,14 @@ class SinglePhaseTransformer : public Branch {
     Matrix2 primitive_admittance() const {
         double u1 = u1_;
         double u2 = u2_;
+        double const tap_offset = tap_direction() * (tap_pos_ - tap_nom_) * tap_size_;
         if (tap_side_ == BranchSide::from) {
-            u1 += tap_direction_ * (tap_pos_ - tap_nom_) * tap_size_;
+            u1 += tap_offset;
         } else {
-            u2 += tap_direction_ * (tap_pos_ - tap_nom_) * tap_size_;
+            u2 += tap_offset;
         }
-        double const uk = tap_adjust_impedance(tap_pos_, tap_min_, tap_max_, tap_nom_, uk_, uk_min_, uk_max_);
-        double const pk = tap_adjust_impedance(tap_pos_, tap_min_, tap_max_, tap_nom_, pk_, pk_min_, pk_max_);
+        double const uk = tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, uk_, uk_min_, uk_max_);
+        double const pk = tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, pk_, pk_min_, pk_max_);
 
         // series impedance referred to side 2, as for transformer
         double const z_series_abs = std::abs(uk) * u2 * u2 / sn_;

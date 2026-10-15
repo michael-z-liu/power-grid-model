@@ -356,6 +356,38 @@ class PhaseConnection(IntEnum):
     """
 
 
+class WindingConnection1P(IntEnum):
+    """
+    The phase slots of a winding of a single-phase transformer. A single phase is a phase-to-earth winding; for a
+    phase-to-phase winding, the first phase is the positive terminal. Required; there is no default.
+    """
+
+    a = 1
+    """
+    Between the first phase and earth
+    """
+    b = 2
+    """
+    Between the second phase and earth
+    """
+    c = 3
+    """
+    Between the third phase and earth
+    """
+    ab = 4
+    """
+    Between the first and the second phase
+    """
+    ac = 5
+    """
+    Between the first and the third phase
+    """
+    bc = 6
+    """
+    Between the second and the third phase
+    """
+
+
 class LoggerType(IntEnum):
     """Logger types for opt-in diagnostic output from calculations.
 

@@ -25,6 +25,7 @@ from power_grid_model._core.enum import (
     PhaseConnection,
     ShortCircuitVoltageScaling,
     TapChangingStrategy,
+    WindingConnection1P,
     WindingType,
     _ExperimentalFeatures,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "PhaseConnection",
     "ShortCircuitVoltageScaling",
     "TapChangingStrategy",
+    "WindingConnection1P",
     "WindingType",
     "_ExperimentalFeatures",
 ]

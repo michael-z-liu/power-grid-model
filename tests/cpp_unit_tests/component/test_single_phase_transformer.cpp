@@ -607,6 +607,76 @@ TEST_CASE("Test single phase transformer - taps") {
     }
 }
 
+TEST_CASE("Test single phase transformer - tap limits not provided") {
+    using enum WindingConnection1P;
+    ConnectionCase const phase_a = connection_case(a);
+    ConnectionCase const phase_bc = connection_case(bc);
+    auto const unlimited_input = [](IntS tap_pos) {
+        SinglePhaseTransformerInput input = test_input(bc, a);
+        input.tap_side = BranchSide::from;
+        input.tap_pos = tap_pos;
+        input.tap_nom = 0;
+        input.tap_size = 200.0;
+        return input;
+    };
+    auto const check_tap = [&](SinglePhaseTransformer const& transformer, IntS tap_pos) {
+        CHECK(transformer.tap_pos() == tap_pos);
+        CHECK(transformer.tap_min() == std::min(tap_pos, IntS{0}));
+        CHECK(transformer.tap_max() == std::max(tap_pos, IntS{0}));
+        check_param(transformer.calc_param<asymmetric_t>(),
+                    {.from = phase_bc, .to = phase_a, .y = primitive({.u1 = test_u1 + tap_pos * 200.0})});
+    };
+
+    SUBCASE("The tap position is not limited") {
+        check_tap(make_transformer(unlimited_input(3)), 3);
+        check_tap(make_transformer(unlimited_input(-2)), -2);
+        check_tap(make_transformer(unlimited_input(na_IntS)), 0);
+    }
+    SUBCASE("An update outside the limits at construction is not limited either") {
+        SinglePhaseTransformer transformer = make_transformer(unlimited_input(3));
+        TransformerUpdate const update{.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = 7};
+        TransformerUpdate const inverse = transformer.inverse(update);
+        CHECK(transformer.update(update).param);
+        check_tap(transformer, 7);
+        transformer.update({.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = -4});
+        check_tap(transformer, -4);
+        transformer.update(inverse);
+        check_tap(transformer, 3);
+    }
+    SUBCASE("From the nominal tap, the tap direction is increasing") {
+        SinglePhaseTransformer transformer = make_transformer(unlimited_input(na_IntS));
+        transformer.update({.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = 2});
+        check_tap(transformer, 2);
+    }
+    SUBCASE("A provided limit still limits the tap position") {
+        SinglePhaseTransformerInput input = unlimited_input(3);
+        input.tap_min = -1;
+        SinglePhaseTransformer transformer = make_transformer(input);
+        CHECK(transformer.tap_pos() == 3);
+        CHECK(transformer.tap_min() == -1);
+        CHECK(transformer.tap_max() == 3);
+        transformer.update({.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = -4});
+        CHECK(transformer.tap_pos() == -1);
+        CHECK(transformer.tap_max() == 0);
+        check_param(transformer.calc_param<asymmetric_t>(),
+                    {.from = phase_bc, .to = phase_a, .y = primitive({.u1 = test_u1 - 200.0})});
+    }
+    SUBCASE("Tap dependent short circuit parameters only apply at a provided limit") {
+        SinglePhaseTransformerInput input = unlimited_input(2);
+        input.tap_min = -5;
+        input.uk_min = 0.03;
+        input.uk_max = 0.05;
+        // no tap_max: uk_max does not apply
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc, .to = phase_a, .y = primitive({.u1 = test_u1 + 400.0})});
+        input.tap_pos = -3;
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc,
+                     .to = phase_a,
+                     .y = primitive({.u1 = test_u1 - 600.0, .uk = test_uk + 3.0 * (0.03 - test_uk) / 5.0})});
+    }
+}
+
 TEST_CASE("Test single phase transformer - invalid input") {
     using enum WindingConnection1P;
 

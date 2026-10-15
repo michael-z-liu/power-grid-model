@@ -26,6 +26,7 @@
 #include "component/regulator.hpp"
 #include "component/sensor.hpp"
 #include "component/shunt.hpp"
+#include "component/single_phase_transformer.hpp"
 #include "component/source.hpp"
 #include "component/three_winding_transformer.hpp"
 #include "component/transformer.hpp"
@@ -35,10 +36,11 @@
 
 namespace power_grid_model {
 
-using AllComponents = ComponentList<Node, Line, AsymLine, GenericBranch, Transformer, Link, ThreeWindingTransformer,
-                                    Shunt, Source, SymGenerator, AsymGenerator, SymLoad, AsymLoad, SymPowerSensor,
-                                    AsymPowerSensor, SymVoltageSensor, AsymVoltageSensor, SymCurrentSensor,
-                                    AsymCurrentSensor, Fault, TransformerTapRegulator, VoltageRegulator>;
+using AllComponents =
+    ComponentList<Node, Line, AsymLine, GenericBranch, Transformer, SinglePhaseTransformer, Link,
+                  ThreeWindingTransformer, Shunt, Source, SymGenerator, AsymGenerator, SymLoad, AsymLoad,
+                  SymPowerSensor, AsymPowerSensor, SymVoltageSensor, AsymVoltageSensor, SymCurrentSensor,
+                  AsymCurrentSensor, Fault, TransformerTapRegulator, VoltageRegulator>;
 
 using AllExtraRetrievableTypes =
     ExtraRetrievableTypes<Base, Node, Edge, Branch, Branch3, Appliance, GenericLoadGen, GenericLoad, GenericGenerator,
