@@ -107,6 +107,16 @@ class InvalidPhaseConnection : public PowerGridError {
                                      reason)} {}
 };
 
+class LoadGenOnAbsentPhase : public PowerGridError {
+  public:
+    LoadGenOnAbsentPhase(ID id, std::string_view absent_phases, std::string_view node_phases)
+        : PowerGridError{std::format("Load or generator {} has a non-zero specified power on phases ({}) that are not "
+                                     "present at its node (node phases: {}). A sym_load or sym_gen is a balanced "
+                                     "three-phase load; at a node without all phases, use an asym_load or asym_gen "
+                                     "with zero power on the absent phases.\n",
+                                     id, absent_phases, node_phases)} {}
+};
+
 class ReducedPhaseNotSupported : public PowerGridError {
   public:
     explicit ReducedPhaseNotSupported(std::string_view feature)

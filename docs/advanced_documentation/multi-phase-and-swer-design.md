@@ -265,14 +265,27 @@ Taken in M3 (decided by recommendation, pending Michael's review where marked):
   ID 42", "branch3 with ID 7") when the model registered the IDs, which it does whenever a branch is not abc → abc.
   Hand-built topologies without IDs keep the index ("branch #2").
 
-Still open:
+Taken in M3, for loads and shunts:
 
-* **D3. Load/gen power on an absent phase** (for example a `sym_load` on a SWER node, which in an asymmetric
-  calculation puts $s/3$ on phases b and c). At math level it is ignored exactly. Recommendation: a model-level error
-  with the component ID in M3 (`<core>/main_core/calculation_input_preparation.hpp`), so that load is not dropped
-  silently.
-* **D4. Shunt on a reduced-phase node.** M2 keeps the present-phase block of the shunt through Y-bus masking (its
-  absent legs drop out). Recommendation: an M3 error until an asymmetric shunt exists, consistent with D3.
+* **D3. Load/gen power on an absent phase is a model-level error** (`LoadGenOnAbsentPhase`, with the component ID).
+  * **Where:** in the asymmetric power-flow input preparation
+    (`<core>/main_core/calculation_input_preparation.hpp`), only when a math model has `has_reduced_phase`.
+  * **What counts:** per absent phase, the real or imaginary part of the injection the calculation uses is not NaN
+    and not 0 (an exact test). NaN and 0 both mean "no power". A component with status off has no injection, and a
+    de-energised component is skipped.
+  * **`sym_load`/`sym_gen` on a node without all phases is rejected** when its power is not 0 (decided by
+    recommendation, pending Michael's review). A `sym_load` is a balanced three-phase load: in an asymmetric
+    calculation it puts $s/3$ on every phase. The alternatives (ignore the absent phases, or spread the power over
+    the present phases) would silently drop load, or make one `sym_load` change meaning between scenarios when the
+    node phases change with a status update. Rejecting first is forward-compatible. The message tells the user to
+    use an `asym_load`/`asym_gen` with zero power on the absent phases.
+  * **Batch:** the check runs per scenario on the updated values. The batch cache run swallows
+    `LoadGenOnAbsentPhase` (decided by recommendation, pending Michael's review), like `SparseMatrixError`, because
+    the update data may fix the value; a value that no scenario fixes then fails each scenario on its own.
+* **D4. A shunt with status on at a node without all phases raises `ReducedPhaseNotSupported`** ("Shunt {id} at a
+  node without all phases ..."), in the asymmetric power-flow and the short-circuit input preparation, until an
+  asymmetric shunt exists. A shunt with status off is allowed. The Y-bus masking of M2 stays as a defensive layer.
+  It is not swallowed in the batch cache run, because it is structural.
 
 ## Component models (phase domain)
 

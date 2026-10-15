@@ -132,6 +132,11 @@ TEST_CASE("Exceptions") {
         CHECK(std::string{DanglingConductor{"branch with ID 42", "b", "a", "open"}.what()}.starts_with(
             "Conductors of branch with ID 42 on phases (b) are not present"));
     }
+    SUBCASE("LoadGenOnAbsentPhase") {
+        auto const msg = std::string{LoadGenOnAbsentPhase{ID{12}, "bc", "a"}.what()};
+        CHECK(msg.starts_with("Load or generator 12 has a non-zero specified power on phases (bc) that are not present "
+                              "at its node (node phases: a)."));
+    }
     SUBCASE("InvalidPhaseConnection") {
         CHECK(std::string{InvalidPhaseConnection{"asym_line", ID{5}, "a", "r_bb is required"}.what()} ==
               "Invalid phase connection for asym_line 5 with phases (a): r_bb is required\n");

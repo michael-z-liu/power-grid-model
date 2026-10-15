@@ -4,6 +4,7 @@
 
 from copy import copy
 
+import numpy as np
 import pytest
 
 from power_grid_model import PowerGridModel
@@ -37,9 +38,11 @@ from power_grid_model.errors import (
     InvalidRegulatedObject,
     InvalidTransformerClock,
     IterationDiverge,
+    LoadGenOnAbsentPhase,
     MissingCaseForEnumError,
     MissingPhaseForWinding,
     NotObservableError,
+    PowerGridBatchError,
     PowerGridError,
     ReducedPhaseNotSupported,
 )
@@ -565,6 +568,13 @@ def test_deprecated_invalid_branch3_error():
             MissingPhaseForWinding,
             id="missing_phase_for_winding_id",
         ),
+        pytest.param(
+            "Load or generator 12 has a non-zero specified power on phases (bc) that are not present at its node (node "
+            "phases: a). A sym_load or sym_gen is a balanced three-phase load; at a node without all phases, use an "
+            "asym_load or asym_gen with zero power on the absent phases.\n",
+            LoadGenOnAbsentPhase,
+            id="load_gen_on_absent_phase",
+        ),
     ],
 )
 def test_interpret_reduced_phase_errors(message: str, expected_type: type[PowerGridError]):
@@ -722,3 +732,115 @@ def test_reduced_phase_invalid_phase_connection():
     input_data[CT.asym_line]["phases"] = [9]
     with pytest.raises(MissingCaseForEnumError):
         PowerGridModel(input_data)
+
+
+def _single_phase_node_input(load_type: CT, p: float | list[float], q: float | list[float], status: int = 1):
+    """node 0 (abc, source) --a-- node 1 (a) with one load of the given type at node 1"""
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 2)
+    load_input = initialize_array(DatasetType.input, load_type, 1)
+    load_input[AT.id] = [300]
+    load_input[AT.node] = [1]
+    load_input[AT.status] = [status]
+    load_input[AT.type] = [LoadGenType.const_power]
+    load_input[AT.p_specified] = [p]
+    load_input[AT.q_specified] = [q]
+    del input_data[CT.asym_load]
+    input_data[load_type] = load_input
+    return input_data
+
+
+@pytest.mark.parametrize(
+    ("load_type", "p", "q"),
+    [
+        pytest.param(CT.sym_load, 0.0, 0.0, id="sym_load_zero"),
+        pytest.param(CT.asym_load, [1e3, 0.0, 0.0], [1e2, 0.0, 0.0], id="asym_load_zero_absent"),
+        pytest.param(CT.asym_load, [1e3, np.nan, np.nan], [1e2, np.nan, np.nan], id="asym_load_nan_absent"),
+        pytest.param(CT.asym_gen, [1e3, 0.0, 0.0], [0.0, 0.0, 0.0], id="asym_gen_zero_absent"),
+    ],
+)
+def test_reduced_phase_load_power_on_present_phases(load_type, p, q):
+    model = PowerGridModelWithExt(_single_phase_node_input(load_type, p, q))
+    model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+@pytest.mark.parametrize(
+    ("load_type", "p", "q", "status"),
+    [
+        pytest.param(CT.sym_load, 1e3, 0.0, 1, id="sym_load"),
+        pytest.param(CT.sym_gen, 0.0, 1e2, 1, id="sym_gen_q"),
+        pytest.param(CT.asym_load, [1e3, 1e2, 0.0], [0.0, 0.0, 0.0], 1, id="asym_load_p_on_b"),
+        pytest.param(CT.asym_load, [1e3, 0.0, 0.0], [0.0, 0.0, 1e2], 1, id="asym_load_q_on_c"),
+    ],
+)
+def test_reduced_phase_load_power_on_absent_phases(load_type, p, q, status):
+    model = PowerGridModelWithExt(_single_phase_node_input(load_type, p, q, status))
+    with pytest.raises(LoadGenOnAbsentPhase, match="Load or generator 300 "):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_load_power_on_absent_phases_status_off():
+    model = PowerGridModelWithExt(_single_phase_node_input(CT.sym_load, 1e3, 1e2, status=0))
+    model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+def test_reduced_phase_load_power_on_absent_phases_batch():
+    model = PowerGridModelWithExt(_single_phase_node_input(CT.sym_load, 0.0, 0.0))
+
+    update = initialize_array(DatasetType.update, CT.sym_load, (2, 1))
+    update[AT.id] = 300
+    update[AT.p_specified] = [[1e3], [0.0]]
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False,
+        update_data={CT.sym_load: update},
+        continue_on_batch_error=True,
+        experimental_features=_ExperimentalFeatures.enabled,
+    )
+    assert result[CT.node][AT.u][1, 1, 0] > 0.0
+
+    with pytest.raises(PowerGridBatchError) as error:
+        model.calculate_power_flow_with_ext(
+            symmetric=False, update_data={CT.sym_load: update}, experimental_features=_ExperimentalFeatures.enabled
+        )
+    assert error.value.failed_scenarios.tolist() == [0]
+    assert error.value.errors[0].__class__ is LoadGenOnAbsentPhase
+
+
+def test_reduced_phase_load_power_on_absent_phases_fixed_in_every_scenario():
+    # the cache run with the base input fails, but every scenario provides a valid value
+    model = PowerGridModelWithExt(_single_phase_node_input(CT.sym_load, 1e3, 0.0))
+
+    update = initialize_array(DatasetType.update, CT.sym_load, (2, 1))
+    update[AT.id] = 300
+    update[AT.p_specified] = 0.0
+    update[AT.status] = [[1], [0]]
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False, update_data={CT.sym_load: update}, experimental_features=_ExperimentalFeatures.enabled
+    )
+    assert result[CT.node][AT.u].shape == (2, 2, 3)
+
+
+@pytest.mark.parametrize("calculation", ["power_flow", "short_circuit"])
+def test_reduced_phase_shunt(calculation):
+    input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 2)
+    shunt_input = initialize_array(DatasetType.input, CT.shunt, 1)
+    shunt_input[AT.id] = [500]
+    shunt_input[AT.node] = [1]
+    shunt_input[AT.status] = [1]
+    shunt_input[AT.g1] = [0.0]
+    shunt_input[AT.b1] = [1e-4]
+    shunt_input[AT.g0] = [0.0]
+    shunt_input[AT.b0] = [1e-4]
+    input_data[CT.shunt] = shunt_input
+
+    def calculate(model):
+        if calculation == "power_flow":
+            return model.calculate_power_flow_with_ext(
+                symmetric=False, experimental_features=_ExperimentalFeatures.enabled
+            )
+        return model.calculate_short_circuit_with_ext(experimental_features=_ExperimentalFeatures.enabled)
+
+    with pytest.raises(ReducedPhaseNotSupported, match="Shunt 500 at a node without all phases"):
+        calculate(PowerGridModelWithExt(input_data))
+
+    input_data[CT.shunt][AT.status] = [0]
+    calculate(PowerGridModelWithExt(input_data))

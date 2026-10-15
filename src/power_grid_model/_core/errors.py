@@ -180,3 +180,7 @@ class MissingPhaseForWinding(PowerGridError):
 
 class InvalidPhaseConnection(PowerGridError):
     """The phases of a reduced-phase component do not match its input values."""
+
+
+class LoadGenOnAbsentPhase(PowerGridError):
+    """A load or generator has a non-zero specified power on a phase that is not present at its node."""

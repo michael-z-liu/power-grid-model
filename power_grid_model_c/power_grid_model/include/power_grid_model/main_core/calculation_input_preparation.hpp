@@ -13,6 +13,7 @@
 #include "../common/common.hpp"
 #include "../common/counting_iterator.hpp"
 #include "../common/enum.hpp"
+#include "../common/exception.hpp"
 #include "../common/grouped_index_vector.hpp"
 #include "../common/three_phase_tensor.hpp"
 #include "../common/typing.hpp"
@@ -28,8 +29,11 @@
 #include "../index_mapping.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <concepts>
+#include <cstddef>
+#include <format>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -158,6 +162,60 @@ inline void prepare_input_status(main_model_state_c auto const& state, std::vect
             main_core::get_component_by_sequence<Component>(state.components, i).status();
     }
 }
+
+inline bool has_reduced_phase_math_model(main_model_state_c auto const& state) {
+    return std::ranges::any_of(state.math_topology,
+                               [](auto const& topo) { return topo != nullptr && topo->has_reduced_phase; });
+}
+
+// a load or generator may not specify power on a phase that is not present at its node; the check runs on the
+// asymmetric injection that the calculation uses, so a sym_load or sym_gen with non-zero power on a node without all
+// phases is rejected; nan and 0 both mean no power, a component with status off has no injection
+inline void check_load_gen_power_on_absent_phases(main_model_state_c auto const& state,
+                                                  std::vector<PowerFlowInput<asymmetric_t>> const& pf_input) {
+    constexpr std::array single_phases{phase_mask_a, phase_mask_b, phase_mask_c};
+    auto const is_specified = [](double value) { return !is_nan(value) && value != 0.0; };
+    for (auto const& [i, math_idx] : enumerate(state.topo_comp_coup->load_gen)) {
+        if (math_idx.group == isolated_component) {
+            continue;
+        }
+        MathModelTopology const& topo = *state.math_topology[math_idx.group];
+        if (!topo.has_reduced_phase) {
+            continue;
+        }
+        PhaseMask const phases = topo.bus_phase(topo.load_gens_per_bus.get_group(math_idx.pos));
+        if (phases.all()) {
+            continue;
+        }
+        ComplexValue<asymmetric_t> const& s_injection = pf_input[math_idx.group].s_injection[math_idx.pos];
+        PhaseMask loaded = phase_mask_none;
+        for (Idx phase = 0; phase != 3; ++phase) {
+            if (is_specified(s_injection(phase).real()) || is_specified(s_injection(phase).imag())) {
+                loaded = loaded | single_phases[static_cast<size_t>(phase)];
+            }
+        }
+        if (PhaseMask const absent_loaded = loaded.without(phases); !absent_loaded.none()) {
+            throw LoadGenOnAbsentPhase{get_component_by_sequence<GenericLoadGen>(state.components, i).id(),
+                                       phase_letters(absent_loaded), phase_letters(phases)};
+        }
+    }
+}
+
+// a shunt is a three-phase component; at a node without all phases it is not supported (yet)
+inline void check_no_shunt_at_reduced_phase_bus(main_model_state_c auto const& state) {
+    for (auto const& [i, math_idx] : enumerate(state.topo_comp_coup->shunt)) {
+        if (math_idx.group == isolated_component) {
+            continue;
+        }
+        MathModelTopology const& topo = *state.math_topology[math_idx.group];
+        if (!topo.has_reduced_phase || topo.bus_phase(topo.shunts_per_bus.get_group(math_idx.pos)).all()) {
+            continue;
+        }
+        if (Shunt const& shunt = get_component_by_sequence<Shunt>(state.components, i); shunt.status()) {
+            throw ReducedPhaseNotSupported{std::format("Shunt {} at a node without all phases", shunt.id())};
+        }
+    }
+}
 } // namespace detail
 
 template <symmetry_tag sym>
@@ -184,6 +242,13 @@ inline std::vector<PowerFlowInput<sym>> prepare_power_flow_input(main_model_stat
 
     prepare_input_status<sym, PowerFlowInput<sym>, &PowerFlowInput<sym>::load_gen_status, GenericLoadGen>(
         state, state.topo_comp_coup->load_gen, pf_input);
+
+    if constexpr (!is_symmetric_v<sym>) {
+        if (detail::has_reduced_phase_math_model(state)) {
+            detail::check_load_gen_power_on_absent_phases(state, pf_input);
+            detail::check_no_shunt_at_reduced_phase_bus(state);
+        }
+    }
 
     return pf_input;
 }
@@ -333,6 +398,10 @@ prepare_short_circuit_input(main_model_state_c auto const& state, ComponentToMat
         auto const first_non_used = std::ranges::find_if(input.faults, is_unused);
         assert(std::all_of(first_non_used, input.faults.end(), is_unused));
         input.faults.resize(std::distance(input.faults.begin(), first_non_used));
+    }
+
+    if (detail::has_reduced_phase_math_model(state)) {
+        detail::check_no_shunt_at_reduced_phase_bus(state);
     }
 
     return sc_input;

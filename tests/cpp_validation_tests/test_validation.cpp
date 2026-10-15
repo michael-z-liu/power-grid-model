@@ -181,6 +181,7 @@ class Subcase {
             {"DanglingConductor",
              std::regex{"Conductors of .+ on phases \\([^)]*\\) are not present at any of its connected nodes"}},
             {"InvalidPhaseConnection", std::regex{"Invalid phase connection for "}}, // multiple different flavors
+            {"LoadGenOnAbsentPhase", std::regex{"Load or generator (-?\\d+) has a non-zero specified power on phases"}},
             {"MissingPhaseForWinding",
              std::regex{"Winding of .+ has phases \\([^)]*\\) that are not all present at its node"}},
             {"PowerGridDatasetError", std::regex{"Dataset error: "}}, // multiple different flavors

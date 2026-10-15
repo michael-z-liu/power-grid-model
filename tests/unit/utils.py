@@ -29,6 +29,7 @@ from power_grid_model.errors import (
     InvalidRegulatedObject,
     InvalidTransformerClock,
     IterationDiverge,
+    LoadGenOnAbsentPhase,
     MaxIterationReached,
     MissingPhaseForWinding,
     NotObservableError,
@@ -96,6 +97,7 @@ KNOWN_EXCEPTIONS: dict[str, type[BaseException] | None] = {
         DanglingConductor,
         MissingPhaseForWinding,
         InvalidPhaseConnection,
+        LoadGenOnAbsentPhase,
     )
 }
 KNOWN_EXCEPTIONS["Failed"] = _Failed
