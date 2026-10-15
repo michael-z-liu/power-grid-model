@@ -242,6 +242,62 @@
       ]
     },
     {
+      "name": "SinglePhaseTransformerInput",
+      "base": "BranchInput",
+      "attributes": [
+        {
+          "data_type": "double",
+          "names": ["u1", "u2"],
+          "description": "rated winding voltage at both sides (across the connection)"
+        },
+        {
+          "data_type": "double",
+          "names": "sn",
+          "description": "rated power"
+        },
+        {
+          "data_type": "double",
+          "names": ["uk", "pk", "i0", "p0"],
+          "description": "short circuit and open testing parameters"
+        },
+        {
+          "data_type": "WindingConnection1P",
+          "names": ["from_connection", "to_connection"],
+          "description": "phase slots of the winding at each side"
+        },
+        {
+          "data_type": "IntS",
+          "names": "clock",
+          "description": "0 or 6 (reversed polarity); default 0"
+        },
+        {
+          "data_type": "BranchSide",
+          "names": "tap_side",
+          "description": "side of tap changer"
+        },
+        {
+          "data_type": "IntS",
+          "names": ["tap_pos", "tap_min", "tap_max", "tap_nom"],
+          "description": "tap changer parameters"
+        },
+        {
+          "data_type": "double",
+          "names": "tap_size",
+          "description": "size of each tap"
+        },
+        {
+          "data_type": "double",
+          "names": ["uk_min", "uk_max", "pk_min", "pk_max"],
+          "description": "tap dependent short circuit parameters"
+        },
+        {
+          "data_type": "double",
+          "names": ["r_grounding_from", "x_grounding_from", "r_grounding_to", "x_grounding_to"],
+          "description": "impedance between the earthed winding terminal and earth (phase-to-earth windings only)"
+        }
+      ]
+    },
+    {
       "name": "ThreeWindingTransformerInput",
       "base": "Branch3Input",
       "attributes": [

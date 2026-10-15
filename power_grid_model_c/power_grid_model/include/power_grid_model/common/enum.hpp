@@ -110,6 +110,10 @@ enum class FaultPhase : IntS {
 // phases with a conductor of a reduced-phase branch; not provided (na) means abc
 enum class PhaseConnection : IntS { abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6 };
 
+// phase slots of a single-phase transformer winding; the first letter is the positive terminal, a single letter is
+// phase-to-earth; values aligned with PhaseConnection; centre-tapped connections follow in M6 (7, 8, 9)
+enum class WindingConnection1P : IntS { a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6 };
+
 enum class ShortCircuitVoltageScaling : IntS { minimum = 0, maximum = 1 };
 
 // Initialization of the calculation, only applicable if supported by the calculation type and method.

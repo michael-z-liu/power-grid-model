@@ -150,6 +150,25 @@ static_assert(offsetof(TransformerInput, to_node) == offsetof(BranchInput, to_no
 static_assert(offsetof(TransformerInput, from_status) == offsetof(BranchInput, from_status));
 static_assert(offsetof(TransformerInput, to_status) == offsetof(BranchInput, to_status));
 
+// static asserts for SinglePhaseTransformerInput
+static_assert(std::is_standard_layout_v<SinglePhaseTransformerInput>);
+// static asserts for conversion of SinglePhaseTransformerInput to BaseInput
+static_assert(std::alignment_of_v<SinglePhaseTransformerInput> >= std::alignment_of_v<BranchInput>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::id), decltype(BaseInput::id)>);
+static_assert(offsetof(SinglePhaseTransformerInput, id) == offsetof(BaseInput, id));
+// static asserts for conversion of SinglePhaseTransformerInput to BranchInput
+static_assert(std::alignment_of_v<SinglePhaseTransformerInput> >= std::alignment_of_v<BranchInput>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::id), decltype(BranchInput::id)>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::from_node), decltype(BranchInput::from_node)>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::to_node), decltype(BranchInput::to_node)>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::from_status), decltype(BranchInput::from_status)>);
+static_assert(std::same_as<decltype(SinglePhaseTransformerInput::to_status), decltype(BranchInput::to_status)>);
+static_assert(offsetof(SinglePhaseTransformerInput, id) == offsetof(BranchInput, id));
+static_assert(offsetof(SinglePhaseTransformerInput, from_node) == offsetof(BranchInput, from_node));
+static_assert(offsetof(SinglePhaseTransformerInput, to_node) == offsetof(BranchInput, to_node));
+static_assert(offsetof(SinglePhaseTransformerInput, from_status) == offsetof(BranchInput, from_status));
+static_assert(offsetof(SinglePhaseTransformerInput, to_status) == offsetof(BranchInput, to_status));
+
 // static asserts for ThreeWindingTransformerInput
 static_assert(std::is_standard_layout_v<ThreeWindingTransformerInput>);
 // static asserts for conversion of ThreeWindingTransformerInput to BaseInput

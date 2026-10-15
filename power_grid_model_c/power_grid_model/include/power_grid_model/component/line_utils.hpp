@@ -8,6 +8,8 @@
 #include "../common/three_phase_tensor.hpp"
 #include "power_grid_model/common/common.hpp"
 
+#include <Eigen/Core>
+
 namespace power_grid_model {
 
 inline ComplexTensor<asymmetric_t> kron_reduction(const ComplexTensor4& matrix_to_reduce) {
@@ -17,6 +19,19 @@ inline ComplexTensor<asymmetric_t> kron_reduction(const ComplexTensor4& matrix_t
     ComplexValue<asymmetric_t> const Y_ba(Y(3, 0), Y(3, 1), Y(3, 2));
     DoubleComplex const Y_bb_inv = 1.0 / Y(3, 3);
     return Y_aa - vector_outer_product(Y_ba, Y_ab) * Y_bb_inv;
+}
+
+// Kron reduction of a single node k of a nodal admittance matrix (Schur complement of y(k, k)):
+// y <- y - y(:, k) y(k, :) / y(k, k); row and column k are set to exactly zero
+// eliminating several nodes one after the other equals eliminating them together
+// y must be an Eigen Matrix (not an Array), so that the product of the column and the row is the outer product
+template <typename Derived> inline void kron_eliminate(Eigen::MatrixBase<Derived>& y, Idx k) {
+    DoubleComplex const pivot = y(k, k);
+    auto const column = y.col(k).eval();
+    auto const row = y.row(k).eval();
+    y -= column * row / pivot;
+    y.row(k).setZero();
+    y.col(k).setZero();
 }
 
 // inverse of the block of the present phases: the absent rows and columns of matrix are ignored (they may be

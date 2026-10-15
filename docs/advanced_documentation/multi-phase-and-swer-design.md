@@ -293,6 +293,43 @@ Taken in M3, for loads and shunts:
   scenario switches the shunt off (decided by Michael: consistent with loads; revisit if a use case needs
   otherwise).
 
+Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15):
+
+* **D12. `WindingConnection1P` values.** `a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6`, the numbers of
+  `PhaseConnection`/`FaultPhase` without `abc`. The connection is required: not provided (`na`), 0 and unknown values
+  raise `MissingCaseForEnumError`. The first letter is the positive terminal: `ab` is $U_a - U_b$, `ac` is
+  $U_a - U_c$ (the design's `ca` is `ac` with reversed polarity), and `a` is $U_a - U_E$ with $E$ the earthed end.
+  The centre-tapped values are not part of M5; M6 appends them (7, 8, 9), which is ABI-compatible.
+* **D13. Polarity through `clock`.** A `clock` attribute (`IntS`, not provided means 0) expresses the relative
+  polarity: any value equal to 0 or 6 modulo 12 is accepted, 6 reverses the to winding; any other value raises
+  `InvalidTransformerClock`. This covers phase-to-earth and phase-to-phase windings uniformly and keeps the enum
+  set-like.
+* **D14. Earthing.** On a phase-to-earth side the earthed terminal is connected to earth through
+  `r/x_grounding_<side>`; not provided means 0, solidly earthed (as for `transformer`). A phase-to-phase side has no
+  earthed terminal: a non-empty `r/x_grounding_<side>` raises `InvalidPhaseConnection` with the ID (following D11,
+  reject rather than ignore). Every connected phase-to-phase side gets the low-susceptance fallback: a common-mode
+  admittance $\tfrac{y_{lo}}{2}\mathbf{1}_{2\times2}$ on its two slots, in per unit, with
+  $y_{lo} = -j \cdot 10^{-8} \cdot s_n / S_{b,1p} / u_k$ (the two-terminal analogue of the zero-sequence
+  $y_0/3 \cdot \mathbf{1}_{3\times3}$ of `transformer`); the differential mode is untouched. Limitation: the two
+  windings of an `a` → `a` transformer cannot share one earth electrode; each side has its own (a shared electrode
+  is "Later").
+* **D15. `u1`/`u2` are winding voltages**, the rated voltages across the connection terminals: for example 22 kV
+  for an `ab` primary, 12.7 kV for an `a` SWER secondary and 240 V for an `a` LV winding. Node `u_rated` stays
+  $\sqrt3 \times$ the phase-to-earth voltage, so the nominal winding voltage implied by a node is $u_{rated}/\sqrt3$
+  for a phase-to-earth and $u_{rated}$ for a phase-to-phase connection. Off-nominal ratios follow automatically and
+  are legitimate, so C++ does not check `u1` against the node voltage; M9 adds a warning-level Python rule
+  ($|u/U_{nom} - 1| > 0.2$) for the classic mistake of `u1 = 22 kV` on an `a` winding at a 22 kV node.
+* **D16. General phase shift.** `phase_shift()` $= \varphi(\text{to}) - \varphi(\text{from}) + \text{clock}\cdot\pi/6$
+  (see [Phase shift](#new-component-single_phase_transformer)). Output angles stay physical.
+* **D17. Loading from the complex sum per side:** `loading` $= \max(|\sum_p s_{from,p}|, |\sum_p s_{to,p}|) / s_n$.
+  The `transformer` rule ($\sum_p |s_p| / s_n$) would overstate the loading of a phase-to-phase winding by
+  $2/\sqrt3$ even in normal operation.
+* **D18. Working fixed taps.** `tap_side`, `tap_pos`, `tap_min`, `tap_max`, `tap_nom`, `tap_size`, `uk_min`,
+  `uk_max`, `pk_min` and `pk_max` work as for `transformer` (the same tap-adjusted voltages and
+  `tap_adjust_impedance`), and `tap_pos` can be updated through `TransformerUpdate`. Unlike `transformer`, all tap
+  fields are optional: `tap_size`, `tap_min`, `tap_max` and `tap_nom` default to 0, `tap_pos` to `tap_nom` and
+  `tap_side` to from, which gives the nominal ratio. The tap regulator stays "Later".
+
 ## Component models (phase domain)
 
 ### Per-unit convention for reduced-phase nodes
@@ -358,14 +395,17 @@ clock number, and enforces three-phase winding types.
 
 **Input** (base `BranchInput`):
 
-* `u1`, `u2`, `sn`, `uk`, `pk`, `i0`, `p0`.
-* Tap fields, mirroring `transformer`, so that a tap regulator can be added later.
-* `from_connection` and `to_connection`, of a new enum `WindingConnection1P`:
-  `{a, b, c, ab, bc, ca, ab_center_tapped, bc_center_tapped, ca_center_tapped}`. Centre-tapped values are allowed
-  on the to side only.
+* `u1`, `u2`: the rated *winding* voltages, across the connection terminals (decision D15). `sn`, `uk`, `pk`,
+  `i0`, `p0` as for `transformer`. There are no zero-sequence or winding-type fields; they have no meaning for a
+  single-phase transformer.
+* Tap fields, mirroring `transformer`, all optional (decision D18).
+* `from_connection` and `to_connection`, of a new enum `WindingConnection1P`
+  `{a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6}` (decision D12). The centre-tapped values are reserved for M6,
+  which appends them after `bc`; they will be allowed on the to side only.
+* `clock`: 0 or 6 (modulo 12); 6 reverses the polarity of the to winding (decision D13).
 * `r_grounding_from`, `x_grounding_from`, `r_grounding_to`, `x_grounding_to`: the impedance between the earthed
-  winding terminal and true earth. For SWER this is the earth electrode, which carries the entire SWER load
-  current.
+  winding terminal and true earth, only for a phase-to-earth winding (decision D14). For SWER this is the earth
+  electrode, which carries the entire SWER load current.
 
 **Two-winding model.** Build the primitive admittance of the two coupled windings and map it onto the bus slots
 with an incidence matrix $C$ (2×6). Row 1 of $C$ is $e_a - e_b$ for an `ab` winding, $e_a$ for an `a` winding, and
@@ -376,25 +416,49 @@ Y_{prim} = y_s \begin{bmatrix} 1/n^2 & -1/n \\ -1/n & 1 \end{bmatrix} + Y_{mag},
 Y_{node} = C^{T} Y_{prim} C \in \mathbb{C}^{6\times 6}
 $$
 
+* $Y_{prim}$ is in siemens: $y_s$ and $Y_{mag}$ are referred to side 2 as in `transformer`, with
+  $n = u_1'/u_2'$ from the tap-adjusted winding voltages. The magnetising admittance is split half on each side
+  ($Y_{mag} = \tfrac{y_m}{2}\,\mathrm{diag}(1/n^2, 1)$), the same $\pi$ model as `transformer`. With one side
+  open, $Y_{prim}$ is reduced to the open-end shunt $\tfrac{y_m}{2} + (1/y_s + 2/y_m)^{-1}$ of the connected
+  winding (exactly 0 when $y_m$ is below `numerical_tolerance` in per unit).
 * $Y_{node}$ is split into `yff`, `yft`, `ytf` and `ytt`, so `BranchCalcParam<asymmetric_t>` can hold it with no
-  structural change.
+  structural change. The slots outside the windings are set to exactly 0 by assignment at the end.
 * Per-unit conversion: $Y_{pu}(s,t) = Y_{phys}(s,t)\, U_{b,s} U_{b,t} / S_{b,1p}$, where
   $U_b = u_{rated}/\sqrt3$ of each node.
-* **Earthing impedance:** add an internal neutral terminal, then Kron-reduce it away. This needs a generalised,
-  dynamic-size `kron_reduction`.
+* **Earthing impedance:** add an internal terminal for the earthed end of each phase-to-earth winding with a
+  non-zero earthing impedance (an 8-terminal nodal matrix: 3 + 3 slots and 2 electrodes), stamp $1/z_g$ to earth,
+  then eliminate the terminal with `kron_eliminate` (`<core>/component/line_utils.hpp`), a single-node Kron
+  reduction on an Eigen matrix; eliminating the terminals one after the other equals eliminating them together.
 * **Ungrounded windings:** a phase-to-phase winding with no earthed terminal has an undefined common-mode voltage.
-  Reuse the low-susceptance fallback (`transformer.hpp:310-328`, `transformer_low_susceptance_ratio`).
+  It gets the low-susceptance fallback of decision D14.
 
-**Phase shift.** `phase_shift()` ($\theta_{from} - \theta_{to}$) is the angle of the winding voltage relative to
-slot a, with the sign reversed:
+**Phase shift** (decision D16). `phase_shift()` ($\theta_{from} - \theta_{to}$) is
 
-* `ab` winding: $U_{ab} = \sqrt3 U_a \angle 30°$, so `phase_shift` = $-\pi/6$;
-* `bc` winding: $+\pi/2$;
-* `ca` winding: $-5\pi/6$;
-* reversed polarity adds $\pi$.
+$$
+\varphi(\text{to}) - \varphi(\text{from}) + \text{clock}\cdot\pi/6,
+$$
 
-The existing scalar phase-shift propagation in `tree_edge` (`<core>/topology.hpp:83`) then stays correct for the
-reference slot.
+where $\varphi$ is the angle of the winding voltage of a balanced positive-sequence set ($U_a = 1$,
+$U_b = a^2$, $U_c = a$): $\varphi(a) = 0$, $\varphi(b) = -2\pi/3$, $\varphi(c) = 2\pi/3$, $\varphi(ab) = \pi/6$,
+$\varphi(ac) = -\pi/6$ and $\varphi(bc) = -\pi/2$. For example:
+
+* `ab` → `a`: $U_{ab} = \sqrt3 U_a \angle 30°$, so `phase_shift` = $-\pi/6$, and a SWER node behind it reports
+  `u_angle` ≈ +30°;
+* `bc` → `a`: $+\pi/2$;
+* the design's `ca` → `a`, which is `ac` with clock 6: $\pi/6 + \pi \equiv -5\pi/6$;
+* `a` → `b`: $-2\pi/3$, so the flat start puts slot b at $\theta_{from}$.
+
+The earlier formulation (the winding angle relative to slot a, with the sign reversed) is the special case
+to = `a`. The existing scalar phase-shift propagation in `tree_edge` (`<core>/topology.hpp:83`) and the M2 flat and
+average-source starts then work unchanged, and output angles stay physical.
+
+**Loading** (decision D17): $\max(|\sum_p s_{from,p}|, |\sum_p s_{to,p}|) / s_n$, with the complex sum of the
+per-phase powers of each side.
+
+**Calculations.** The incidence of a `single_phase_transformer` is never `abc` → `abc`, so the experimental gate
+(D9), the symmetric routing and the state-estimation guard of M4 apply automatically; `sym_calc_param()` throws
+`ReducedPhaseNotSupported` as a backstop. A winding side whose terminals are not all present at its node raises
+`MissingPhaseForWinding` (D1).
 
 **Centre-tapped (split-phase) secondary.**
 
@@ -506,7 +570,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M3 (implemented) | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases against OpenDSS (`test.dss`): `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,two-phase-bc-neutral-opendss-kron,swer-a,reduced-phase-feeder,reduced-phase-feeder-linear}` and `tests/data/short_circuit/{asym-line-reduced-phase,asym-line-swer-a}`, all generated by `tests/data/generators/reduced_phase_opendss_cases.py` (compared with PGM by `reduced_phase_compare_pgm.py` in the same folder). In most cases the generator gives OpenDSS the neutral-reduced matrix computed with numpy (cross-checked against an OpenDSS `LineCode` with `Kron=yes`); in `two-phase-bc-neutral-opendss-kron` OpenDSS does the neutral Kron reduction itself from the full matrices including the neutral, so that reference is independent of PGM's closed-form Kron. Expected-error cases `power_flow/asym-line/reduced-phase-symmetric-not-supported` and `state_estimation/reduced-phase-not-supported` | M / medium |
 | M4 (implemented) | Symmetric-calculation guards | `<core>/main_model_impl.hpp`, `<core>/common/exception.hpp`, `src/power_grid_model/_core/error_handling.py`, `errors.py` | Native API tests (`tests/native_api_tests/test_api_model.cpp`); Python error-mapping and end-to-end tests; the expected-error validation cases of M3 | S / low |
 | M5 | `single_phase_transformer` (two windings, earthing, phase shift) | New `<core>/component/single_phase_transformer.hpp`; `<core>/all_components.hpp`; `<core>/main_core/main_model_type.hpp`; `input.json` and `dataset_definitions.json` (input, update, output and short-circuit output as a branch); enum `WindingConnection1P` | `test_single_phase_transformer.cpp` (compare with hand-computed $C^T Y C$); validation case 22 kV a-b → 12.7 kV SWER → 240 V against OpenDSS | L / **high** |
-| M6 | Centre-tapped split-phase secondary | Same component; dynamic-size Kron reduction in `line_utils.hpp`; slot angles | OpenDSS centre-tap transformer (`phases=1 windings=3`, `bus2=X.1.0`, `bus3=X.0.2`) with unbalanced 240/480 V loads | M / medium-high |
+| M6 | Centre-tapped split-phase secondary | Same component; `kron_eliminate` in `line_utils.hpp` (added in M5); slot angles | OpenDSS centre-tap transformer (`phases=1 windings=3`, `bus2=X.1.0`, `bus3=X.0.2`) with unbalanced 240/480 V loads | M / medium-high |
 | M7 | Delta loads | `input.json` (`connection`), `<core>/component/load_gen.hpp`, `MathModelTopology`, `add_loads` in the Newton-Raphson, iterative current and linear solvers, `common_solver_functions.hpp` | Finite-difference check of the Newton-Raphson Jacobian; OpenDSS `Load conn=delta` and two-phase `bus.1.2` loads | M / medium |
 | M8 | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp`, `<core>/component/fault.hpp` | `tests/data/short_circuit/swer-*` (phase-earth with `r_f` and earthing resistance) against OpenDSS fault study | S / low |
 | M9 | Python validation and documentation | `src/power_grid_model/validation/_validation.py` (required values, `validate_asym_line`, new `validate_single_phase_transformer`, load `connection`, sensor branch lists), `docs/user_manual/components.md`, `docs/user_manual/calculations.md`, `docs/algorithms/sc-algorithms.md`, example notebook | `tests/unit/validation/*` | M / low |

@@ -182,6 +182,7 @@ struct PhaseTestBranch {
     BranchIdx nodes;
     BranchPhaseIncidence incidence{};
     BranchConnected connected{1, 1};
+    double phase_shift{}; // theta_from - theta_to
 };
 
 // small topology fixture with the phase incidence of each branch set explicitly
@@ -197,7 +198,7 @@ struct PhaseTestNetwork {
         for (auto const& branch : branches) {
             branch_node_idx.push_back(branch.nodes);
             comp_conn.branch_connected.push_back(branch.connected);
-            comp_conn.branch_phase_shift.push_back(0.0);
+            comp_conn.branch_phase_shift.push_back(branch.phase_shift);
             comp_conn.branch_phase_incidence.push_back(branch.incidence);
         }
         comp_topo.branch_node_idx = std::move(branch_node_idx);
@@ -229,6 +230,11 @@ std::vector<std::string> node_phase_letters(TopologyResult const& result, std::v
 }
 
 using Letters = std::vector<std::string>;
+
+double node_phase_shift(TopologyResult const& result, Idx node) {
+    auto const [group, pos] = result.second->node[static_cast<size_t>(node)];
+    return result.first[static_cast<size_t>(group)]->phase_shift[static_cast<size_t>(pos)];
+}
 
 } // namespace
 
@@ -813,6 +819,83 @@ TEST_CASE("Test topology phase mask") {
         REQUIRE(result.first.size() == 1);
         CHECK(result.first[0]->has_reduced_phase);
         CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "a", "abc"});
+    }
+}
+
+TEST_CASE("Test topology single-phase transformer windings") {
+    SUBCASE("Propagation") {
+        SUBCASE("A phase-to-phase primary at an abc node feeds a phase-to-earth secondary") {
+            PhaseTestNetwork const network{
+                2, {0}, {{.nodes = {0, 1}, .incidence = winding(phase_mask_ab, phase_mask_a)}}};
+            CHECK(node_phase_letters(network.build(), {0, 1}) == Letters{"abc", "a"});
+        }
+        SUBCASE("A phase-to-earth transformer at a SWER node feeds the LV node") {
+            // 22 kV abc -ab/a- 12.7 kV SWER -a- SWER -a/a- 240 V
+            PhaseTestNetwork const network{4,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = winding(phase_mask_ab, phase_mask_a)},
+                                            {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {2, 3}, .incidence = winding(phase_mask_a, phase_mask_a)}}};
+            CHECK(node_phase_letters(network.build(), {0, 1, 2, 3}) == Letters{"abc", "a", "a", "a"});
+        }
+        SUBCASE("A phase-to-phase secondary") {
+            PhaseTestNetwork const network{
+                2, {0}, {{.nodes = {0, 1}, .incidence = winding(phase_mask_bc, phase_mask_ab)}}};
+            CHECK(node_phase_letters(network.build(), {0, 1}) == Letters{"abc", "ab"});
+        }
+        SUBCASE("Reverse feeding gives the primary its winding phases only") {
+            // only the secondary side is fed: the primary node gets ab, not abc
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                            {.nodes = {2, 1}, .incidence = winding(phase_mask_ab, phase_mask_a)}}};
+            CHECK(node_phase_letters(network.build(), {0, 1, 2}) == Letters{"abc", "a", "ab"});
+        }
+    }
+
+    SUBCASE("Missing winding phases (D1)") {
+        SUBCASE("A phase-to-phase primary at a single-phase node") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                      {.nodes = {1, 2}, .incidence = winding(phase_mask_ab, phase_mask_a)}}};
+            network.comp_conn.branch_id = {10, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), MissingPhaseForWinding);
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("(ab)"), MissingPhaseForWinding);
+        }
+        SUBCASE("A phase-to-earth winding at a node of another phase") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_b)},
+                                      {.nodes = {1, 2}, .incidence = winding(phase_mask_a, phase_mask_a)}}};
+            network.comp_conn.branch_id = {10, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), MissingPhaseForWinding);
+        }
+        SUBCASE("A winding with fewer terminals than its node has phases is fine") {
+            PhaseTestNetwork const network{3,
+                                           {0},
+                                           {{.nodes = {0, 1}, .incidence = winding(phase_mask_a, phase_mask_bc)},
+                                            {.nodes = {0, 2}, .incidence = winding(phase_mask_ac, phase_mask_c)}}};
+            TopologyResult result;
+            REQUIRE_NOTHROW(result = network.build());
+            CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "bc", "c"});
+        }
+    }
+
+    SUBCASE("The phase shift of the windings accumulates along the feeder") {
+        // ab -> a: theta_from - theta_to = -pi/6; a -> a with reversed polarity: pi
+        constexpr double shift_ab_a = -pi / 6.0;
+        PhaseTestNetwork const network{
+            4,
+            {0},
+            {{.nodes = {0, 1}, .incidence = winding(phase_mask_ab, phase_mask_a), .phase_shift = shift_ab_a},
+             {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+             {.nodes = {2, 3}, .incidence = winding(phase_mask_a, phase_mask_a), .phase_shift = pi}}};
+        auto const result = network.build();
+        CHECK(node_phase_shift(result, 0) == 0.0);
+        CHECK(node_phase_shift(result, 1) == doctest::Approx(pi / 6.0));
+        CHECK(node_phase_shift(result, 2) == doctest::Approx(pi / 6.0));
+        CHECK(node_phase_shift(result, 3) == doctest::Approx(pi / 6.0 - pi));
     }
 }
 

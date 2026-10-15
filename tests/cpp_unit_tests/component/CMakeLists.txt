@@ -16,6 +16,7 @@ add_executable(
     "test_source.cpp"
     "test_shunt.cpp"
     "test_transformer.cpp"
+    "test_single_phase_transformer.cpp"
     "test_voltage_sensor.cpp"
     "test_power_sensor.cpp"
     "test_three_winding_transformer.cpp"

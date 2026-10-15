@@ -67,6 +67,7 @@ class AsymLine;
 class Link;
 class GenericBranch;
 class Transformer;
+class SinglePhaseTransformer;
 class ThreeWindingTransformer;
 class Shunt;
 class Source;
