@@ -267,6 +267,16 @@ enum class PhaseCoupling : IntS { per_phase = 0, winding = 1, link = 2 };
 //   split_phase: slots a and b are the two legs of a centre-tapped winding, 180 degrees apart (0, 180); no slot c
 enum class SlotPattern : std::uint8_t { three_phase = 0, split_phase = 1 };
 
+// delta (phase-to-phase) entry k of a load_gen: from phase `from` to phase `to`, U_k = U_from - U_to; ab, bc, ca
+struct DeltaBranch {
+    Idx from{};
+    Idx to{};
+    PhaseMask phases{}; // the two phases the entry needs
+};
+inline constexpr std::array<DeltaBranch, 3> delta_branches{{{.from = 0, .to = 1, .phases = phase_mask_ab},
+                                                            {.from = 1, .to = 2, .phases = phase_mask_bc},
+                                                            {.from = 2, .to = 0, .phases = phase_mask_ac}}};
+
 // non-earth terminals of a branch at each side and how they couple
 struct BranchPhaseIncidence {
     PhaseMask from{phase_mask_abc};
@@ -300,6 +310,9 @@ struct MathModelTopology {
     DenseGroupedIdxVector shunts_per_bus;
     SparseGroupedIdxVector load_gens_per_bus;
     std::vector<LoadGenType> load_gen_type;
+    // connection of each load_gen; size n_load_gen() if at least one load_gen of this math model is delta, otherwise
+    // empty (all wye)
+    std::vector<LoadGenConnection> load_gen_connection;
     DenseGroupedIdxVector voltage_sensors_per_bus;
     DenseGroupedIdxVector power_sensors_per_source;
     DenseGroupedIdxVector power_sensors_per_load_gen;
@@ -333,6 +346,15 @@ struct MathModelTopology {
     Idx n_shunt() const { return shunts_per_bus.element_size(); }
 
     Idx n_load_gen() const { return load_gens_per_bus.element_size(); }
+
+    bool has_delta_load_gen() const { return !load_gen_connection.empty(); }
+
+    bool is_delta_load_gen(Idx load_gen) const {
+        assert(load_gen >= 0 && load_gen < n_load_gen());
+        assert(!has_delta_load_gen() || std::ssize(load_gen_connection) == n_load_gen());
+        return has_delta_load_gen() &&
+               load_gen_connection[static_cast<std::size_t>(load_gen)] == LoadGenConnection::delta;
+    }
 
     Idx n_voltage_sensor() const { return voltage_sensors_per_bus.element_size(); }
 

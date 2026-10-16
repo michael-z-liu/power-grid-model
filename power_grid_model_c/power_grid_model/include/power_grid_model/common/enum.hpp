@@ -115,6 +115,10 @@ enum class PhaseConnection : IntS { abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5
 // a to the earthed centre tap and from the centre tap to b, on the to side only
 enum class WindingConnection1P : IntS { a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6, ab_center_tapped = 7 };
 
+// connection of an asym_load/asym_gen: wye = phase-to-earth (entries a, b, c), delta = phase-to-phase (entries ab, bc,
+// ca)
+enum class LoadGenConnection : IntS { wye = 0, delta = 1 };
+
 enum class ShortCircuitVoltageScaling : IntS { minimum = 0, maximum = 1 };
 
 // Initialization of the calculation, only applicable if supported by the calculation type and method.
