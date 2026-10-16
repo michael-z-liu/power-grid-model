@@ -1377,6 +1377,68 @@ TEST_CASE("Test single phase transformer - centre-tapped secondary, status") {
         CHECK(cabs(param.ytt()(0, 0)) > 0.0);
         check_all_zero({.value = {param.yff(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
     }
+    SUBCASE("From side open with magnetising admittance: the primary shunt stays in the balancer") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.from_status = 0;
+        auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances({});
+        // Schur complement of the primary: Y_hh - Y_h0 Y_00^-1 Y_0h with Y_00 = 1 / z_f + y_m / 2 and
+        // Y_01 = Y_02 = -1 / (2 z_f), so every entry of the 2x2 block of the halves drops by
+        // Y_01^2 / Y_00 = 1 / (2 z_f (2 + y_m z_f))
+        DoubleComplex const drop = 1.0 / (2.0 * z_f * (2.0 + y_m * z_f));
+        double const to_scale = test_sn / (0.25 * ct_u2 * ct_u2);
+        DoubleComplex const self_half = ((z_0 + z_b) / (2.0 * z_b * z_f) + 0.25 * y_m - drop) * to_scale;
+        DoubleComplex const between_halves = (-z_0 / (2.0 * z_b * z_f) - drop) * to_scale;
+        Block3 const y{{{0.0, 0.0, 0.0}, {0.0, self_half, between_halves}, {0.0, between_halves, self_half}}};
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = phase_a, .y = y, .from_connected = false});
+        check_all_zero({.value = {param.yff(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+        // the shunt makes it differ from the balancer without magnetising admittance
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        CHECK_FALSE(params_close(param, make_ct_transformer(input).calc_param<asymmetric_t>()));
+
+        // with a centre-tap electrode: the same primitive block, the electrode as a scalar Schur complement
+        DoubleComplex const z_grounding{0.5, 0.05};
+        input = ct_input(a);
+        input.from_status = 0;
+        input.r_grounding_to = z_grounding.real();
+        input.x_grounding_to = z_grounding.imag();
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = phase_a, .y = y, .z_grounding = z_grounding, .from_connected = false});
+    }
+    SUBCASE("From side open with a centre-tap electrode: the balancer through the electrode") {
+        DoubleComplex const z_grounding{0.5, 0.05};
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        input.from_status = 0;
+        input.r_grounding_to = z_grounding.real();
+        input.x_grounding_to = z_grounding.imag();
+        auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances(no_shunt);
+        // the halves are the balancer g w w^T with g = 1 / (2 z_b) and w = (1, -1), so the nodal admittance over
+        // (a, N, b) is g d d^T with d = (1, -2, 1); the electrode y_e = 1 / z_g adds to Y_NN = 4 g, and eliminating
+        // N leaves g - (2 g)^2 / (4 g + y_e) = g y_e / (4 g + y_e) in all four entries of the (a, b) block
+        DoubleComplex const g = 1.0 / (2.0 * z_b) * test_sn / (0.25 * ct_u2 * ct_u2);
+        DoubleComplex const y_e = 1.0 / z_grounding;
+        DoubleComplex const y_ab =
+            g * y_e / (4.0 * g + y_e) * (ct_u_rated_to / sqrt3) * (ct_u_rated_to / sqrt3) / test_base_power_1p;
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        for (Idx row = 0; row != 2; ++row) {
+            for (Idx col = 0; col != 2; ++col) {
+                CAPTURE(row);
+                CAPTURE(col);
+                CHECK(close_to(param.ytt()(row, col), y_ab));
+            }
+        }
+        check_all_zero({.value = {param.yff(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+        // the generic expected parameter agrees
+        double const half = 0.5 * ct_u2;
+        DoubleComplex const balancer = 1.0 / (2.0 * z_b) * test_sn / (half * half);
+        check_param_ct(param, {.from = phase_a,
+                               .y = {{{0.0, 0.0, 0.0}, {0.0, balancer, -balancer}, {0.0, -balancer, balancer}}},
+                               .z_grounding = z_grounding,
+                               .from_connected = false});
+    }
     SUBCASE("To side open without magnetising admittance is exactly zero") {
         SinglePhaseTransformerInput input = ct_input(ab);
         input.i0 = 0.0;
@@ -1399,6 +1461,21 @@ TEST_CASE("Test single phase transformer - centre-tapped secondary, status") {
         DoubleComplex const open_end = (0.5 * y_m + 1.0 / (z_f + 2.0 / y_m)) * test_sn / (test_u1 * test_u1);
         check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
                        {.from = phase_a, .y = {{{open_end, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}}});
+    }
+    SUBCASE("To side open with an electrode and magnetising admittance: the electrode is floating") {
+        SinglePhaseTransformerInput input = ct_input(ab);
+        input.to_status = 0;
+        input.r_grounding_to = 0.5;
+        input.x_grounding_to = 0.05;
+        auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances({});
+        // the open halves leave the centre tap with only the electrode (Y_NN = y_e, no coupling), so the Schur
+        // complement of the electrode is zero and the open-end shunt of the primary is unchanged
+        DoubleComplex const open_end = (0.5 * y_m + 1.0 / (z_f + 2.0 / y_m)) * test_sn / (test_u1 * test_u1);
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = connection_case(ab),
+                               .y = {{{open_end, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}},
+                               .z_grounding = {0.5, 0.05}});
+        check_all_zero({.value = {param.ytt(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
     }
     SUBCASE("Both sides open") {
         SinglePhaseTransformerInput input = ct_input(a);

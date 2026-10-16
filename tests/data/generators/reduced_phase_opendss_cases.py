@@ -28,15 +28,17 @@ Modelling choices:
   circuit the voltage is c * u_rated (pu=1.1) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM)
 - faults: OpenDSS replaces a fault resistance of 0 by 1e-4 ohm, so a bolted fault (r_f = 0) gets 1e-13 ohm instead,
   which is below the OpenDSS agreement of about 3e-10 relative. A bolted two-phase fault is a 1e-13 ohm bridge
-  between the phases; its 1e13 S conductance swamps the nodal admittance of the two phases in double precision, which
-  is harmless at a low-impedance (LV) node but not at a high-impedance one (at 22 kV the fault current is 0.5 % off),
-  so each bolted two-phase fault is solved again with a 10x larger bridge and must agree to 1e-10 relative. A bolted
-  two-phase-to-ground fault (PGM: both phases at 0 V) is two Fault elements of 1e-13 ohm from each phase to earth. With
-  r_f > 0, PGM joins the two phases and connects them to earth through z_f; in OpenDSS this needs a bridge between
-  the phases at a node with a non-zero voltage, where the same round-off limits the reference to about 3e-9 relative
-  (LV) and 1e-8 relative (22 kV) for any bridge resistance, too coarse for the tolerances of these cases, so it is not
-  generated. The fault current per phase is the sum over all Fault elements of the fault and over their terminals of
-  the current from the node into the element
+  between the phases; its 1e13 S conductance swamps the nodal admittance of the two phases in double precision and
+  leaves a round-off error of about eps |V| G in the fault current. This is harmless only where the shorted phases sit
+  near 0 V, as at a split-phase node, because then eps |V| G is negligible; it is not harmless at a low-impedance node
+  in general (1.3e-4 relative at a three-phase 400 V node, 1.6e-2 at 22 kV). Each bolted two-phase fault is therefore
+  solved again with a 10x larger bridge and must agree to 1e-10 relative, which catches it. A bolted
+  two-phase-to-ground fault (PGM: both phases at 0 V) is two Fault elements of 1e-13 ohm from each phase to earth,
+  without a bridge. With r_f > 0, PGM joins the two phases and connects them to earth through z_f; in OpenDSS this
+  needs a bridge between the phases at a node with a non-zero voltage, where the same round-off limits the reference
+  to about 3e-9 relative (LV) and 1e-8 relative (22 kV) for any bridge resistance, too coarse for the tolerances of
+  these cases, so it is not generated. The fault current per phase is the sum over all Fault elements of the fault
+  and over their terminals of the current from the node into the element
 - lines: explicit R/X/C matrices of the present phases; a line with a neutral gets the numpy Kron-reduced matrix,
   which is cross-checked against an OpenDSS LineCode with Kron=yes; the exception is a line with opendss_kron=True,
   which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
@@ -1447,6 +1449,8 @@ def split_phase_short_circuit_case():
             # leg to leg (480 V), through both halves in series
             Fault(601, 5, "two_phase", "ab", 0.0),
             Fault(601, 5, "two_phase_to_ground", "ab", 0.0),
+            # not degenerate (at the split-phase node it equals the two-phase fault): two phases of the 22 kV node
+            Fault(601, 2, "two_phase_to_ground", "bc", 0.0),
             # at the end of the ab service line
             Fault(601, 7, "single_phase_to_ground", "a", 0.0),
             # the fault current returns through the centre-tap electrode of transformer 153

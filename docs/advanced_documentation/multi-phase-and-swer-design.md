@@ -676,13 +676,18 @@ and short circuit `tests/data/short_circuit/single-phase-transformer-split-phase
   of the bridge swamps the nodal admittance in double precision: for any bridge resistance the reference is only
   accurate to about 3e-9 relative at 240 V and 1e-8 at 22 kV, too coarse for these tolerances, so the generator
   does not produce it (PGM agrees with the best bridge values to about 1e-9). The same round-off makes a bolted
-  two-phase fault (a 1e-13 Ω bridge) 0.5 % off at a 22 kV node, while it is exact at a 240 V node; the generator
-  therefore solves every bolted two-phase fault again with a 10x larger bridge and requires the same fault current
-  to 1e-10 relative. At a split-phase node a bolted `two_phase_to_ground` ab fault gives exactly the currents of
-  the bolted `two_phase` fault: with both legs at 0 V the primary drives the halves antisymmetrically, so no
-  current flows to earth at the centre tap.
+  two-phase fault (a 1e-13 Ω bridge) inexact at a low-impedance node in general: a reviewer measured 1.3e-4 relative
+  at a three-phase 400 V node and 1.6e-2 at 22 kV. It is harmless only where the shorted phases sit near 0 V, as at a
+  split-phase node, because then $\varepsilon\,|V|\,G$ (machine epsilon times the voltage times the 1e13 S bridge
+  conductance) is negligible; the generator therefore solves every bolted two-phase fault again with a 10x larger
+  bridge, which catches it, and requires the same fault current to 1e-10 relative. At a split-phase node a bolted `two_phase_to_ground` ab fault gives
+  exactly the currents of the bolted `two_phase` fault: with both legs at 0 V the primary drives the halves antisymmetrically, so no
+  current flows to earth at the centre tap. That scenario is therefore degenerate, and the case also has a bolted
+  `two_phase_to_ground` bc fault at the 22 kV three-phase node 2, where the earth current is not zero and the
+  fault differs from the two-phase fault (PGM and OpenDSS agree with a ratio of 0.035 at rtol/atol 1e-8).
 * **Linear switch in the start tests.** A network with only constant-impedance loads, or none, switches power flow
-  to the linear method (M6b). Cases and tests that exercise the slot patterns of the flat and average-source starts
+  to the linear method (found in M6b; the rule is `all_const_y_` in `math_solver.hpp`). Cases and tests that exercise the slot patterns of
+  the flat and average-source starts
   therefore need `const_pq` or `const_i` loads: `split-phase` and `split-phase-flat-start` have them, and
   `split-phase-linear` (all `const_y`) runs the linear methods.
 

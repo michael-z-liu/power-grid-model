@@ -11,17 +11,18 @@ IEC 60909 short circuits (maximum voltage scaling) in the `split-phase` network 
 - node 5, behind a SWER isolating transformer (`ab` → `a`, earth electrode of 5 + j0.1 Ω), a 20 km SWER line and an `a` → centre-tapped transformer (25 kVA, the default Kersting split of `uk`/`pk`, solidly earthed centre tap, from-side tap at +2.5 %); node 7 is at the end of a 0.3 km `ab` service line (with neutral) off node 5;
 - node 6, behind a `bc` → centre-tapped transformer (50 kVA, clock 6, `uk_half` = 0.022 and `pk_half` = 200 W, centre tap earthed through an electrode of 0.5 + j0.05 Ω).
 
-It is a batch of seven scenarios:
+It is a batch of eight scenarios:
 
 - single-phase to ground on phase a at node 5, bolted (`r_f` = 0): leg a to the earthed centre tap through half 1;
 - single-phase to ground on phase b at node 5, with `r_f` = 0.1 Ω (half 2);
 - two-phase ab at node 5, bolted: leg to leg (480 V), through both halves in series;
 - two-phase to ground ab at node 5, bolted;
+- two-phase to ground bc at node 2, bolted: the 22 kV three-phase node of the feeder, where (unlike the degenerate ab case at the split-phase node) the phase-to-ground fault is not equal to the two-phase fault;
 - single-phase to ground on phase a at node 7, bolted;
 - single-phase to ground on phase a at node 6, bolted: the fault current returns through the centre-tap electrode;
 - two-phase ab at node 6, with `r_f` = 0.05 Ω.
 
-The bolted two-phase-to-ground fault gives the same currents as the bolted two-phase fault (1103.45 A per leg): with both legs at 0 V, the two halves are driven antisymmetrically by the primary, so no current flows to earth at the centre tap. With the electrode on the centre tap of node 6, the single-phase fault current of 500.086 A flows to true earth through the electrode, which is checked in the OpenDSS model to carry I_a + I_b, the phasor sum of the currents into the two halves at the legs.
+The bolted two-phase-to-ground fault at node 5 gives the same currents as the bolted two-phase fault (1103.45 A per leg): with both legs at 0 V, the two halves are driven antisymmetrically by the primary, so no current flows to earth at the centre tap. With the electrode on the centre tap of node 6, the single-phase fault current of 500.086 A flows to true earth through the electrode, which is checked in the OpenDSS model to carry I_a + I_b, the phasor sum of the currents into the two halves at the legs.
 
 ## Generation
 
