@@ -69,7 +69,10 @@ def run(case, params, method):
     enabled = _ExperimentalFeatures.enabled
     if (case / "asym_output.json").exists():
         result = model._calculate_power_flow(
-            symmetric=False, calculation_method=CalculationMethod[method], experimental_features=enabled
+            symmetric=False,
+            calculation_method=CalculationMethod[method],
+            calculation_initialization=params.get("calculation_initialization", "default"),
+            experimental_features=enabled,
         )
         return [(result, json.loads((case / "asym_output.json").read_text())["data"])]
     scaling = ShortCircuitVoltageScaling[params["short_circuit_voltage_scaling"]]

@@ -12,7 +12,7 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/state_estimation/reduced-phase-not-supported
 - tests/data/short_circuit/{asym-line-reduced-phase, asym-line-swer-a}
 - tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
-  missing-phase-for-winding}
+  missing-phase-for-winding, split-phase, split-phase-flat-start, split-phase-linear}
 - tests/data/short_circuit/single-phase-transformer-swer
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
@@ -48,6 +48,17 @@ Modelling choices:
   divided by sn) are the reference. In a short circuit the winding currents are the reference (with the current of the
   low-susceptance reactor added to its side, as for the powers), and in the OpenDSS netlist each electrode current is
   checked to equal the winding current (KCL; this checks the reference model, not PGM)
+- centre-tapped (split-phase) transformers: a 1-phase, 3-winding wye-wye-wye Transformer (the primary and the two
+  halves; half 1 from node 1 to the centre tap and half 2 from the centre tap to node 2, both reversed for clock 6)
+  with kVs = u1, u2 / 2, u2 / 2, equal kVAs = sn, the star resistances of the primary and half branches z_0 and z_b
+  per winding (%Rs; %loadloss is not used with three windings) and XHL = XHT = Im z_hs, XLT = 2 Im z_b on sn, where
+  z_hs comes from uk_half/pk_half on sn / 2 or the Kersting default 1.5 r + j1.2 x. The centre tap is node 0, or node
+  4 with an electrode Reactor to earth. A centre-tapped side has no low susceptance (a phase-to-phase primary keeps
+  it). Each such transformer is first checked on its own: its OpenDSS YPrim must equal the numpy N-winding model
+  A^T Z_B^-1 A (the decisive check of the three-winding conventions), and in open circuit U_b = -U_a with
+  |U_a| = u2 / 2. The to-side powers are the sums per node over both halves, the loading is
+  max(|sum s_from|, 2 |s_a|, 2 |s_b|) / sn (each half is rated sn / 2), and the centre-tap electrode current is checked
+  to equal I_a + I_b (KCL at node 4)
 """
 
 import json
@@ -211,7 +222,16 @@ class Load:
         return [sign * x for x in self.p], [sign * x for x in self.q]
 
 
-WINDING_CONNECTION = {"a": 1, "b": 2, "c": 3, "ab": 4, "ac": 5, "bc": 6}
+def short_circuit_impedance(uk, pk, sn):
+    """series impedance in per unit on sn from the short circuit voltage and the load losses, as PGM computes it"""
+    r = pk / sn
+    x_squared = uk * uk - r * r
+    return complex(r, math.copysign(math.sqrt(x_squared) if x_squared > 0.0 else 0.0, uk))
+
+
+WINDING_CONNECTION = {"a": 1, "b": 2, "c": 3, "ab": 4, "ac": 5, "bc": 6, "ab_center_tapped": 7}
+# the centre-tapped (split-phase) to winding
+CENTER_TAPPED = "ab_center_tapped"
 BRANCH_SIDE = {"from": 0, "to": 1}
 
 
@@ -220,7 +240,9 @@ class Transformer1P:
     id: int
     from_node: int
     to_node: int
-    from_conn: str  # winding phases: "a", "b", "c" (phase-to-earth) or "ab", "ac", "bc" (phase-to-phase)
+    # winding phases: "a", "b", "c" (phase-to-earth), "ab", "ac", "bc" (phase-to-phase) or, on the to side only,
+    # "ab_center_tapped" (two halves, a to the centre tap and the centre tap to b)
+    from_conn: str
     to_conn: str
     u1: float  # winding voltages (V)
     u2: float
@@ -243,6 +265,13 @@ class Transformer1P:
     tap_side: str | None = None  # "from" or "to"
     from_status: int = 1
     to_status: int = 1
+    # centre-tapped to winding: the short circuit test between the primary and one half (on sn / 2); None means the
+    # default (Kersting) split of uk and pk
+    uk_half: float | None = None
+    pk_half: float | None = None
+
+    def center_tapped(self):
+        return self.to_conn == CENTER_TAPPED
 
     def pgm(self):
         result = {
@@ -273,6 +302,8 @@ class Transformer1P:
             "x_grounding_from": self.x_g_from,
             "r_grounding_to": self.r_g_to,
             "x_grounding_to": self.x_g_to,
+            "uk_half": self.uk_half,
+            "pk_half": self.pk_half,
         }
         result.update({k: v for k, v in optional.items() if v is not None})
         return result
@@ -306,8 +337,35 @@ class Transformer1P:
             return 1.0, (self.u2 + offset) / self.u2
         return (self.u1 + offset) / self.u1, 1.0
 
+    def ct_impedances(self):
+        """(z_f, z_hs, z_0, z_b) of a centre-tapped transformer in per unit on sn (the cases have no uk_min/max, so all
+        at the nominal tap): z_f is the full winding (primary against both halves in series), z_hs the primary against
+        one half (from uk_half/pk_half on sn / 2, or the Kersting default 1.5 r + j1.2 x), and z_0 = z_f - z_b / 2 and
+        z_b = 2 (z_hs - z_f) the star branches of the primary and of each half"""
+        z_f = short_circuit_impedance(self.uk, self.pk, self.sn)
+        uk_half = 0.5 * abs(complex(1.5 * z_f.real, 1.2 * z_f.imag)) if self.uk_half is None else self.uk_half
+        pk_half = 0.375 * self.pk if self.pk_half is None else self.pk_half
+        z_hs = short_circuit_impedance(2.0 * uk_half, 4.0 * pk_half, self.sn)
+        z_b = 2.0 * (z_hs - z_f)
+        z_0 = z_f - 0.5 * z_b
+        return z_f, z_hs, z_0, z_b
+
+    def ct_primitive_admittance(self):
+        """3x3 primitive admittance (siemens) of the primary and the two halves of a centre-tapped transformer, in the
+        N-winding form A^T Z_B^-1 A with Z_B = z_0 1 + z_b I (per unit on sn), scaled with sn / (V_i V_j) on the tapped
+        winding voltages u1', u2' / 2, u2' / 2; written independently of PGM, as the reference of the YPrim check"""
+        _, _, z_0, z_b = self.ct_impedances()
+        t1, t2 = self.taps()
+        a = np.array([[1.0, -1.0, 0.0], [1.0, 0.0, -1.0]])
+        z_branch = z_0 * np.ones((2, 2)) + z_b * np.eye(2)
+        y_pu = a.T @ np.linalg.inv(z_branch) @ a
+        v = np.array([self.u1 * t1, 0.5 * self.u2 * t2, 0.5 * self.u2 * t2])
+        return y_pu * self.sn / np.outer(v, v)
+
     def dss_parameters(self):
         """the OpenDSS transformer definition without the buses"""
+        if self.center_tapped():
+            return self.dss_parameters_center_tapped()
         r_pct = 100.0 * self.pk / self.sn
         x_pct = 100.0 * math.sqrt(self.uk**2 - (self.pk / self.sn) ** 2)
         imag_pct = 100.0 * math.sqrt(self.i0**2 - (self.p0 / self.sn) ** 2)
@@ -316,6 +374,23 @@ class Transformer1P:
             f"conns=[wye wye] kVs=[{self.u1 / 1e3!r} {self.u2 / 1e3!r}] kVAs=[{self.sn / 1e3!r} {self.sn / 1e3!r}]"
             f" XHL={x_pct!r} %loadloss={r_pct!r} %noloadloss={100.0 * self.p0 / self.sn!r} %imag={imag_pct!r}"
             f" ppm_antifloat=0 taps=[{t1!r} {t2!r}]"
+        )
+
+    def dss_parameters_center_tapped(self):
+        """a 1-phase, 3-winding transformer (the primary and the two halves at u2 / 2), with equal kVAs = sn, the star
+        resistances of z_0 and z_b per winding (%Rs, never %loadloss with three windings) and the reactances between
+        the windings on sn: XHL = XHT = Im z_hs (primary against one half) and XLT = 2 Im z_b (half against half)"""
+        _, z_hs, z_0, z_b = self.ct_impedances()
+        assert self.i0 == 0.0, "the OpenDSS cases use i0 = p0 = 0, see the script"
+        assert self.p0 == 0.0, "the OpenDSS cases use i0 = p0 = 0, see the script"
+        t1, t2 = self.taps()
+        kv_half = 0.5 * self.u2 / 1e3
+        kva = self.sn / 1e3
+        return (
+            f"conns=[wye wye wye] kVs=[{self.u1 / 1e3!r} {kv_half!r} {kv_half!r}] kVAs=[{kva!r} {kva!r} {kva!r}]"
+            f" %Rs=[{100.0 * z_0.real!r} {100.0 * z_b.real!r} {100.0 * z_b.real!r}]"
+            f" XHL={100.0 * z_hs.imag!r} XHT={100.0 * z_hs.imag!r} XLT={200.0 * z_b.imag!r}"
+            f" %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[{t1!r} {t2!r} {t2!r}]"
         )
 
     def low_susceptance(self, bus, conn, u_rated):
@@ -343,6 +418,24 @@ class Transformer1P:
             ("to", self.to_node, self.to_conn, self.r_g_to, self.x_g_to, self.to_status, u_to),
         ):
             bus = f"n{node}" if status else f"open_t{self.id}_{side}"
+            if conn == CENTER_TAPPED:
+                assert side == "to", "a centre-tapped winding is only allowed on the to side"
+                # half 1 from node 1 (slot a) to the centre tap, half 2 from the centre tap to node 2 (slot b); the
+                # centre tap is earth (node 0) or node 4 with the electrode; clock 6 reverses both halves
+                centre_tap = 0
+                if r_g is not None or x_g is not None:
+                    assert x_g is not None, "use x_grounding > 0 for an electrode"
+                    assert x_g > 0.0, "use x_grounding > 0 for an electrode"
+                    centre_tap = 4
+                    shunts.append(
+                        f"New Reactor.g{self.id}{side} phases=1 bus1={bus}.4 bus2={bus}.0 R={r_g or 0.0!r} X={x_g!r}"
+                    )
+                halves = [[1, centre_tap], [centre_tap, 2]]
+                if self.clock == 6:
+                    for half in halves:
+                        half.reverse()
+                buses += [bus + "".join(f".{t}" for t in half) for half in halves]
+                continue
             if len(conn) == 2:
                 assert r_g is None, "a phase-to-phase winding has no earthed terminal"
                 assert x_g is None, "a phase-to-phase winding has no earthed terminal"
@@ -364,10 +457,11 @@ class Transformer1P:
                 # reversed polarity of the to-side winding
                 terminals.reverse()
             buses.append(bus + "".join(f".{t}" for t in terminals))
-        return [
-            f"New Transformer.t{self.id} phases=1 windings=2 buses=[{buses[0]} {buses[1]}] {self.dss_parameters()}",
-            *shunts,
-        ]
+        transformer = (
+            f"New Transformer.t{self.id} phases=1 windings={len(buses)} buses=[{' '.join(buses)}]"
+            f" {self.dss_parameters()}"
+        )
+        return [transformer, *shunts]
 
 
 # OpenDSS replaces r = 0 of a Fault by 1e-4 ohm, so a bolted fault gets this resistance instead
@@ -677,6 +771,61 @@ def check_transformer(transformer: Transformer1P):
     )
 
 
+def check_center_tapped_transformer(transformer: Transformer1P):
+    """sanity checks of the OpenDSS centre-tapped (3-winding) transformer on its own, fed with the from-side winding
+    voltage:
+
+    - YPrim: the 6x6 primitive admittance of OpenDSS (siemens; conductors [p+, p-, h1+, h1-, h2+, h2-]) equals
+      C^T Y C of the numpy N-winding model (C has the rows e_p+ - e_p-, e_h1+ - e_h1-, e_h2+ - e_h2-); this is the
+      decisive check of the three-winding conventions (%Rs, XHL/XHT/XLT on kVAs[1], kVs and taps per winding)
+    - open circuit: U_b = -U_a and |U_a| = u2 / 2 (times the tap ratio)
+    """
+    assert transformer.tap_side in (None, "from"), "a to-side tap changes the ohmic impedance differently"
+    t1, t2 = transformer.taps()
+    u1 = transformer.u1
+    dss.Basic.ClearAll()
+    for command in (
+        "Clear",
+        f"Set DefaultBaseFrequency={FREQ:g}",
+        f"New Circuit.t phases=1 basekv={u1 / 1e3!r} pu=1 angle=0 bus1=src.1 Z1=[0, 1e-9] Z0=[0, 1e-9]",
+        f"New Transformer.t phases=1 windings=3 buses=[src.1.0 sec.1.0 sec.0.2] {transformer.dss_parameters()}",
+        "Set VoltageBases=[1]",
+        "CalcVoltageBases",
+        "Set Tolerance=1e-12",
+        "Solve",
+    ):
+        dss.Text.Command(command)
+    assert dss.Solution.Converged()
+    dss.Circuit.SetActiveElement("Transformer.t")
+    assert dss.CktElement.NumTerminals() == 3
+    assert dss.CktElement.NumConductors() == 2
+    raw = np.array(dss.CktElement.YPrim())
+    y_dss = (raw[0::2] + 1j * raw[1::2]).reshape(6, 6)
+    c = np.zeros((3, 6))
+    for w in range(3):
+        c[w, 2 * w] = 1.0
+        c[w, 2 * w + 1] = -1.0
+    y_expected = c.T @ transformer.ct_primitive_admittance() @ c
+    dev = np.max(np.abs(y_dss - y_expected)) / np.max(np.abs(y_expected))
+    assert dev < 1e-9, f"YPrim of centre-tapped transformer {transformer.id} differs by {dev:.1e} relative"
+
+    dss.Circuit.SetActiveBus("src")
+    v1 = complex(*dss.Bus.Voltages()[:2])
+    assert abs(abs(v1) / u1 - 1.0) < 1e-9, f"the 1-phase source is not at the winding voltage: {abs(v1)}"
+    dss.Circuit.SetActiveBus("sec")
+    v = dict(zip(dss.Bus.Nodes(), (complex(*pair) for pair in np.array(dss.Bus.Voltages()).reshape(-1, 2))))
+    ratio = v[1] / v1
+    expected_ratio = 0.5 * transformer.u2 * t2 / (u1 * t1)
+    dev_ratio = abs(ratio / expected_ratio - 1.0)
+    dev_opposite = abs(v[2] + v[1]) / abs(v[1])
+    assert dev_ratio < 1e-9, f"open-circuit ratio {ratio} instead of {expected_ratio}"
+    assert dev_opposite < 1e-9, f"open circuit: U_b = {v[2]} is not -U_a = {-v[1]}"
+    print(
+        f"  centre-tapped transformer {transformer.id}: YPrim agrees (max dev {dev:.1e} relative); open circuit"
+        f" |U_a| = u2 / 2 (dev {dev_ratio:.1e}) and U_b = -U_a (dev {dev_opposite:.1e})"
+    )
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # reference output
 
@@ -694,17 +843,28 @@ def bus_voltages(node):
 
 
 def terminal_values(name, values_getter, n_cond):
-    """per terminal, per phase complex values of the active element"""
+    """per side, per phase complex values of the active element: the first terminal is the from side, and the other
+    terminals (one for a line or a two-winding transformer; the two halves of a centre-tapped transformer) are summed
+    per node into the to side; nodes 0 and 4 are dropped"""
     dss.Circuit.SetActiveElement(name)
     raw = values_getter()
     order = dss.CktElement.NodeOrder()
+    n_terminals = dss.CktElement.NumTerminals()
     result = [np.zeros(3, dtype=complex), np.zeros(3, dtype=complex)]
-    for terminal in range(2):
+    assigned = [set(), set()]
+    for terminal in range(n_terminals):
+        side = min(terminal, 1)
         for k in range(n_cond):
             idx = terminal * n_cond + k
             number = order[idx]
             if 1 <= number <= 3:
-                result[terminal][number - 1] = complex(raw[2 * idx], raw[2 * idx + 1])
+                value = complex(raw[2 * idx], raw[2 * idx + 1])
+                # assign the first value (keeping the sign of a zero), add the next ones
+                if number in assigned[side]:
+                    result[side][number - 1] += value
+                else:
+                    result[side][number - 1] = value
+                    assigned[side].add(number)
     return result
 
 
@@ -768,13 +928,15 @@ def transformer_pf_reference(transformer: Transformer1P):
             (s_from if k == 0 else s_to)[:] += s_low
     s_from = s_from * 1e3 if transformer.from_status else np.zeros(3, dtype=complex)
     s_to = s_to * 1e3 if transformer.to_status else np.zeros(3, dtype=complex)
+    # each half of a centre-tapped winding is rated sn / 2
+    to_power = 2.0 * max(abs(s_to[0]), abs(s_to[1])) if transformer.center_tapped() else abs(np.sum(s_to))
     return {
         "id": transformer.id,
         "p_from": [float(v.real) for v in s_from],
         "q_from": [float(v.imag) for v in s_from],
         "p_to": [float(v.real) for v in s_to],
         "q_to": [float(v.imag) for v in s_to],
-        "loading": float(max(abs(np.sum(s_from)), abs(np.sum(s_to))) / transformer.sn),
+        "loading": float(max(abs(np.sum(s_from)), to_power) / transformer.sn),
     }
 
 
@@ -853,15 +1015,19 @@ def transformer_sc_reference(transformer: Transformer1P, i_f):
     }
 
 
-def check_electrodes(transformer: Transformer1P, i_f):
+def check_electrodes(transformer: Transformer1P, i_f=None):
     """a consistency check of the OpenDSS netlist (KCL), not of PGM: the current from node 4 into the electrode equals
     the current into the winding at its phase terminal (the winding has no other path), so the winding current that
-    PGM is compared with is also the electrode current"""
+    PGM is compared with is also the electrode current; for a centre-tapped winding, it equals the sum I_a + I_b of
+    the currents into the two halves at the legs (KCL at node 4, the centre tap); i_f is the fault current, if any"""
     for side, terminal, r_g, x_g, status in (
         ("from", 0, transformer.r_g_from, transformer.x_g_from, transformer.from_status),
         ("to", 1, transformer.r_g_to, transformer.x_g_to, transformer.to_status),
     ):
         if (r_g is None and x_g is None) or not status:
+            continue
+        if side == "to" and transformer.center_tapped():
+            check_center_tap_electrode(transformer)
             continue
         dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
         raw = dss.CktElement.Currents()
@@ -873,11 +1039,37 @@ def check_electrodes(transformer: Transformer1P, i_f):
         dev = abs(i_electrode - winding[phase])
         assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"electrode of transformer {transformer.id} {side}: {dev}"
         assert abs(winding[4] + winding[phase]) < 1e-9 * abs(i_electrode) + 1e-9
-        i_fault = abs(i_f[phase - 1])
+        fault_text = "" if i_f is None else f"; fault current on phase {'abc'[phase - 1]}: {abs(i_f[phase - 1]):.6g} A"
         print(
             f"  electrode of transformer {transformer.id} ({side}): {abs(i_electrode):.6g} A, equal to the winding"
-            f" current (dev {dev:.1e} A); fault current on phase {'abc'[phase - 1]}: {i_fault:.6g} A"
+            f" current (dev {dev:.1e} A){fault_text}"
         )
+
+
+def check_center_tap_electrode(transformer: Transformer1P):
+    """KCL at node 4, the centre tap: the electrode current equals I_a + I_b, the currents into the two halves at the
+    legs (nodes 1 and 2; the terminals 2 and 3 of the transformer)"""
+    dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
+    raw = dss.CktElement.Currents()
+    order = dss.CktElement.NodeOrder()
+    legs = 0j
+    centre = 0j
+    for idx in range(2, 6):
+        value = complex(raw[2 * idx], raw[2 * idx + 1])
+        if order[idx] in (1, 2):
+            legs += value
+        else:
+            assert order[idx] == 4
+            centre += value
+    dss.Circuit.SetActiveElement(f"Reactor.g{transformer.id}to")
+    i_electrode = complex(*dss.CktElement.Currents()[:2])
+    dev = abs(i_electrode - legs)
+    assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"centre-tap electrode of transformer {transformer.id}: {dev}"
+    assert abs(centre + legs) < 1e-9 * abs(i_electrode) + 1e-9
+    print(
+        f"  centre-tap electrode of transformer {transformer.id}: {abs(i_electrode):.6g} A, equal to I_a + I_b"
+        f" (dev {dev:.1e} A)"
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -919,11 +1111,17 @@ def generate(case: Case, root: Path):
 
     check_kron_against_opendss(case)
     for transformer in case.transformers:
-        check_transformer(transformer)
+        if transformer.center_tapped():
+            check_center_tapped_transformer(transformer)
+        else:
+            check_transformer(transformer)
 
     if case.calculation == "power_flow":
         script = dss_script(case, None, 1.0, with_loads=True)
         run_dss(script, case)
+        for transformer in case.transformers:
+            if transformer.center_tapped():
+                check_electrodes(transformer)
         write_text(target / "test.dss", "\n".join(script) + "\n")
         write_json(target / "asym_output.json", output_dataset("asym_output", pf_reference(case)))
         return
@@ -1118,6 +1316,76 @@ def phase_to_phase_case(path, all_const_y, methods):
     )
 
 
+def split_phase_case(path, all_const_y, params):
+    """22 kV abc -> SWER isolating transformer ab -> a (electrode) -> SWER line -> a -> 240-0-240 V centre-tapped
+    (Kersting defaults, solid centre tap, from-side tap) with an ab service line; and 22 kV bc -> 240-0-240 V
+    centre-tapped (clock 6, uk_half/pk_half given, centre-tap electrode)"""
+
+    def t(load_type):
+        return "const_y" if all_const_y else load_type
+
+    return Case(
+        path=path,
+        u_rated=SWER_U,
+        nodes=[1, 2, 3, 4, 5, 6, 7],
+        node_u_rated={5: LV_U, 6: LV_U, 7: LV_U},
+        lines=[
+            Line(101, 1, 2, "abc", 2.0),
+            Line(102, 3, 4, "a", 20.0, swer=True),
+            # the service line off the split-phase node, which carries the split-phase slot pattern
+            Line(103, 5, 7, "ab", 0.3, neutral=True),
+        ],
+        transformers=[
+            Transformer1P(151, 2, 3, "ab", "a", 22e3, 12.7e3, 200e3, 0.05, 2000.0, r_g_to=5.0, x_g_to=0.1),
+            Transformer1P(
+                152,
+                4,
+                5,
+                "a",
+                CENTER_TAPPED,
+                12.7e3,
+                480.0,
+                25e3,
+                0.04,
+                400.0,
+                tap_pos=1,
+                tap_nom=0,
+                tap_min=-2,
+                tap_max=2,
+                tap_size=0.025 * 12.7e3,
+                tap_side="from",
+            ),
+            Transformer1P(
+                153,
+                2,
+                6,
+                "bc",
+                CENTER_TAPPED,
+                22e3,
+                480.0,
+                50e3,
+                0.035,
+                500.0,
+                clock=6,
+                r_g_to=0.5,
+                x_g_to=0.05,
+                uk_half=0.022,
+                pk_half=200.0,
+            ),
+        ],
+        # wye loads on the legs a and b (240 V to true earth), unbalanced
+        loads=[
+            Load(301, 5, "asym_load", t("const_pq"), [8e3, 3e3, 0.0], [2.5e3, 1e3, 0.0]),
+            Load(302, 5, "asym_load", "const_y", [1.5e3, 2.5e3, 0.0], [0.5e3, 0.8e3, 0.0]),
+            Load(303, 7, "asym_load", t("const_pq"), [3e3, 1.5e3, 0.0], [1e3, 0.4e3, 0.0]),
+            Load(304, 7, "asym_load", t("const_i"), [1e3, 2e3, 0.0], [0.3e3, 0.6e3, 0.0]),
+            Load(305, 6, "asym_load", "const_y", [6e3, 2e3, 0.0], [2e3, 0.5e3, 0.0]),
+            Load(306, 6, "asym_load", t("const_pq"), [1e3, 0.5e3, 0.0], [0.5e3, 0.2e3, 0.0]),
+        ],
+        params=params,
+    )
+
+
 def small_reduced_case(path, raises_only, params):
     return Case(
         path=path,
@@ -1244,6 +1512,24 @@ CASES = [
         "power_flow/single-phase-transformer/phase-to-phase-linear",
         all_const_y=True,
         methods=["linear", "linear_current"],
+    ),
+    # the network has const_pq and const_i loads, so that newton_raphson (linear start) and iterative_current (the
+    # average-source start with the split-phase slot pattern) iterate; the flat start is a case of its own
+    split_phase_case(
+        "power_flow/single-phase-transformer/split-phase",
+        all_const_y=False,
+        # limited by the iterative_current convergence (newton_raphson alone agrees with (1e-8, 1e-8))
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+    ),
+    split_phase_case(
+        "power_flow/single-phase-transformer/split-phase-flat-start",
+        all_const_y=False,
+        params=dict(pf_params("newton_raphson", 1e-8, 1e-8), calculation_initialization="flat"),
+    ),
+    split_phase_case(
+        "power_flow/single-phase-transformer/split-phase-linear",
+        all_const_y=True,
+        params=pf_params(["linear", "linear_current"], 1e-8, 1e-8),
     ),
     Case(
         path="power_flow/single-phase-transformer/missing-phase-for-winding",
