@@ -13,7 +13,7 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/short_circuit/{asym-line-reduced-phase, asym-line-swer-a}
 - tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
   missing-phase-for-winding, split-phase, split-phase-flat-start, split-phase-linear}
-- tests/data/short_circuit/single-phase-transformer-swer
+- tests/data/short_circuit/{single-phase-transformer-swer, single-phase-transformer-split-phase}
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
 
@@ -27,7 +27,16 @@ Modelling choices:
 - source: Vsource with Z1/Z0 in ohm from sk, rx_ratio and z01_ratio, exactly as PGM computes them; in a short
   circuit the voltage is c * u_rated (pu=1.1) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM)
 - faults: OpenDSS replaces a fault resistance of 0 by 1e-4 ohm, so a bolted fault (r_f = 0) gets 1e-13 ohm instead,
-  which is below the OpenDSS agreement of about 3e-10 relative
+  which is below the OpenDSS agreement of about 3e-10 relative. A bolted two-phase fault is a 1e-13 ohm bridge
+  between the phases; its 1e13 S conductance swamps the nodal admittance of the two phases in double precision, which
+  is harmless at a low-impedance (LV) node but not at a high-impedance one (at 22 kV the fault current is 0.5 % off),
+  so each bolted two-phase fault is solved again with a 10x larger bridge and must agree to 1e-10 relative. A bolted
+  two-phase-to-ground fault (PGM: both phases at 0 V) is two Fault elements of 1e-13 ohm from each phase to earth. With
+  r_f > 0, PGM joins the two phases and connects them to earth through z_f; in OpenDSS this needs a bridge between
+  the phases at a node with a non-zero voltage, where the same round-off limits the reference to about 3e-9 relative
+  (LV) and 1e-8 relative (22 kV) for any bridge resistance, too coarse for the tolerances of these cases, so it is not
+  generated. The fault current per phase is the sum over all Fault elements of the fault and over their terminals of
+  the current from the node into the element
 - lines: explicit R/X/C matrices of the present phases; a line with a neutral gets the numpy Kron-reduced matrix,
   which is cross-checked against an OpenDSS LineCode with Kron=yes; the exception is a line with opendss_kron=True,
   which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
@@ -480,6 +489,38 @@ class Fault:
     def dss_r(self):
         return self.r_f if self.r_f > 0.0 else DSS_BOLTED_FAULT_R
 
+    def has_bridge(self):
+        """a bolted two-phase fault is a tiny resistance between two phases, whose accuracy is checked"""
+        return self.fault_type == "two_phase" and self.r_f == 0.0
+
+    def dss_elements(self, bridge_scale=1.0):
+        """the OpenDSS Fault elements of this fault, as (name, definition); all names start with f{id}; bridge_scale
+        multiplies the resistance of a bolted two-phase fault (for the accuracy check)"""
+        assert self.x_f == 0.0, "OpenDSS faults are resistive"
+        bus = f"n{self.node}"
+        name = f"f{self.id}"
+        if self.fault_type == "single_phase_to_ground":
+            k = "abc".index(self.fault_phase) + 1
+            return [(name, f"phases=1 bus1={bus}.{k} r={self.dss_r()!r}")]
+        if self.fault_type == "two_phase":
+            k1, k2 = ("abc".index(p) + 1 for p in self.fault_phase)
+            r = self.dss_r() * bridge_scale if self.has_bridge() else self.dss_r()
+            return [(name, f"phases=1 bus1={bus}.{k1} bus2={bus}.{k2} r={r!r}")]
+        if self.fault_type == "three_phase":
+            # three phase-to-earth resistances r_f, as PGM models a three-phase fault with impedance
+            return [(name, f"phases=3 bus1={bus}.1.2.3 bus2={bus}.0.0.0 r={self.dss_r()!r}")]
+        if self.fault_type == "two_phase_to_ground":
+            if self.r_f > 0.0:
+                # PGM joins the two phases and connects them to earth through z_f; the bridge between the phases that
+                # this needs in OpenDSS is too inaccurate, see the script docstring
+                raise NotImplementedError("two_phase_to_ground with r_f > 0 has no accurate OpenDSS reference")
+            # bolted: both phases to earth
+            return [
+                (f"{name}_{k}", f"phases=1 bus1={bus}.{k} r={DSS_BOLTED_FAULT_R!r}")
+                for k in ("abc".index(p) + 1 for p in self.fault_phase)
+            ]
+        raise NotImplementedError(self.fault_type)
+
 
 @dataclass
 class Case:
@@ -573,7 +614,7 @@ def source_z(case: Case):
     return complex(r1, x1), complex(r1, x1) * case.z01_ratio
 
 
-def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: bool):
+def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: bool, bridge_scale=1.0):
     z1, z0 = source_z(case)
     if fault is not None:
         # IEC 60909: sk is defined at the rated voltage, so the source impedance is c * u_rated^2 / sk (as in PGM)
@@ -637,22 +678,7 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
                     " vminpu=0.1 vmaxpu=2"
                 )
     if fault is not None:
-        assert fault.x_f == 0.0, "OpenDSS faults are resistive"
-        if fault.fault_type == "single_phase_to_ground":
-            k = "abc".index(fault.fault_phase) + 1
-            lines.append(f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k} r={fault.dss_r()!r}")
-        elif fault.fault_type == "two_phase":
-            k1, k2 = ("abc".index(p) + 1 for p in fault.fault_phase)
-            lines.append(
-                f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k1} bus2=n{fault.node}.{k2} r={fault.dss_r()!r}"
-            )
-        elif fault.fault_type == "three_phase":
-            # three phase-to-earth resistances r_f, as PGM models a three-phase fault with impedance
-            lines.append(
-                f"New Fault.f{fault.id} phases=3 bus1=n{fault.node}.1.2.3 bus2=n{fault.node}.0.0.0 r={fault.dss_r()!r}"
-            )
-        else:
-            raise NotImplementedError(fault.fault_type)
+        lines += [f"New Fault.{name} {definition}" for name, definition in fault.dss_elements(bridge_scale)]
     bases = ", ".join(repr(u / 1e3) for u in sorted({case.u_node(n) for n in case.nodes}, reverse=True))
     lines += [f"Set VoltageBases=[{bases}]", "CalcVoltageBases", "Set Tolerance=1e-12", "Set MaxIterations=200"]
     if fault is not None:
@@ -690,6 +716,18 @@ def check_opendss_kron_lines(case: Case):
         dev = np.max(np.abs(r + 1j * x - expected))
         assert dev < 1e-12 * np.max(np.abs(expected)), f"OpenDSS Kron differs from numpy for line {line.id}: {dev}"
         print(f"  OpenDSS-reduced line {line.id}: {n} phases, matches numpy Kron (max dev {dev:.1e} ohm)")
+
+
+def check_fault_bridge(case: Case, fault: Fault, i_f):
+    """a bolted two-phase fault (a bridge of 1e-13 ohm between the phases) solved again with a 10x larger bridge gives
+    the same fault current to 1e-10 relative: the reference is limited neither by the bridge resistance nor by the
+    round-off of its large conductance"""
+    if not fault.has_bridge():
+        return
+    run_dss(dss_script(case, fault, 1.1, with_loads=False, bridge_scale=10.0))
+    dev = np.max(np.abs(fault_currents(fault) - i_f)) / np.max(np.abs(i_f))
+    assert dev < 1e-10, f"bolted two-phase fault at node {fault.node} is not accurate in OpenDSS: {dev:.1e} relative"
+    print(f"  bolted two-phase fault at node {fault.node}: a 10x larger bridge changes i_f by {dev:.1e} relative")
 
 
 def check_kron_against_opendss(case: Case):
@@ -967,26 +1005,34 @@ def sc_reference(case: Case, fault: Fault):
                 "i_to_angle": i_to_angle,
             }
         )
-    # fault current: the current from the node into the fault on each faulted phase
-    dss.Circuit.SetActiveElement(f"Fault.f{fault.id}")
-    raw = dss.CktElement.Currents()
-    order = dss.CktElement.NodeOrder()
-    n_cond = dss.CktElement.NumConductors()
-    i_f = np.zeros(3, dtype=complex)
-    for terminal in range(2):
-        for k in range(n_cond):
-            idx = terminal * n_cond + k
-            number = order[idx]
-            if 1 <= number <= 3:
-                value = complex(raw[2 * idx], raw[2 * idx + 1])
-                if fault.fault_type == "two_phase" or terminal == 0:
-                    i_f[number - 1] = value
+    i_f = fault_currents(fault)
     i_f_mag, i_f_angle = mag_angle(i_f)
     result = {"node": nodes, "asym_line": lines}
     if case.transformers:
         result["single_phase_transformer"] = [transformer_sc_reference(t, i_f) for t in case.transformers]
     result["fault"] = [{"id": fault.id, "i_f": i_f_mag, "i_f_angle": i_f_angle}]
     return result
+
+
+def fault_currents(fault: Fault):
+    """the current from the node into the fault on each faulted phase: the sum over all Fault elements of the fault and
+    over all their terminals (a terminal at earth, node 0, is dropped)"""
+    i_f = np.zeros(3, dtype=complex)
+    assigned = set()
+    for name, _ in fault.dss_elements():
+        dss.Circuit.SetActiveElement(f"Fault.{name}")
+        raw = dss.CktElement.Currents()
+        order = dss.CktElement.NodeOrder()
+        for idx, number in enumerate(order):
+            if 1 <= number <= 3:
+                value = complex(raw[2 * idx], raw[2 * idx + 1])
+                # assign the first value (keeping the sign of a zero), add the next ones
+                if number in assigned:
+                    i_f[number - 1] += value
+                else:
+                    i_f[number - 1] = value
+                    assigned.add(number)
+    return i_f
 
 
 def transformer_sc_reference(transformer: Transformer1P, i_f):
@@ -1027,7 +1073,7 @@ def check_electrodes(transformer: Transformer1P, i_f=None):
         if (r_g is None and x_g is None) or not status:
             continue
         if side == "to" and transformer.center_tapped():
-            check_center_tap_electrode(transformer)
+            check_center_tap_electrode(transformer, i_f)
             continue
         dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
         raw = dss.CktElement.Currents()
@@ -1046,9 +1092,9 @@ def check_electrodes(transformer: Transformer1P, i_f=None):
         )
 
 
-def check_center_tap_electrode(transformer: Transformer1P):
+def check_center_tap_electrode(transformer: Transformer1P, i_f=None):
     """KCL at node 4, the centre tap: the electrode current equals I_a + I_b, the currents into the two halves at the
-    legs (nodes 1 and 2; the terminals 2 and 3 of the transformer)"""
+    legs (nodes 1 and 2; the terminals 2 and 3 of the transformer); i_f is the fault current, if any"""
     dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
     raw = dss.CktElement.Currents()
     order = dss.CktElement.NodeOrder()
@@ -1066,9 +1112,10 @@ def check_center_tap_electrode(transformer: Transformer1P):
     dev = abs(i_electrode - legs)
     assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"centre-tap electrode of transformer {transformer.id}: {dev}"
     assert abs(centre + legs) < 1e-9 * abs(i_electrode) + 1e-9
+    fault_text = "" if i_f is None else f"; fault current per phase: {', '.join(f'{abs(v):.6g}' for v in i_f)} A"
     print(
         f"  centre-tap electrode of transformer {transformer.id}: {abs(i_electrode):.6g} A, equal to I_a + I_b"
-        f" (dev {dev:.1e} A)"
+        f" (dev {dev:.1e} A){fault_text}"
     )
 
 
@@ -1133,6 +1180,7 @@ def generate(case: Case, root: Path):
         run_dss(script, case)
         scripts.append(script)
         references.append(sc_reference(case, fault))
+        check_fault_bridge(case, fault, fault_currents(fault))
     dss_text = []
     for k, script in enumerate(scripts):
         if len(scripts) > 1:
@@ -1386,6 +1434,28 @@ def split_phase_case(path, all_const_y, params):
     )
 
 
+def split_phase_short_circuit_case():
+    """the split-phase network without loads; faults on the legs of both split-phase nodes and of the service line"""
+    return replace(
+        split_phase_case("short_circuit/single-phase-transformer-split-phase", all_const_y=False, params=SC_PARAMS),
+        loads=[],
+        calculation="short_circuit",
+        faults=[
+            # leg to earth (the solid centre tap) through half 1 or half 2
+            Fault(601, 5, "single_phase_to_ground", "a", 0.0),
+            Fault(601, 5, "single_phase_to_ground", "b", 0.1),
+            # leg to leg (480 V), through both halves in series
+            Fault(601, 5, "two_phase", "ab", 0.0),
+            Fault(601, 5, "two_phase_to_ground", "ab", 0.0),
+            # at the end of the ab service line
+            Fault(601, 7, "single_phase_to_ground", "a", 0.0),
+            # the fault current returns through the centre-tap electrode of transformer 153
+            Fault(601, 6, "single_phase_to_ground", "a", 0.0),
+            Fault(601, 6, "two_phase", "ab", 0.05),
+        ],
+    )
+
+
 def small_reduced_case(path, raises_only, params):
     return Case(
         path=path,
@@ -1531,6 +1601,7 @@ CASES = [
         all_const_y=True,
         params=pf_params(["linear", "linear_current"], 1e-8, 1e-8),
     ),
+    split_phase_short_circuit_case(),
     Case(
         path="power_flow/single-phase-transformer/missing-phase-for-winding",
         u_rated=SWER_U,
