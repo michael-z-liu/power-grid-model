@@ -13,6 +13,7 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/short_circuit/{asym-line-reduced-phase, asym-line-swer-a}
 - tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
   missing-phase-for-winding}
+- tests/data/short_circuit/single-phase-transformer-swer
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
 
@@ -25,6 +26,8 @@ Modelling choices:
 
 - source: Vsource with Z1/Z0 in ohm from sk, rx_ratio and z01_ratio, exactly as PGM computes them; in a short
   circuit the voltage is c * u_rated (pu=1.1) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM)
+- faults: OpenDSS replaces a fault resistance of 0 by 1e-4 ohm, so a bolted fault (r_f = 0) gets 1e-13 ohm instead,
+  which is below the OpenDSS agreement of about 3e-10 relative
 - lines: explicit R/X/C matrices of the present phases; a line with a neutral gets the numpy Kron-reduced matrix,
   which is cross-checked against an OpenDSS LineCode with Kron=yes; the exception is a line with opendss_kron=True,
   which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
@@ -42,13 +45,15 @@ Modelling choices:
   the transformer; without it the transformer powers differ by about 5e-7 relative. Each transformer is first checked
   on its own (open-circuit ratio and short-circuit impedance, so kVs are the winding voltages); node voltages,
   winding powers (without the conductors at earth and at node 4) and the loading (the larger complex sum per side
-  divided by sn) are the reference
+  divided by sn) are the reference. In a short circuit the winding currents are the reference (with the current of the
+  low-susceptance reactor added to its side, as for the powers), and each electrode current is checked to equal the
+  winding current
 """
 
 import json
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -349,6 +354,10 @@ class Transformer1P:
         ]
 
 
+# OpenDSS replaces r = 0 of a Fault by 1e-4 ohm, so a bolted fault gets this resistance instead
+DSS_BOLTED_FAULT_R = 1e-13
+
+
 @dataclass
 class Fault:
     id: int
@@ -357,6 +366,9 @@ class Fault:
     fault_phase: str
     r_f: float
     x_f: float = 0.0
+
+    def dss_r(self):
+        return self.r_f if self.r_f > 0.0 else DSS_BOLTED_FAULT_R
 
 
 @dataclass
@@ -515,18 +527,19 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
                     " vminpu=0.1 vmaxpu=2"
                 )
     if fault is not None:
+        assert fault.x_f == 0.0, "OpenDSS faults are resistive"
         if fault.fault_type == "single_phase_to_ground":
             k = "abc".index(fault.fault_phase) + 1
-            lines.append(f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k} r={fault.r_f!r}")
+            lines.append(f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k} r={fault.dss_r()!r}")
         elif fault.fault_type == "two_phase":
             k1, k2 = ("abc".index(p) + 1 for p in fault.fault_phase)
             lines.append(
-                f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k1} bus2=n{fault.node}.{k2} r={fault.r_f!r}"
+                f"New Fault.f{fault.id} phases=1 bus1=n{fault.node}.{k1} bus2=n{fault.node}.{k2} r={fault.dss_r()!r}"
             )
         elif fault.fault_type == "three_phase":
             # three phase-to-earth resistances r_f, as PGM models a three-phase fault with impedance
             lines.append(
-                f"New Fault.f{fault.id} phases=3 bus1=n{fault.node}.1.2.3 bus2=n{fault.node}.0.0.0 r={fault.r_f!r}"
+                f"New Fault.f{fault.id} phases=3 bus1=n{fault.node}.1.2.3 bus2=n{fault.node}.0.0.0 r={fault.dss_r()!r}"
             )
         else:
             raise NotImplementedError(fault.fault_type)
@@ -791,7 +804,63 @@ def sc_reference(case: Case, fault: Fault):
                 if fault.fault_type == "two_phase" or terminal == 0:
                     i_f[number - 1] = value
     i_f_mag, i_f_angle = mag_angle(i_f)
-    return {"node": nodes, "asym_line": lines, "fault": [{"id": fault.id, "i_f": i_f_mag, "i_f_angle": i_f_angle}]}
+    result = {"node": nodes, "asym_line": lines}
+    if case.transformers:
+        result["single_phase_transformer"] = [transformer_sc_reference(t, i_f) for t in case.transformers]
+    result["fault"] = [{"id": fault.id, "i_f": i_f_mag, "i_f_angle": i_f_angle}]
+    return result
+
+
+def transformer_sc_reference(transformer: Transformer1P, i_f):
+    """per-phase winding currents of both sides (the conductors at earth and at the electrode are dropped)"""
+    i_from, i_to = terminal_values(f"Transformer.t{transformer.id}", dss.CktElement.Currents, 2)
+    for k, (node, conn) in enumerate(
+        ((transformer.from_node, transformer.from_conn), (transformer.to_node, transformer.to_conn))
+    ):
+        if len(conn) == 2 and (transformer.from_status, transformer.to_status)[k]:
+            # PGM includes the low susceptance of a phase-to-phase winding in the branch, as for the powers
+            i_low, _ = terminal_values(f"Reactor.lo{transformer.id}n{node}", dss.CktElement.Currents, 2)
+            (i_from if k == 0 else i_to)[:] += i_low
+    check_electrodes(transformer, i_f)
+    if not transformer.from_status:
+        i_from = np.zeros(3, dtype=complex)
+    if not transformer.to_status:
+        i_to = np.zeros(3, dtype=complex)
+    i_from_mag, i_from_angle = mag_angle(i_from)
+    i_to_mag, i_to_angle = mag_angle(i_to)
+    return {
+        "id": transformer.id,
+        "i_from": i_from_mag,
+        "i_from_angle": i_from_angle,
+        "i_to": i_to_mag,
+        "i_to_angle": i_to_angle,
+    }
+
+
+def check_electrodes(transformer: Transformer1P, i_f):
+    """the earth electrode carries the winding current: the current from node 4 into the electrode equals the current
+    into the winding at its phase terminal (the winding has no other path), which PGM reports as the winding current"""
+    for side, terminal, r_g, x_g, status in (
+        ("from", 0, transformer.r_g_from, transformer.x_g_from, transformer.from_status),
+        ("to", 1, transformer.r_g_to, transformer.x_g_to, transformer.to_status),
+    ):
+        if (r_g is None and x_g is None) or not status:
+            continue
+        dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
+        raw = dss.CktElement.Currents()
+        order = dss.CktElement.NodeOrder()
+        winding = {order[idx]: complex(raw[2 * idx], raw[2 * idx + 1]) for idx in range(2 * terminal, 2 * terminal + 2)}
+        phase = "abc".index(transformer.from_conn if side == "from" else transformer.to_conn) + 1
+        dss.Circuit.SetActiveElement(f"Reactor.g{transformer.id}{side}")
+        i_electrode = complex(*dss.CktElement.Currents()[:2])
+        dev = abs(i_electrode - winding[phase])
+        assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"electrode of transformer {transformer.id} {side}: {dev}"
+        assert abs(winding[4] + winding[phase]) < 1e-9 * abs(i_electrode) + 1e-9
+        i_fault = abs(i_f[phase - 1])
+        print(
+            f"  electrode of transformer {transformer.id} ({side}): {abs(i_electrode):.6g} A, equal to the winding"
+            f" current (dev {dev:.1e} A); fault current on phase {'abc'[phase - 1]}: {i_fault:.6g} A"
+        )
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -983,6 +1052,24 @@ def swer_chain_case():
     )
 
 
+def swer_chain_short_circuit_case():
+    """the swer-chain network without loads; the earth electrode carries the current of a SWER fault"""
+    return replace(
+        swer_chain_case(),
+        path="short_circuit/single-phase-transformer-swer",
+        loads=[],
+        calculation="short_circuit",
+        params=SC_PARAMS,
+        faults=[
+            Fault(601, 4, "single_phase_to_ground", "a", 0.0),
+            Fault(601, 4, "single_phase_to_ground", "a", 10.0),
+            Fault(601, 5, "single_phase_to_ground", "a", 0.0),
+            # a three-phase fault in a network with reduced-phase nodes is solved asymmetrically (M4)
+            Fault(601, 2, "three_phase", "abc", 0.5),
+        ],
+    )
+
+
 def phase_to_phase_case(path, all_const_y, methods):
     """11 kV abc -> ab -> ab (415 V, floating common mode) and bc -> a with clock 6 (240 V)"""
     if all_const_y:
@@ -1131,6 +1218,7 @@ CASES = [
         faults=[Fault(601, 3, "single_phase_to_ground", "a", 10.0)],
     ),
     swer_chain_case(),
+    swer_chain_short_circuit_case(),
     # the floating common mode of n3 makes iterative_current diverge with const_pq loads, so only newton_raphson
     phase_to_phase_case(
         "power_flow/single-phase-transformer/phase-to-phase", all_const_y=False, methods="newton_raphson"
