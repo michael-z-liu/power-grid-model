@@ -13,7 +13,7 @@ IEC 60909 short circuits (maximum voltage scaling) in the `swer-chain` network o
 - single-phase to ground on phase a at the 240 V node behind the tapped transformer, bolted;
 - three-phase with `r_f` = 0.5 Ω at the three-phase node of the isolating transformer, which is solved asymmetrically because the network has single-phase nodes.
 
-The current of the earth electrode is the to-side winding current of the isolating transformer. In a SWER fault it carries the fault current plus the charging current of the SWER line.
+The current of the earth electrode is the to-side winding current of the isolating transformer. In a SWER fault it is the phasor sum of the fault current and the charging current of the SWER line, so its magnitude is close to, but not equal to, that of the fault current: 188.816 A against 188.876 A for the bolted fault at the end of the SWER line.
 
 ## Generation
 

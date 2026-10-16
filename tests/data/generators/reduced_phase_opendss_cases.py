@@ -46,8 +46,8 @@ Modelling choices:
   on its own (open-circuit ratio and short-circuit impedance, so kVs are the winding voltages); node voltages,
   winding powers (without the conductors at earth and at node 4) and the loading (the larger complex sum per side
   divided by sn) are the reference. In a short circuit the winding currents are the reference (with the current of the
-  low-susceptance reactor added to its side, as for the powers), and each electrode current is checked to equal the
-  winding current
+  low-susceptance reactor added to its side, as for the powers), and in the OpenDSS netlist each electrode current is
+  checked to equal the winding current (KCL; this checks the reference model, not PGM)
 """
 
 import json
@@ -282,10 +282,26 @@ class Transformer1P:
         if self.tap_pos is None or self.tap_size is None:
             return 1.0, 1.0
         nom = self.tap_nom or 0
-        lower = self.tap_min if self.tap_min is not None else min(self.tap_pos, nom)
-        upper = self.tap_max if self.tap_max is not None else max(self.tap_pos, nom)
-        direction = 1 if upper > lower else -1
-        offset = direction * (self.tap_pos - nom) * self.tap_size
+        tap_min, tap_max = self.tap_min, self.tap_max
+        # the tap direction from the provided limits: reversed when tap_max < tap_min, or with only tap_min above
+        # tap_nom, or with only tap_max below tap_nom; otherwise (also without limits) normal
+        if tap_min is not None and tap_max is not None:
+            reversed_taps = tap_max < tap_min
+        elif tap_min is not None:
+            reversed_taps = tap_min > nom
+        elif tap_max is not None:
+            reversed_taps = tap_max < nom
+        else:
+            reversed_taps = False
+        direction = -1 if reversed_taps else 1
+        # a provided limit limits the tap position in that direction; a limit not provided leaves its side unbounded
+        low, high = (tap_max, tap_min) if reversed_taps else (tap_min, tap_max)
+        tap_pos = self.tap_pos
+        if high is not None:
+            tap_pos = min(tap_pos, high)
+        if low is not None:
+            tap_pos = max(tap_pos, low)
+        offset = direction * (tap_pos - nom) * self.tap_size
         if self.tap_side == "to":
             return 1.0, (self.u2 + offset) / self.u2
         return (self.u1 + offset) / self.u1, 1.0
@@ -838,8 +854,9 @@ def transformer_sc_reference(transformer: Transformer1P, i_f):
 
 
 def check_electrodes(transformer: Transformer1P, i_f):
-    """the earth electrode carries the winding current: the current from node 4 into the electrode equals the current
-    into the winding at its phase terminal (the winding has no other path), which PGM reports as the winding current"""
+    """a consistency check of the OpenDSS netlist (KCL), not of PGM: the current from node 4 into the electrode equals
+    the current into the winding at its phase terminal (the winding has no other path), so the winding current that
+    PGM is compared with is also the electrode current"""
     for side, terminal, r_g, x_g, status in (
         ("from", 0, transformer.r_g_from, transformer.x_g_from, transformer.from_status),
         ("to", 1, transformer.r_g_to, transformer.x_g_to, transformer.to_status),

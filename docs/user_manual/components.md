@@ -371,10 +371,15 @@ it yet: it does not check its attributes, and it may report nodes that are only 
   `clock` 6 is a `ca` winding); any value other than 0 or 6 (modulo 12) raises `InvalidTransformerClock`. The output
   angles are physical: a SWER node behind an `ab` → `a` transformer has a voltage angle of about +30°.
 * **Taps.** All tap attributes are optional; without them the ratio is nominal. The tap changer works as for
-  [transformer](#transformer) and `tap_pos` can be updated, but a tap limit that is not provided does not limit the
-  tap position, neither at construction nor in an update. `uk_min`/`pk_min` only apply when `tap_min` is provided
-  and `uk_max`/`pk_max` only when `tap_max` is provided. A reversed tap changer (`tap_min > tap_max`) needs both
-  limits. The automatic tap changer (`transformer_tap_regulator`) does not support this component.
+  [transformer](#transformer) and `tap_pos` can be updated, but each limit is optional. The tap direction is decided
+  once, from the provided limits. It is reversed (a higher `tap_pos` lowers the voltage of the tapped winding) when
+  both limits are provided and `tap_max < tap_min`, when only `tap_min` is provided and `tap_min > tap_nom`, or when
+  only `tap_max` is provided and `tap_max < tap_nom`. Otherwise it is normal, also without limits. A provided limit
+  always limits the tap position in that direction, at construction and in an update; a limit that is not provided
+  leaves its side unbounded. For example, with `tap_nom` 5 and only `tap_min` 9 the tap changer is reversed, a
+  `tap_pos` of 10 is limited to 9 and every `tap_pos` below 9 is allowed. `uk_min`/`pk_min` only apply when
+  `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided. The automatic tap changer
+  (`transformer_tap_regulator`) does not support this component.
 * **Calculations.** As for [one- and two-phase lines](#asym-line), symmetric calculations and state
   estimation are not supported (`ReducedPhaseNotSupported`) and a short circuit is always calculated
   asymmetrically. The output of a phase that is not part of a winding is 0.

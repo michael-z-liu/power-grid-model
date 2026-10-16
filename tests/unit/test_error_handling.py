@@ -13,6 +13,7 @@ from power_grid_model._core.error_handling import _interpret_error
 from power_grid_model._core.power_grid_meta import initialize_array
 from power_grid_model.enum import (
     AngleMeasurementType,
+    BranchSide,
     CalculationMethod,
     FaultPhase,
     FaultType,
@@ -939,8 +940,8 @@ def _single_phase_transformer_input(behind_line: bool = False):
     transformer_input[AT.pk] = [2e3]
     transformer_input[AT.i0] = [0.0]
     transformer_input[AT.p0] = [0.0]
-    transformer_input["from_connection"] = [WindingConnection1P.ab]
-    transformer_input["to_connection"] = [WindingConnection1P.a]
+    transformer_input[AT.from_connection] = [WindingConnection1P.ab]
+    transformer_input[AT.to_connection] = [WindingConnection1P.a]
     transformer_input[AT.r_grounding_to] = [5.0]
     input_data[CT.single_phase_transformer] = transformer_input
     return input_data
@@ -1006,7 +1007,7 @@ def test_single_phase_transformer_invalid_input():
         PowerGridModel(input_data)
 
     input_data = _single_phase_transformer_input()
-    input_data[CT.single_phase_transformer]["from_connection"] = [0]
+    input_data[CT.single_phase_transformer][AT.from_connection] = [0]
     with pytest.raises(MissingCaseForEnumError):
         PowerGridModel(input_data)
 
@@ -1034,3 +1035,67 @@ def test_single_phase_transformer_tap_batch():
     # a higher tap position on the from side raises u1 and lowers the secondary voltage in proportion
     assert u[0] / u[1] == pytest.approx(22e3 / 21.56e3, rel=1e-3)
     assert u[1] / u[2] == pytest.approx(22.44e3 / 22e3, rel=1e-3)
+
+
+def test_single_phase_transformer_not_regulated():
+    # the automatic tap changer does not support single_phase_transformer
+    input_data = _single_phase_transformer_input()
+    regulator_input = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
+    regulator_input[AT.id] = [500]
+    regulator_input[AT.regulated_object] = [400]
+    regulator_input[AT.status] = [1]
+    regulator_input[AT.control_side] = [BranchSide.to_side]
+    regulator_input[AT.u_set] = [12.7e3]
+    regulator_input[AT.u_band] = [200.0]
+    input_data[CT.transformer_tap_regulator] = regulator_input
+    with pytest.raises(InvalidRegulatedObject, match="object with ID 400"):
+        PowerGridModel(input_data)
+
+
+def test_single_phase_transformer_status_batch():
+    # a batch that toggles the status of each side gives the same results as separate calculations
+    statuses = [(1, 1), (0, 1), (1, 0), (0, 0), (1, 1)]
+    enabled = _ExperimentalFeatures.enabled
+    input_data = _single_phase_transformer_input()
+    # with a magnetising admittance the connected winding of a half-open transformer sees the open-end shunt
+    input_data[CT.single_phase_transformer][AT.i0] = [0.01]
+    input_data[CT.single_phase_transformer][AT.p0] = [200.0]
+
+    update = initialize_array(DatasetType.update, CT.single_phase_transformer, (len(statuses), 1))
+    update[AT.id] = 400
+    update[AT.from_status] = [[from_status] for from_status, _ in statuses]
+    update[AT.to_status] = [[to_status] for _, to_status in statuses]
+    batch_result = PowerGridModelWithExt(input_data).calculate_power_flow_with_ext(
+        symmetric=False,
+        update_data={CT.single_phase_transformer: update},
+        experimental_features=enabled,
+    )
+
+    for scenario, (from_status, to_status) in enumerate(statuses):
+        single_input = {component: data.copy() for component, data in input_data.items()}
+        single_input[CT.single_phase_transformer][AT.from_status] = [from_status]
+        single_input[CT.single_phase_transformer][AT.to_status] = [to_status]
+        single_result = PowerGridModelWithExt(single_input).calculate_power_flow_with_ext(
+            symmetric=False, experimental_features=enabled
+        )
+        for component, attributes in (
+            (CT.node, (AT.u, AT.u_angle, AT.p, AT.q)),
+            (CT.single_phase_transformer, (AT.p_from, AT.q_from, AT.i_from, AT.p_to, AT.q_to, AT.i_to, AT.loading)),
+            (CT.asym_load, (AT.p, AT.q, AT.i)),
+        ):
+            for attribute in attributes:
+                np.testing.assert_allclose(
+                    batch_result[component][attribute][scenario],
+                    single_result[component][attribute],
+                    rtol=1e-12,
+                    atol=1e-9,
+                    err_msg=f"scenario {scenario} {component} {attribute}",
+                )
+    # an open side carries no current and the energized side of a half-open transformer only the open-end shunt
+    i_from = batch_result[CT.single_phase_transformer][AT.i_from][:, 0, 0]
+    i_to = batch_result[CT.single_phase_transformer][AT.i_to][:, 0, 0]
+    assert np.all(i_from[[1, 3]] == 0.0)
+    assert np.all(i_to[[2, 3]] == 0.0)
+    assert np.all(i_from[[0, 2, 4]] > 0.0)
+    assert np.all(batch_result[CT.node][AT.u][[1, 2, 3], 1] == 0.0)
+    assert np.all(batch_result[CT.node][AT.u][[0, 4], 1, 0] > 0.0)

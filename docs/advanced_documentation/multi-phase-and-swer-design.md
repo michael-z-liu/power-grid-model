@@ -328,16 +328,26 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
   `uk_max`, `pk_min` and `pk_max` work as for `transformer` (the same tap-adjusted voltages and
   `tap_adjust_impedance`), and `tap_pos` can be updated through `TransformerUpdate`. Unlike `transformer`, all tap
   fields are optional: `tap_size` and `tap_nom` default to 0, `tap_pos` to `tap_nom` and `tap_side` to from, which
-  gives the nominal ratio. A tap limit that is not provided does not limit the tap position (M5b, so that a given
-  `tap_pos` is not silently clamped to 0): `tap_min` and `tap_max` then take the values $\min(t, t_{nom})$ and
-  $\max(t, t_{nom})$ for the current tap position $t$, at construction and again after every update, so an updated
-  `tap_pos` outside the earlier range is not limited either. Not provided is remembered (stored as `na`), and the
-  effective value is computed in the `tap_min()`/`tap_max()` getters and in the limiting of a new tap position. A
-  provided limit still limits as for `transformer`. Without both limits the tap direction is taken from the effective
-  values, which is increasing for a normally numbered tap changer; a reversed tap changer
-  (`tap_min > tap_max`) needs both limits. `uk_min`/`pk_min` only apply when `tap_min` is provided and
-  `uk_max`/`pk_max` only when `tap_max` is provided; otherwise the short circuit parameters stay at `uk`/`pk` on that
-  side of `tap_nom`. The tap regulator stays "Later".
+  gives the nominal ratio. Each tap limit is optional (M5b, so that a given `tap_pos` is not silently clamped to 0),
+  with this rule:
+  * The tap direction is decided once, at construction, from the provided limits. It is reversed (a higher tap
+    position lowers the voltage of the tapped winding) when both limits are provided and `tap_max < tap_min`, when
+    only `tap_min` is provided and `tap_min > tap_nom`, or when only `tap_max` is provided and `tap_max < tap_nom`.
+    Otherwise it is normal, also without limits. For `tap_min == tap_max` this is normal, where `transformer` takes
+    reversed; the tap position is then fixed at that value.
+  * A provided limit always limits the tap position in that direction, at construction and in every update: in a
+    normal tap changer `tap_min` is the lowest and `tap_max` the highest position, in a reversed one the other way
+    round.
+  * A limit that is not provided leaves its side unbounded, at construction and in every update. Not provided is
+    remembered (stored as `na`); the `tap_min()`/`tap_max()` getters then return the current tap position $t$ when it
+    lies on the side of `tap_nom` of that limit, and `tap_nom` otherwise (for example $\min(t, t_{nom})$ for `tap_min` of a normal tap
+    changer and $\max(t, t_{nom})$ for a reversed one), so `tap_adjust_impedance` uses the provided limit on its own
+    side and `uk`/`pk` on the other.
+  * Without limits the tap position is not limited and the direction is normal.
+
+  `uk_min`/`pk_min` only apply when `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided;
+  otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The tap regulator stays
+  "Later"; a `transformer_tap_regulator` on a `single_phase_transformer` raises `InvalidRegulatedObject`.
 
 ## Component models (phase domain)
 
@@ -488,8 +498,9 @@ M5:
   and `phase-to-phase-linear` (all const_y) runs the linear methods.
 * OpenDSS replaces a fault resistance of 0 by 1e-4 Ω, so the reference models a bolted fault with 1e-13 Ω.
 * The earth electrode carries the winding current of the isolating transformer, which the generator checks in
-  OpenDSS and the short-circuit case compares with PGM. In a SWER fault it is the fault current plus the charging
-  current of the SWER line.
+  OpenDSS and the short-circuit case compares with PGM. In a SWER fault it is the phasor sum of the fault current and
+  the charging current of the SWER line, so its magnitude is close to, but not equal to, that of the fault current
+  (188.816 A against 188.876 A for a bolted fault at the end of the SWER line).
 
 **Centre-tapped (split-phase) secondary.**
 

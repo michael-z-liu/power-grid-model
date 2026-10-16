@@ -338,6 +338,21 @@ TEST_CASE("Test single phase transformer - earthing impedance") {
         check_param(make_transformer(input).calc_param<asymmetric_t>(),
                     {.from = phase_ab, .to = phase_a, .y = with_to_electrode()});
     }
+    SUBCASE("Phase-to-phase primary, earthed secondary, clock 6") {
+        // clock 6 negates the to-side incidence; the electrode is in series with the to winding whatever its
+        // polarity, so the winding admittance is the same Sherman-Morrison form
+        SinglePhaseTransformerInput input = test_input(WindingConnection1P::ab, WindingConnection1P::a);
+        input.r_grounding_to = z_to.real();
+        input.x_grounding_to = z_to.imag();
+        auto const param_0 = make_transformer(input).calc_param<asymmetric_t>();
+        input.clock = 6;
+        auto const param_6 = make_transformer(input).calc_param<asymmetric_t>();
+        check_param(param_6, {.from = phase_ab, .to = phase_a, .y = with_to_electrode(), .polarity = -1.0});
+        CHECK((param_6.yff() == param_0.yff()).all());
+        CHECK((param_6.ytt() == param_0.ytt()).all());
+        CHECK((param_6.yft() == -param_0.yft()).all());
+        CHECK((param_6.ytf() == -param_0.ytf()).all());
+    }
     SUBCASE("Only a resistance or only a reactance") {
         SinglePhaseTransformerInput input = test_input(WindingConnection1P::a, WindingConnection1P::a);
         input.x_grounding_to = 0.4;
@@ -674,6 +689,157 @@ TEST_CASE("Test single phase transformer - tap limits not provided") {
                     {.from = phase_bc,
                      .to = phase_a,
                      .y = primitive({.u1 = test_u1 - 600.0, .uk = test_uk + 3.0 * (0.03 - test_uk) / 5.0})});
+    }
+}
+
+TEST_CASE("Test single phase transformer - tap direction and limits") {
+    using enum WindingConnection1P;
+    ConnectionCase const phase_a = connection_case(a);
+    ConnectionCase const phase_bc = connection_case(bc);
+    constexpr IntS tap_nom = 5;
+    constexpr double tap_size = 200.0;
+    auto const limited_input = [](IntS tap_min, IntS tap_max, IntS tap_pos) {
+        SinglePhaseTransformerInput input = test_input(bc, a);
+        input.tap_side = BranchSide::from;
+        input.tap_pos = tap_pos;
+        input.tap_min = tap_min;
+        input.tap_max = tap_max;
+        input.tap_nom = tap_nom;
+        input.tap_size = tap_size;
+        return input;
+    };
+    // the tap position and the ratio: u1 + direction * (tap_pos - tap_nom) * tap_size
+    auto const check_tap = [&](SinglePhaseTransformer const& transformer, IntS tap_pos, double direction) {
+        CHECK(transformer.tap_pos() == tap_pos);
+        check_param(transformer.calc_param<asymmetric_t>(),
+                    {.from = phase_bc,
+                     .to = phase_a,
+                     .y = primitive({.u1 = test_u1 + direction * (tap_pos - tap_nom) * tap_size})});
+    };
+    auto const update_tap = [](SinglePhaseTransformer& transformer, IntS tap_pos) {
+        transformer.update({.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = tap_pos});
+    };
+
+    struct LimitCase {
+        IntS tap_min;
+        IntS tap_max;
+        double direction;
+        // tap positions with the position they are limited to
+        std::vector<std::array<IntS, 2>> positions;
+    };
+    auto const check_case = [&](LimitCase const& limit_case) {
+        CAPTURE(limit_case.tap_min);
+        CAPTURE(limit_case.tap_max);
+        for (auto const [tap_pos, limited] : limit_case.positions) {
+            CAPTURE(tap_pos);
+            // at construction
+            check_tap(make_transformer(limited_input(limit_case.tap_min, limit_case.tap_max, tap_pos)), limited,
+                      limit_case.direction);
+            // in an update, and back with the inverse
+            SinglePhaseTransformer transformer =
+                make_transformer(limited_input(limit_case.tap_min, limit_case.tap_max, tap_nom));
+            TransformerUpdate const update{.id = 1, .from_status = na_IntS, .to_status = na_IntS, .tap_pos = tap_pos};
+            TransformerUpdate const inverse = transformer.inverse(update);
+            CHECK(inverse.tap_pos == tap_nom);
+            transformer.update(update);
+            check_tap(transformer, limited, limit_case.direction);
+            transformer.update(inverse);
+            check_tap(transformer, tap_nom, limit_case.direction);
+        }
+    };
+
+    SUBCASE("Only tap_min, above tap_nom: reversed, limited from above, unbounded below") {
+        check_case({.tap_min = 9,
+                    .tap_max = na_IntS,
+                    .direction = -1.0,
+                    .positions = {{10, 9}, {12, 9}, {9, 9}, {7, 7}, {2, 2}, {-3, -3}}});
+        SinglePhaseTransformer transformer = make_transformer(limited_input(9, na_IntS, 7));
+        CHECK(transformer.tap_min() == 9);
+        CHECK(transformer.tap_max() == tap_nom);
+        update_tap(transformer, 2);
+        CHECK(transformer.tap_min() == 9);
+        CHECK(transformer.tap_max() == 2);
+    }
+    SUBCASE("Only tap_max, below tap_nom: reversed, limited from below, unbounded above") {
+        check_case({.tap_min = na_IntS,
+                    .tap_max = 1,
+                    .direction = -1.0,
+                    .positions = {{0, 1}, {-1, 1}, {1, 1}, {3, 3}, {8, 8}, {12, 12}}});
+        SinglePhaseTransformer transformer = make_transformer(limited_input(na_IntS, 1, 3));
+        CHECK(transformer.tap_min() == tap_nom);
+        CHECK(transformer.tap_max() == 1);
+        update_tap(transformer, 8);
+        CHECK(transformer.tap_min() == 8);
+        CHECK(transformer.tap_max() == 1);
+    }
+    SUBCASE("Only tap_min, at or below tap_nom: normal, limited from below, unbounded above") {
+        check_case({.tap_min = 1,
+                    .tap_max = na_IntS,
+                    .direction = 1.0,
+                    .positions = {{-2, 1}, {0, 1}, {3, 3}, {9, 9}, {12, 12}}});
+        check_case({.tap_min = tap_nom, .tap_max = na_IntS, .direction = 1.0, .positions = {{3, tap_nom}, {9, 9}}});
+        SinglePhaseTransformer transformer = make_transformer(limited_input(1, na_IntS, 3));
+        CHECK(transformer.tap_min() == 1);
+        CHECK(transformer.tap_max() == tap_nom);
+        update_tap(transformer, 9);
+        CHECK(transformer.tap_max() == 9);
+    }
+    SUBCASE("Only tap_max, at or above tap_nom: normal, limited from above, unbounded below") {
+        check_case({.tap_min = na_IntS,
+                    .tap_max = 9,
+                    .direction = 1.0,
+                    .positions = {{12, 9}, {10, 9}, {7, 7}, {0, 0}, {-3, -3}}});
+        check_case({.tap_min = na_IntS, .tap_max = tap_nom, .direction = 1.0, .positions = {{7, tap_nom}, {0, 0}}});
+        SinglePhaseTransformer transformer = make_transformer(limited_input(na_IntS, 9, 7));
+        CHECK(transformer.tap_min() == tap_nom);
+        CHECK(transformer.tap_max() == 9);
+        update_tap(transformer, 0);
+        CHECK(transformer.tap_min() == 0);
+    }
+    SUBCASE("Both limits, normal") {
+        check_case({.tap_min = 1,
+                    .tap_max = 9,
+                    .direction = 1.0,
+                    .positions = {{12, 9}, {9, 9}, {7, 7}, {3, 3}, {1, 1}, {-1, 1}}});
+    }
+    SUBCASE("Both limits, reversed") {
+        check_case({.tap_min = 9,
+                    .tap_max = 1,
+                    .direction = -1.0,
+                    .positions = {{12, 9}, {9, 9}, {7, 7}, {3, 3}, {1, 1}, {-1, 1}}});
+        SinglePhaseTransformer const transformer = make_transformer(limited_input(9, 1, 7));
+        CHECK(transformer.tap_min() == 9);
+        CHECK(transformer.tap_max() == 1);
+    }
+    SUBCASE("No limits: normal and unbounded") {
+        check_case({.tap_min = na_IntS,
+                    .tap_max = na_IntS,
+                    .direction = 1.0,
+                    .positions = {{12, 12}, {7, 7}, {3, 3}, {-1, -1}, {-20, -20}}});
+    }
+    SUBCASE("Tap dependent short circuit parameters with one limit on the reversed side") {
+        // only tap_min above tap_nom: uk_min applies between tap_nom and tap_min, uk_max does not apply
+        SinglePhaseTransformerInput input = limited_input(9, na_IntS, 7);
+        input.uk_min = 0.03;
+        input.uk_max = 0.05;
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc,
+                     .to = phase_a,
+                     .y = primitive({.u1 = test_u1 - 2.0 * tap_size, .uk = test_uk + 2.0 * (0.03 - test_uk) / 4.0})});
+        input.tap_pos = 3;
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc, .to = phase_a, .y = primitive({.u1 = test_u1 + 2.0 * tap_size})});
+        // only tap_max below tap_nom: uk_max applies between tap_max and tap_nom, uk_min does not apply
+        input = limited_input(na_IntS, 1, 3);
+        input.uk_min = 0.03;
+        input.uk_max = 0.05;
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc,
+                     .to = phase_a,
+                     .y = primitive({.u1 = test_u1 + 2.0 * tap_size, .uk = test_uk + 2.0 * (0.05 - test_uk) / 4.0})});
+        input.tap_pos = 7;
+        check_param(make_transformer(input).calc_param<asymmetric_t>(),
+                    {.from = phase_bc, .to = phase_a, .y = primitive({.u1 = test_u1 - 2.0 * tap_size})});
     }
 }
 
