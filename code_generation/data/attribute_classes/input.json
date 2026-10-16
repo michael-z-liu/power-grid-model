@@ -261,6 +261,11 @@
           "description": "short circuit and open testing parameters"
         },
         {
+          "data_type": "double",
+          "names": ["uk_half", "pk_half"],
+          "description": "short circuit parameters between the primary and one half of a centre-tapped winding (on sn/2); default from uk and pk"
+        },
+        {
           "data_type": "WindingConnection1P",
           "names": ["from_connection", "to_connection"],
           "description": "phase slots of the winding at each side"

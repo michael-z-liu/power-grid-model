@@ -955,6 +955,7 @@ def test_winding_connection_1p_exported():
         ("ab", 4),
         ("ac", 5),
         ("bc", 6),
+        ("ab_center_tapped", 7),
     ]
 
 

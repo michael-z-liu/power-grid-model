@@ -157,6 +157,8 @@ PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transfo
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_i0;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_p0;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_half;
+PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_half;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_connection;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_connection;
 PGM_API extern PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_clock;

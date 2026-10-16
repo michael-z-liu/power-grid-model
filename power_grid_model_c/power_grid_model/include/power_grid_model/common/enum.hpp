@@ -111,8 +111,9 @@ enum class FaultPhase : IntS {
 enum class PhaseConnection : IntS { abc = 0, a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6 };
 
 // phase slots of a single-phase transformer winding; the first letter is the positive terminal, a single letter is
-// phase-to-earth; values aligned with PhaseConnection; centre-tapped connections follow in M6 (7, 8, 9)
-enum class WindingConnection1P : IntS { a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6 };
+// phase-to-earth; values aligned with PhaseConnection; ab_center_tapped is a centre-tapped (split-phase) winding, from
+// a to the earthed centre tap and from the centre tap to b, on the to side only
+enum class WindingConnection1P : IntS { a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6, ab_center_tapped = 7 };
 
 enum class ShortCircuitVoltageScaling : IntS { minimum = 0, maximum = 1 };
 

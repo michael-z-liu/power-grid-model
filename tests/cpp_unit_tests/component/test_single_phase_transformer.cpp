@@ -857,6 +857,13 @@ TEST_CASE("Test single phase transformer - invalid input") {
         // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
         input.to_connection = static_cast<WindingConnection1P>(IntS{9});
         CHECK_THROWS_AS(make_transformer(input), MissingCaseForEnumError);
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+        input.to_connection = static_cast<WindingConnection1P>(IntS{8});
+        CHECK_THROWS_AS(make_transformer(input), MissingCaseForEnumError);
+        input = test_input(a, a);
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+        input.from_connection = static_cast<WindingConnection1P>(IntS{8});
+        CHECK_THROWS_AS(make_transformer(input), MissingCaseForEnumError);
     }
     SUBCASE("Earthing impedance on a phase-to-phase winding") {
         SinglePhaseTransformerInput input = test_input(ab, a);
@@ -940,6 +947,574 @@ TEST_CASE("Test single phase transformer - per unit with phase-to-phase primary"
     // only the common-mode low susceptance remains at the from side
     CHECK(cabs(i_from(0)) < 1e-6);
     CHECK(same_angle(transformer.phase_shift(), -pi / 6.0));
+}
+
+namespace {
+// centre-tapped (split-phase) secondary: the expected values below are computed from the closed forms of the M6
+// design in per unit on sn (the primitive admittance of the primary and the two halves, entry by entry, then
+// C^T Y_prim C over the from slots, the to slots and the centre tap, with a scalar Schur complement for an
+// electrode), with std::array scalars, independently of the N-winding product, the nodal stamp and the Kron
+// elimination of the code under test
+constexpr double ct_u2 = 480.0;                 // full winding, 240-0-240 V
+constexpr double ct_u_rated_to = 240.0 * sqrt3; // each leg at 240 V to the earthed centre tap
+
+using Block3 = std::array<std::array<DoubleComplex, 3>, 3>;
+
+SinglePhaseTransformer make_ct_transformer(SinglePhaseTransformerInput const& input) {
+    return SinglePhaseTransformer{input, test_u_rated_from, ct_u_rated_to};
+}
+
+SinglePhaseTransformerInput ct_input(WindingConnection1P from_connection) {
+    SinglePhaseTransformerInput input = test_input(from_connection, WindingConnection1P::ab_center_tapped);
+    input.u2 = ct_u2;
+    return input;
+}
+
+struct CenterTappedData {
+    double u1{test_u1};
+    double u2{ct_u2};
+    // tap-adjusted short circuit parameters, for the full winding z_f
+    double uk{test_uk};
+    double pk{test_pk};
+    // nominal short circuit parameters, for the default half-winding impedance and the half branch z_b
+    double uk_nominal{test_uk};
+    double pk_nominal{test_pk};
+    double uk_half{nan};
+    double pk_half{nan};
+    double i0{test_i0};
+    double p0{test_p0};
+};
+
+// short circuit impedance in per unit on sn
+DoubleComplex short_circuit_pu(double uk, double pk) {
+    double const r = pk / test_sn;
+    return {r, std::sqrt(uk * uk - r * r)};
+}
+
+struct CenterTappedImpedances {
+    DoubleComplex z_full;           // z_f: primary to both halves in series
+    DoubleComplex z_half;           // z_hs: primary to one half, the other half open
+    DoubleComplex z_primary_branch; // z_0
+    DoubleComplex z_half_branch;    // z_b
+    DoubleComplex y_m;              // magnetising admittance
+};
+
+CenterTappedImpedances ct_impedances(CenterTappedData const& data) {
+    DoubleComplex const z_full = short_circuit_pu(data.uk, data.pk);
+    DoubleComplex const z_nominal = short_circuit_pu(data.uk_nominal, data.pk_nominal);
+    // Kersting: primary 0.5 r + j0.8 x, each half r + j0.4 x
+    DoubleComplex const kersting{1.5 * z_nominal.real(), 1.2 * z_nominal.imag()};
+    DoubleComplex z_half = kersting;
+    if (!is_nan(data.uk_half) || !is_nan(data.pk_half)) {
+        // on the pair rating sn / 2 and the half voltage: r = 4 pk_half / sn, |z| = 2 uk_half
+        double const r_half = is_nan(data.pk_half) ? kersting.real() : 4.0 * data.pk_half / test_sn;
+        double const z_half_abs = is_nan(data.uk_half) ? cabs(kersting) : 2.0 * data.uk_half;
+        z_half = {r_half, std::sqrt(z_half_abs * z_half_abs - r_half * r_half)};
+    }
+    DoubleComplex const z_half_branch = 2.0 * (z_half - z_nominal);
+    double const g_m = data.p0 / test_sn;
+    return {.z_full = z_full,
+            .z_half = z_half,
+            .z_primary_branch = z_full - 0.5 * z_half_branch,
+            .z_half_branch = z_half_branch,
+            .y_m = {g_m, -std::sqrt(data.i0 * data.i0 - g_m * g_m)}};
+}
+
+// primitive admittance of the primary and the two halves in siemens: Y_ij(pu) sn / (V_i V_j), with
+// Y_00 = 1/z_f + y_m/2, Y_01 = Y_02 = -1/(2 z_f), Y_11 = Y_22 = (z_0 + z_b)/(2 z_b z_f) + y_m/4,
+// Y_12 = -z_0/(2 z_b z_f)
+Block3 primitive_ct(CenterTappedData const& data) {
+    auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances(data);
+    DoubleComplex const self_primary = 1.0 / z_f + 0.5 * y_m;
+    DoubleComplex const mutual = -1.0 / (2.0 * z_f);
+    DoubleComplex const self_half = (z_0 + z_b) / (2.0 * z_b * z_f) + 0.25 * y_m;
+    DoubleComplex const between_halves = -z_0 / (2.0 * z_b * z_f);
+    Block3 const y_pu{
+        {{self_primary, mutual, mutual}, {mutual, self_half, between_halves}, {mutual, between_halves, self_half}}};
+    std::array<double, 3> const voltage{data.u1, 0.5 * data.u2, 0.5 * data.u2};
+    Block3 y{};
+    for (size_t i = 0; i != 3; ++i) {
+        for (size_t j = 0; j != 3; ++j) {
+            y[i][j] = y_pu[i][j] * test_sn / (voltage[i] * voltage[j]);
+        }
+    }
+    return y;
+}
+
+struct ExpectedCenterTapped {
+    ConnectionCase from;
+    Block3 y{};           // admittance of the primary and the two halves in siemens
+    double polarity{1.0}; // -1 for clock 6
+    DoubleComplex z_grounding{};
+    bool from_connected{true};
+};
+
+// C^T Y C over the from slots (0-2), the to slots (3-5) and the centre tap (6): half 1 is U_a - U_N, half 2 is
+// U_N - U_b; a solid centre tap is earth (its row and column are dropped), an electrode is a scalar Schur complement;
+// scaled to per unit, plus the low susceptance y_low / 2 on a connected phase-to-phase from side
+BranchCalcParam<asymmetric_t> expected_param_ct(ExpectedCenterTapped const& e) {
+    constexpr size_t n_node = 7;
+    constexpr size_t centre_tap = 6;
+    std::array<std::array<double, n_node>, 3> incidence{};
+    for (size_t k = 0; k != 3; ++k) {
+        incidence[0][k] = e.from.incidence[k];
+    }
+    incidence[1][3] = e.polarity;
+    incidence[1][centre_tap] = -e.polarity;
+    incidence[2][centre_tap] = e.polarity;
+    incidence[2][4] = -e.polarity;
+
+    std::array<std::array<DoubleComplex, n_node>, n_node> y_node{};
+    for (size_t w = 0; w != 3; ++w) {
+        for (size_t v = 0; v != 3; ++v) {
+            for (size_t r = 0; r != n_node; ++r) {
+                for (size_t c = 0; c != n_node; ++c) {
+                    y_node[r][c] += e.y[w][v] * incidence[w][r] * incidence[v][c];
+                }
+            }
+        }
+    }
+    if (e.z_grounding != DoubleComplex{}) {
+        y_node[centre_tap][centre_tap] += 1.0 / e.z_grounding;
+        for (size_t r = 0; r != centre_tap; ++r) {
+            for (size_t c = 0; c != centre_tap; ++c) {
+                y_node[r][c] -= y_node[r][centre_tap] * y_node[centre_tap][c] / y_node[centre_tap][centre_tap];
+            }
+        }
+    }
+
+    double const base_u_from = test_u_rated_from / sqrt3;
+    double const base_u_to = ct_u_rated_to / sqrt3;
+    double const s_ff = base_u_from * base_u_from / test_base_power_1p;
+    double const s_ft = base_u_from * base_u_to / test_base_power_1p;
+    double const s_tt = base_u_to * base_u_to / test_base_power_1p;
+    DoubleComplex const half_low{0.0, -0.5e-8 * test_sn / test_base_power_1p / test_uk};
+    bool const low_susceptance = e.from_connected && e.from.phase_to_phase();
+
+    BranchCalcParam<asymmetric_t> param{};
+    for (size_t r = 0; r != 3; ++r) {
+        for (size_t c = 0; c != 3; ++c) {
+            auto const row = static_cast<Idx>(r);
+            auto const col = static_cast<Idx>(c);
+            bool const both_present = e.from.incidence[r] != 0.0 && e.from.incidence[c] != 0.0;
+            param.yff()(row, col) =
+                y_node[r][c] * s_ff + (low_susceptance && both_present ? half_low : DoubleComplex{});
+            param.yft()(row, col) = y_node[r][c + 3] * s_ft;
+            param.ytf()(row, col) = y_node[r + 3][c] * s_ft;
+            param.ytt()(row, col) = y_node[r + 3][c + 3] * s_tt;
+        }
+    }
+    return param;
+}
+
+void check_param_ct(BranchCalcParam<asymmetric_t> const& actual, ExpectedCenterTapped const& e) {
+    BranchCalcParam<asymmetric_t> const expected = expected_param_ct(e);
+    check_block(actual.yff(), expected.yff(), e.from.mask, e.from.mask);
+    check_block(actual.yft(), expected.yft(), e.from.mask, phase_mask_ab);
+    check_block(actual.ytf(), expected.ytf(), phase_mask_ab, e.from.mask);
+    check_block(actual.ytt(), expected.ytt(), phase_mask_ab, phase_mask_ab);
+}
+
+bool params_close(BranchCalcParam<asymmetric_t> const& x, BranchCalcParam<asymmetric_t> const& y) {
+    for (size_t k = 0; k != 4; ++k) {
+        for (Idx row = 0; row != 3; ++row) {
+            for (Idx col = 0; col != 3; ++col) {
+                if (cabs(x.value[k](row, col) - y.value[k](row, col)) >
+                    test_tolerance * std::max(1.0, cabs(y.value[k](row, col)))) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// a 2x2 block of the to slots a and b
+Block2 to_block(ComplexTensor<asymmetric_t> const& y) { return {{{y(0, 0), y(0, 1)}, {y(1, 0), y(1, 1)}}}; }
+
+// impedance in ohm seen at slot a with the from side shorted and slot b open, from ytt in per unit
+DoubleComplex leg_impedance(BranchCalcParam<asymmetric_t> const& param) {
+    Block2 const y = to_block(param.ytt());
+    double const base_u_to = ct_u_rated_to / sqrt3;
+    return 1.0 / (y[0][0] - y[0][1] * y[1][0] / y[1][1]) * base_u_to * base_u_to / test_base_power_1p;
+}
+
+// impedance in ohm between slots a and b with the from side shorted: [1, -1] ytt^-1 [1, -1]^T
+DoubleComplex a_to_b_impedance(BranchCalcParam<asymmetric_t> const& param) {
+    Block2 const z = inverse(to_block(param.ytt()));
+    double const base_u_to = ct_u_rated_to / sqrt3;
+    return (z[0][0] - z[0][1] - z[1][0] + z[1][1]) * base_u_to * base_u_to / test_base_power_1p;
+}
+
+bool close_to(DoubleComplex const& x, DoubleComplex const& y) { return cabs(x - y) < test_tolerance * cabs(y); }
+} // namespace
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, every primary, solidly earthed") {
+    for (auto const& from : connection_cases()) {
+        CAPTURE(phase_letters(from.mask));
+        SinglePhaseTransformer const transformer = make_ct_transformer(ct_input(from.connection));
+        CHECK(transformer.phase_incidence() ==
+              BranchPhaseIncidence{.from = from.mask, .to = phase_mask_ab, .coupling = PhaseCoupling::winding});
+        // the reference slot a is the positive terminal of half 1, at angle 0
+        CHECK(same_angle(transformer.phase_shift(), -from.angle()));
+        // the expected param has the low susceptance on a phase-to-phase from side only, never on the earthed
+        // centre-tapped side
+        auto const param = transformer.calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = from, .y = primitive_ct({})});
+        if (from.phase_to_phase()) {
+            // the differential part of the from block has zero row sums, so a row sum is the common mode y_low
+            DoubleComplex const low_susceptance{0.0, -1e-8 * test_sn / test_base_power_1p / test_uk};
+            for (Idx row = 0; row != 3; ++row) {
+                if (from.mask.has(row)) {
+                    CAPTURE(row);
+                    DoubleComplex const row_sum = param.yff()(row, 0) + param.yff()(row, 1) + param.yff()(row, 2);
+                    CHECK(cabs(row_sum - low_susceptance) < 1e-6 * cabs(low_susceptance));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, half-winding impedance") {
+    using enum WindingConnection1P;
+    DoubleComplex const z_nominal = short_circuit_pu(test_uk, test_pk);
+    double const uk_half_kersting = 0.5 * cabs(DoubleComplex{1.5 * z_nominal.real(), 1.2 * z_nominal.imag()});
+    double const pk_half_kersting = 0.375 * test_pk;
+
+    SUBCASE("The Kersting defaults equal the explicit overrides") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        auto const defaults = make_ct_transformer(input).calc_param<asymmetric_t>();
+        input.uk_half = uk_half_kersting;
+        input.pk_half = pk_half_kersting;
+        auto const overrides = make_ct_transformer(input).calc_param<asymmetric_t>();
+        CHECK(params_close(overrides, defaults));
+        check_param_ct(defaults, {.from = connection_case(a), .y = primitive_ct({})});
+        check_param_ct(overrides, {.from = connection_case(a),
+                                   .y = primitive_ct({.uk_half = uk_half_kersting, .pk_half = pk_half_kersting})});
+    }
+    SUBCASE("Overrides, each on its own and together") {
+        constexpr double uk_half = 0.03;
+        constexpr double pk_half = 200.0;
+        SinglePhaseTransformerInput input = ct_input(bc);
+        input.uk_half = uk_half;
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = connection_case(bc), .y = primitive_ct({.uk_half = uk_half})});
+        input.uk_half = nan;
+        input.pk_half = pk_half;
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = connection_case(bc), .y = primitive_ct({.pk_half = pk_half})});
+        input.uk_half = uk_half;
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = connection_case(bc), .y = primitive_ct({.uk_half = uk_half, .pk_half = pk_half})});
+    }
+    SUBCASE("Leg and a-to-b impedances with the primary shorted") {
+        constexpr double uk_half = 0.03;
+        constexpr double pk_half = 200.0;
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.uk_half = uk_half;
+        input.pk_half = pk_half;
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        double const r_half = 4.0 * pk_half / test_sn;
+        DoubleComplex const z_half{r_half, std::sqrt(4.0 * uk_half * uk_half - r_half * r_half)};
+        CHECK(close_to(leg_impedance(param), z_half * (0.5 * ct_u2) * (0.5 * ct_u2) / test_sn));
+        CHECK(close_to(a_to_b_impedance(param), z_nominal * ct_u2 * ct_u2 / test_sn));
+        // the Kersting defaults: 1.5 r + j1.2 x
+        input.uk_half = nan;
+        input.pk_half = nan;
+        auto const param_default = make_ct_transformer(input).calc_param<asymmetric_t>();
+        CHECK(close_to(leg_impedance(param_default), DoubleComplex{1.5 * z_nominal.real(), 1.2 * z_nominal.imag()} *
+                                                         (0.5 * ct_u2) * (0.5 * ct_u2) / test_sn));
+        CHECK(close_to(a_to_b_impedance(param_default), z_nominal * ct_u2 * ct_u2 / test_sn));
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary equals a phase-to-phase secondary in "
+          "differential mode") {
+    using enum WindingConnection1P;
+    // a -> ct and a -> ab, both with u2 = 480 V at the same node: with U_to = (v, -v, 0) both halves see v
+    SinglePhaseTransformer const center_tapped = make_ct_transformer(ct_input(a));
+    SinglePhaseTransformerInput input = test_input(a, ab);
+    input.u2 = ct_u2;
+    SinglePhaseTransformer const phase_to_phase{input, test_u_rated_from, ct_u_rated_to};
+    auto const param_ct = center_tapped.calc_param<asymmetric_t>();
+    auto const param_ab = phase_to_phase.calc_param<asymmetric_t>();
+
+    ComplexValue<asymmetric_t> const u_from{DoubleComplex{0.98, 0.03}, DoubleComplex{-0.4, -0.9},
+                                            DoubleComplex{-0.6, 0.8}};
+    DoubleComplex const v{0.97, -0.05};
+    ComplexValue<asymmetric_t> const u_to{v, -v, 0.0};
+    auto const currents = [&u_from, &u_to](BranchCalcParam<asymmetric_t> const& param) {
+        return std::array<ComplexValue<asymmetric_t>, 2>{dot(param.yff(), u_from) + dot(param.yft(), u_to),
+                                                         dot(param.ytf(), u_from) + dot(param.ytt(), u_to)};
+    };
+    auto const [i_from_ct, i_to_ct] = currents(param_ct);
+    auto const [i_from_ab, i_to_ab] = currents(param_ab);
+    double const scale = std::max(cabs(i_from_ab(0)), cabs(i_to_ab(0)));
+    for (Idx k = 0; k != 3; ++k) {
+        CAPTURE(k);
+        CHECK(cabs(i_from_ct(k) - i_from_ab(k)) < test_tolerance * scale);
+        CHECK(cabs(i_to_ct(k) - i_to_ab(k)) < test_tolerance * scale);
+    }
+    CHECK(cabs(i_to_ct(0)) > 1e-3 * scale);
+    CHECK(same_angle(center_tapped.phase_shift(), 0.0));
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, earthing, clock and magnetising") {
+    using enum WindingConnection1P;
+    DoubleComplex const z_grounding{0.5, 0.05};
+
+    SUBCASE("Electrode on the centre tap") {
+        SinglePhaseTransformerInput input = ct_input(ab);
+        input.r_grounding_to = z_grounding.real();
+        input.x_grounding_to = z_grounding.imag();
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = connection_case(ab), .y = primitive_ct({}), .z_grounding = z_grounding});
+
+        // differential excitation: no current in the centre tap, so the currents equal those of the solid case
+        auto const solid = make_ct_transformer(ct_input(ab)).calc_param<asymmetric_t>();
+        ComplexValue<asymmetric_t> const u_from{DoubleComplex{1.0, 0.02}, DoubleComplex{-0.5, -0.85}, 0.0};
+        DoubleComplex const v{0.96, 0.31};
+        ComplexValue<asymmetric_t> const u_to{v, -v, 0.0};
+        ComplexValue<asymmetric_t> const i_to = dot(param.ytf(), u_from) + dot(param.ytt(), u_to);
+        ComplexValue<asymmetric_t> const i_to_solid = dot(solid.ytf(), u_from) + dot(solid.ytt(), u_to);
+        ComplexValue<asymmetric_t> const i_from = dot(param.yff(), u_from) + dot(param.yft(), u_to);
+        ComplexValue<asymmetric_t> const i_from_solid = dot(solid.yff(), u_from) + dot(solid.yft(), u_to);
+        double const scale = std::max(cabs(i_to_solid(0)), cabs(i_from_solid(0)));
+        for (Idx k = 0; k != 3; ++k) {
+            CAPTURE(k);
+            CHECK(cabs(i_to(k) - i_to_solid(k)) < test_tolerance * scale);
+            CHECK(cabs(i_from(k) - i_from_solid(k)) < test_tolerance * scale);
+        }
+
+        // the leg impedance includes the electrode
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        auto const no_shunt = make_ct_transformer(input).calc_param<asymmetric_t>();
+        DoubleComplex const z_nominal = short_circuit_pu(test_uk, test_pk);
+        DoubleComplex const z_half{1.5 * z_nominal.real(), 1.2 * z_nominal.imag()};
+        CHECK(close_to(leg_impedance(no_shunt), z_half * (0.5 * ct_u2) * (0.5 * ct_u2) / test_sn + z_grounding));
+        // a to b does not pass the centre tap
+        CHECK(close_to(a_to_b_impedance(no_shunt), z_nominal * ct_u2 * ct_u2 / test_sn));
+    }
+    SUBCASE("Only a reactance, and zero is solid") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.x_grounding_to = 0.3;
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = connection_case(a), .y = primitive_ct({}), .z_grounding = {0.0, 0.3}});
+        input.x_grounding_to = 0.0;
+        input.r_grounding_to = 0.0;
+        CHECK(params_equal(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                           make_ct_transformer(ct_input(a)).calc_param<asymmetric_t>()));
+    }
+    SUBCASE("Clock 6 reverses both halves") {
+        for (auto const& from : connection_cases()) {
+            CAPTURE(phase_letters(from.mask));
+            SinglePhaseTransformerInput input = ct_input(from.connection);
+            auto const param_0 = make_ct_transformer(input).calc_param<asymmetric_t>();
+            input.clock = 6;
+            SinglePhaseTransformer const transformer = make_ct_transformer(input);
+            auto const param_6 = transformer.calc_param<asymmetric_t>();
+            check_param_ct(param_6, {.from = from, .y = primitive_ct({}), .polarity = -1.0});
+            CHECK((param_6.yff() == param_0.yff()).all());
+            CHECK((param_6.ytt() == param_0.ytt()).all());
+            CHECK((param_6.yft() == -param_0.yft()).all());
+            CHECK((param_6.ytf() == -param_0.ytf()).all());
+            CHECK(same_angle(transformer.phase_shift(), -from.angle() + pi));
+        }
+        // with an electrode on the centre tap
+        SinglePhaseTransformerInput input = ct_input(c);
+        input.clock = 6;
+        input.r_grounding_to = z_grounding.real();
+        input.x_grounding_to = z_grounding.imag();
+        check_param_ct(
+            make_ct_transformer(input).calc_param<asymmetric_t>(),
+            {.from = connection_case(c), .y = primitive_ct({}), .polarity = -1.0, .z_grounding = z_grounding});
+    }
+    SUBCASE("Magnetising admittance diag(y_m / 2, y_m / 4, y_m / 4)") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        auto const with_shunt = make_ct_transformer(input).calc_param<asymmetric_t>();
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        auto const without_shunt = make_ct_transformer(input).calc_param<asymmetric_t>();
+        double const g_m = test_p0 / test_sn;
+        DoubleComplex const y_m{g_m, -std::sqrt(test_i0 * test_i0 - g_m * g_m)};
+        double const base_u_from = test_u_rated_from / sqrt3;
+        double const base_u_to = ct_u_rated_to / sqrt3;
+        DoubleComplex const from_shunt =
+            0.5 * y_m * test_sn / (test_u1 * test_u1) * base_u_from * base_u_from / test_base_power_1p;
+        DoubleComplex const half_shunt =
+            0.25 * y_m * test_sn / (0.25 * ct_u2 * ct_u2) * base_u_to * base_u_to / test_base_power_1p;
+        CHECK(close_to(with_shunt.yff()(0, 0) - without_shunt.yff()(0, 0), from_shunt));
+        CHECK(close_to(with_shunt.ytt()(0, 0) - without_shunt.ytt()(0, 0), half_shunt));
+        CHECK(close_to(with_shunt.ytt()(1, 1) - without_shunt.ytt()(1, 1), half_shunt));
+        CHECK(cabs(with_shunt.ytt()(0, 1) - without_shunt.ytt()(0, 1)) < test_tolerance * cabs(half_shunt));
+        CHECK(cabs(with_shunt.yft()(0, 0) - without_shunt.yft()(0, 0)) < test_tolerance * cabs(half_shunt));
+        CHECK(cabs(with_shunt.yft()(0, 1) - without_shunt.yft()(0, 1)) < test_tolerance * cabs(half_shunt));
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, status") {
+    using enum WindingConnection1P;
+    ConnectionCase const phase_a = connection_case(a);
+    CenterTappedData const no_shunt{.i0 = 0.0, .p0 = 0.0};
+
+    SUBCASE("From side open: the halves stay coupled as a balancer") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        input.from_status = 0;
+        auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances(no_shunt);
+        // 1 / (2 z_b) [[1, -1], [-1, 1]] in half-winding per unit
+        DoubleComplex const balancer = 1.0 / (2.0 * z_b) * test_sn / (0.25 * ct_u2 * ct_u2);
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = phase_a,
+                               .y = {{{0.0, 0.0, 0.0}, {0.0, balancer, -balancer}, {0.0, -balancer, balancer}}},
+                               .from_connected = false});
+        CHECK(cabs(param.ytt()(0, 0)) > 0.0);
+        check_all_zero({.value = {param.yff(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+    }
+    SUBCASE("To side open without magnetising admittance is exactly zero") {
+        SinglePhaseTransformerInput input = ct_input(ab);
+        input.i0 = 0.0;
+        input.p0 = 0.0;
+        input.to_status = 0;
+        input.r_grounding_to = 0.5;
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        // only the low susceptance of the phase-to-phase primary
+        check_all_zero({.value = {param.ytt(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+        input.from_connection = a;
+        check_all_zero(make_ct_transformer(input).calc_param<asymmetric_t>());
+    }
+    SUBCASE("To side open with magnetising admittance: the open-end shunt of the primary") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.to_status = 0;
+        auto const [z_f, z_hs, z_0, z_b, y_m] = ct_impedances({});
+        // Y_00 - [Y_01 Y_02] [[Y_11, Y_12], [Y_12, Y_22]]^-1 [Y_10 Y_20]^T with Y_01 = Y_02 and the eigenvalue
+        // Y_11 + Y_12 = 1 / (2 z_f) + y_m / 4 of (1, 1): y_m / 2 + (z_f + 2 / y_m)^-1, the open-end shunt of the
+        // two-winding transformer
+        DoubleComplex const open_end = (0.5 * y_m + 1.0 / (z_f + 2.0 / y_m)) * test_sn / (test_u1 * test_u1);
+        check_param_ct(make_ct_transformer(input).calc_param<asymmetric_t>(),
+                       {.from = phase_a, .y = {{{open_end, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}}});
+    }
+    SUBCASE("Both sides open") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.from_status = 0;
+        input.to_status = 0;
+        check_all_zero(make_ct_transformer(input).calc_param<asymmetric_t>());
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, taps") {
+    using enum WindingConnection1P;
+    ConnectionCase const phase_bc = connection_case(bc);
+    auto const tapped_input = [](BranchSide tap_side, IntS tap_pos, double tap_size) {
+        SinglePhaseTransformerInput input = ct_input(bc);
+        input.tap_side = tap_side;
+        input.tap_pos = tap_pos;
+        input.tap_min = -5;
+        input.tap_max = 5;
+        input.tap_nom = 0;
+        input.tap_size = tap_size;
+        return input;
+    };
+
+    SUBCASE("From side tap scales the primary voltage") {
+        check_param_ct(make_ct_transformer(tapped_input(BranchSide::from, 2, 200.0)).calc_param<asymmetric_t>(),
+                       {.from = phase_bc, .y = primitive_ct({.u1 = test_u1 + 400.0})});
+    }
+    SUBCASE("To side tap scales both halves") {
+        check_param_ct(make_ct_transformer(tapped_input(BranchSide::to, -3, 5.0)).calc_param<asymmetric_t>(),
+                       {.from = phase_bc, .y = primitive_ct({.u2 = ct_u2 - 15.0})});
+    }
+    SUBCASE("Tap dependent short circuit parameters change the primary branch only") {
+        SinglePhaseTransformerInput input = tapped_input(BranchSide::from, 2, 200.0);
+        input.uk_max = 0.05;
+        input.pk_max = 800.0;
+        input.uk_half = 0.03;
+        double const uk = test_uk + 2.0 * (0.05 - test_uk) / 5.0;
+        double const pk = test_pk + 2.0 * (800.0 - test_pk) / 5.0;
+        // z_b from the nominal uk and pk, z_0 = z_f(tap) - z_b / 2
+        CenterTappedData const data{.u1 = test_u1 + 400.0, .uk = uk, .pk = pk, .uk_half = 0.03};
+        auto const param = make_ct_transformer(input).calc_param<asymmetric_t>();
+        check_param_ct(param, {.from = phase_bc, .y = primitive_ct(data)});
+        // the check discriminates: a half branch from the tap-adjusted uk and pk would differ
+        CenterTappedData const tapped_half_branch{
+            .u1 = test_u1 + 400.0, .uk = uk, .pk = pk, .uk_nominal = uk, .pk_nominal = pk, .uk_half = 0.03};
+        CHECK_FALSE(params_close(param, expected_param_ct({.from = phase_bc, .y = primitive_ct(tapped_half_branch)})));
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, loading") {
+    using enum WindingConnection1P;
+    SinglePhaseTransformer const transformer = make_ct_transformer(ct_input(a));
+    // one leg at sn / 2 is full load: each half is rated sn / 2
+    double const half_rating = 0.5 * test_sn / test_base_power_1p;
+    DoubleComplex const s_leg = std::polar(half_rating, 0.3);
+
+    SUBCASE("A single leg at sn / 2") {
+        BranchSolverOutput<asymmetric_t> const solver_output{.s_f = ComplexValue<asymmetric_t>{0.5 * s_leg, 0.0, 0.0},
+                                                             .s_t = ComplexValue<asymmetric_t>{-s_leg, 0.0, 0.0},
+                                                             .i_f = ComplexValue<asymmetric_t>{0.1, 0.0, 0.0},
+                                                             .i_t = ComplexValue<asymmetric_t>{1.0, 0.0, 0.0}};
+        CHECK(transformer.get_output<asymmetric_t>(solver_output).loading == doctest::Approx(1.0));
+    }
+    SUBCASE("Balanced full load") {
+        BranchSolverOutput<asymmetric_t> const solver_output{.s_f = ComplexValue<asymmetric_t>{2.0 * s_leg, 0.0, 0.0},
+                                                             .s_t = ComplexValue<asymmetric_t>{-s_leg, -s_leg, 0.0},
+                                                             .i_f = ComplexValue<asymmetric_t>{0.1, 0.0, 0.0},
+                                                             .i_t = ComplexValue<asymmetric_t>{1.0, 1.0, 0.0}};
+        CHECK(transformer.get_output<asymmetric_t>(solver_output).loading == doctest::Approx(1.0));
+    }
+    SUBCASE("The primary side uses the complex sum") {
+        SinglePhaseTransformer const ab_primary = make_ct_transformer(ct_input(ab));
+        DoubleComplex const s_a{0.06, 0.02};
+        DoubleComplex const s_b{0.05, -0.01};
+        BranchSolverOutput<asymmetric_t> const solver_output{.s_f = ComplexValue<asymmetric_t>{s_a, s_b, 0.0},
+                                                             .s_t = ComplexValue<asymmetric_t>{0.01, -0.01, 0.0},
+                                                             .i_f = ComplexValue<asymmetric_t>{0.1, 0.1, 0.0},
+                                                             .i_t = ComplexValue<asymmetric_t>{1.0, 1.0, 0.0}};
+        CHECK(ab_primary.get_output<asymmetric_t>(solver_output).loading ==
+              doctest::Approx(cabs(s_a + s_b) * test_base_power_1p / test_sn));
+    }
+    SUBCASE("Symmetric") {
+        BranchSolverOutput<symmetric_t> const solver_output{
+            .s_f = DoubleComplex{0.01, 0.002}, .s_t = DoubleComplex{-0.02, 0.0}, .i_f = 0.01, .i_t = 0.02};
+        CHECK(transformer.get_output<symmetric_t>(solver_output).loading == doctest::Approx(0.02 * 1.0e6 / test_sn));
+    }
+}
+
+TEST_CASE("Test single phase transformer - centre-tapped secondary, invalid input") {
+    using enum WindingConnection1P;
+
+    SUBCASE("Centre-tapped from side") {
+        CHECK_THROWS_WITH_AS(make_transformer(test_input(ab_center_tapped, a)),
+                             "Invalid phase connection for single_phase_transformer 1 with phases (ab): "
+                             "a centre-tapped winding is only allowed on the to side\n",
+                             InvalidPhaseConnection);
+        CHECK_THROWS_AS(make_transformer(test_input(ab_center_tapped, ab_center_tapped)), InvalidPhaseConnection);
+    }
+    SUBCASE("Half-winding parameters on a winding that is not centre-tapped") {
+        SinglePhaseTransformerInput input = test_input(a, a);
+        input.uk_half = 0.03;
+        CHECK_THROWS_WITH_AS(make_transformer(input),
+                             "Invalid phase connection for single_phase_transformer 1 with phases (a): "
+                             "uk_half refers to a centre-tapped winding and must be left empty\n",
+                             InvalidPhaseConnection);
+        input = test_input(ab, bc);
+        input.pk_half = 0.0;
+        CHECK_THROWS_WITH_AS(make_transformer(input),
+                             "Invalid phase connection for single_phase_transformer 1 with phases (bc): "
+                             "pk_half refers to a centre-tapped winding and must be left empty\n",
+                             InvalidPhaseConnection);
+    }
+    SUBCASE("An earthing impedance on the centre tap is accepted") {
+        SinglePhaseTransformerInput input = ct_input(a);
+        input.r_grounding_to = 1.0;
+        input.x_grounding_to = 0.1;
+        CHECK_NOTHROW(make_ct_transformer(input));
+    }
 }
 
 TEST_CASE("Test kron_eliminate") {

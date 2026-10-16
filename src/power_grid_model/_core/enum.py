@@ -386,6 +386,10 @@ class WindingConnection1P(IntEnum):
     """
     Between the second and the third phase
     """
+    ab_center_tapped = 7
+    """
+    Centre-tapped (split-phase) winding: a to the centre tap and the centre tap to b; to side only
+    """
 
 
 class LoggerType(IntEnum):

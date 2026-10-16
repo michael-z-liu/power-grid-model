@@ -22,9 +22,12 @@
 #include <Eigen/Core>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <complex>
+#include <cstddef>
+#include <cstdint>
 #include <format>
 #include <string_view>
 #include <utility>
@@ -35,9 +38,13 @@ namespace power_grid_model {
 // or between one phase slot and earth (a, b, c), the latter directly or through an earthing impedance
 // the two coupled windings are stamped onto the slots of both nodes (C^T Y_prim C, in physical units) and scaled to
 // per unit with the phase-to-earth base voltage u_rated / sqrt3 of each node
+// the to winding can instead be centre-tapped (ab_center_tapped, split phase): two halves, a to the centre tap and the
+// centre tap to b, with the centre tap earthed directly or through an earthing impedance; the primary and the two
+// halves are then three coupled windings
 class SinglePhaseTransformer : public Branch {
   private:
     using Matrix2 = Eigen::Matrix<DoubleComplex, 2, 2>;
+    using Matrix3 = Eigen::Matrix<DoubleComplex, 3, 3>;
     // terminals 0, 1, 2: from slots a, b, c; 3, 4, 5: to slots a, b, c; 6, 7: earthed terminal of the from and to
     // winding behind an earthing impedance
     using Matrix8 = Eigen::Matrix<DoubleComplex, 8, 8>;
@@ -46,15 +53,20 @@ class SinglePhaseTransformer : public Branch {
     static constexpr Idx electrode_from{6};
     static constexpr Idx electrode_to{7};
 
+    enum class WindingKind : std::uint8_t { phase_to_earth, phase_to_phase, center_tapped };
+
     // winding of one side: the phase slots of the terminals and the angle of the winding voltage of a balanced
-    // positive-sequence set (U_a = 1, U_b = a^2, U_c = a)
+    // positive-sequence set (U_a = 1, U_b = a^2, U_c = a); for a centre-tapped winding, the angle of the voltage of
+    // half 1 (slot a to the centre tap)
     struct Winding {
         PhaseMask slots;
         Idx positive{};      // slot 0, 1, 2
-        Idx negative{earth}; // slot 0, 1, 2, or earth for a phase-to-earth winding
+        Idx negative{earth}; // slot 0, 1, 2, or earth for a phase-to-earth winding; slot b for a centre-tapped winding
         double angle{};
+        WindingKind kind{WindingKind::phase_to_earth};
 
-        constexpr bool phase_to_phase() const { return negative != earth; }
+        constexpr bool phase_to_phase() const { return kind == WindingKind::phase_to_phase; }
+        constexpr bool center_tapped() const { return kind == WindingKind::center_tapped; }
     };
 
     // terminals of a winding in the index space of Matrix8; earth means the true earth (eliminated)
@@ -79,8 +91,10 @@ class SinglePhaseTransformer : public Branch {
           pk_{transformer_input.pk},
           i0_{transformer_input.i0},
           p0_{transformer_input.p0},
-          from_{winding_of(transformer_input.from_connection)},
+          from_{checked_from_winding(id(), transformer_input.from_connection)},
           to_{winding_of(transformer_input.to_connection)},
+          uk_half_{checked_half(id(), to_, transformer_input.uk_half, "uk_half")},
+          pk_half_{checked_half(id(), to_, transformer_input.pk_half, "pk_half")},
           clock_{checked_clock(id(), transformer_input.clock)},
           tap_side_{is_nan(transformer_input.tap_side) ? BranchSide::from : transformer_input.tap_side},
           tap_min_{transformer_input.tap_min},
@@ -118,10 +132,13 @@ class SinglePhaseTransformer : public Branch {
 
     // hides Edge::get_output: the loading is the larger apparent power of the two sides, each from the complex sum of
     // its per-phase powers; the sum of the per-phase apparent powers would overstate the loading of a phase-to-phase
-    // winding by 2 / sqrt3
+    // winding by 2 / sqrt3; each half of a centre-tapped winding is rated sn / 2, so that side counts twice the
+    // apparent power of its larger leg
     template <symmetry_tag sym> BranchOutput<sym> get_output(BranchSolverOutput<sym> const& solver_output) const {
         BranchOutput<sym> output = Edge::template get_output<sym>(solver_output);
-        output.loading = std::max(side_power(solver_output.s_f), side_power(solver_output.s_t)) * base_power<sym> / sn_;
+        output.loading =
+            std::max(side_power(solver_output.s_f), to_side_power(solver_output.s_t, to_.center_tapped())) *
+            base_power<sym> / sn_;
         return output;
     }
 
@@ -184,6 +201,8 @@ class SinglePhaseTransformer : public Branch {
     double p0_;
     Winding from_;
     Winding to_;
+    double uk_half_; // nan: not provided, the default split of uk and pk
+    double pk_half_; // nan: not provided, the default split of uk and pk
     IntS clock_;
     BranchSide tap_side_;
     IntS tap_pos_{};
@@ -208,6 +227,10 @@ class SinglePhaseTransformer : public Branch {
 
     static double side_power(ComplexValue<symmetric_t> const& s) { return cabs(s); }
     static double side_power(ComplexValue<asymmetric_t> const& s) { return cabs(s.sum()); }
+    static double to_side_power(ComplexValue<symmetric_t> const& s, bool /* center_tapped */) { return cabs(s); }
+    static double to_side_power(ComplexValue<asymmetric_t> const& s, bool center_tapped) {
+        return center_tapped ? 2.0 * std::max(cabs(s(0)), cabs(s(1))) : side_power(s);
+    }
 
     // the first letter is the positive terminal; angles of U_a - U_b etc. for U_a = 1, U_b = a^2, U_c = a
     static Winding winding_of(WindingConnection1P connection) {
@@ -220,14 +243,49 @@ class SinglePhaseTransformer : public Branch {
         case c:
             return {.slots = phase_mask_c, .positive = 2, .negative = earth, .angle = deg_120};
         case ab:
-            return {.slots = phase_mask_ab, .positive = 0, .negative = 1, .angle = deg_30};
+            return {.slots = phase_mask_ab,
+                    .positive = 0,
+                    .negative = 1,
+                    .angle = deg_30,
+                    .kind = WindingKind::phase_to_phase};
         case ac:
-            return {.slots = phase_mask_ac, .positive = 0, .negative = 2, .angle = -deg_30};
+            return {.slots = phase_mask_ac,
+                    .positive = 0,
+                    .negative = 2,
+                    .angle = -deg_30,
+                    .kind = WindingKind::phase_to_phase};
         case bc:
-            return {.slots = phase_mask_bc, .positive = 1, .negative = 2, .angle = -3.0 * deg_30};
+            return {.slots = phase_mask_bc,
+                    .positive = 1,
+                    .negative = 2,
+                    .angle = -3.0 * deg_30,
+                    .kind = WindingKind::phase_to_phase};
+        case ab_center_tapped:
+            return {
+                .slots = phase_mask_ab, .positive = 0, .negative = 1, .angle = 0.0, .kind = WindingKind::center_tapped};
         default:
             throw MissingCaseForEnumError{"single_phase_transformer connection", connection};
         }
+    }
+
+    // a centre-tapped winding is only allowed on the to side
+    static Winding checked_from_winding(ID transformer_id, WindingConnection1P connection) {
+        Winding const winding = winding_of(connection);
+        if (winding.center_tapped()) {
+            throw InvalidPhaseConnection{name, transformer_id, phase_letters(winding.slots),
+                                         "a centre-tapped winding is only allowed on the to side"};
+        }
+        return winding;
+    }
+
+    // uk_half and pk_half only apply to a centre-tapped to winding; on any other they must be left empty
+    static double checked_half(ID transformer_id, Winding const& to, double value, std::string_view attribute) {
+        if (!to.center_tapped() && !is_nan(value)) {
+            throw InvalidPhaseConnection{
+                name, transformer_id, phase_letters(to.slots),
+                std::format("{} refers to a centre-tapped winding and must be left empty", attribute)};
+        }
+        return value;
     }
 
     // not provided means 0; 0 and 6 (modulo 12) are the only valid values, 6 reverses the polarity of the to winding
@@ -242,8 +300,9 @@ class SinglePhaseTransformer : public Branch {
         return mapped;
     }
 
-    // earthing impedance in ohm, not provided means solidly earthed; only a phase-to-earth winding has an earthed
-    // terminal, so the earthing impedance of a phase-to-phase winding must be left empty
+    // earthing impedance in ohm, not provided means solidly earthed; only a phase-to-earth winding (its earthed end)
+    // and a centre-tapped winding (its centre tap) have an earthed terminal, so the earthing impedance of a
+    // phase-to-phase winding must be left empty
     static DoubleComplex checked_grounding(ID transformer_id, Winding const& winding, double r, double x,
                                            std::string_view side) {
         if (winding.phase_to_phase() && (!is_nan(r) || !is_nan(x))) {
@@ -309,10 +368,8 @@ class SinglePhaseTransformer : public Branch {
         add_entry(y, row.negative, col.negative, value);
     }
 
-    // primitive admittance of the two windings in siemens (winding currents from winding voltages), including the
-    // off-nominal tap; with one side open, the open winding carries no current and the connected winding sees the
-    // open-end shunt 1/2 y_m + (1/y_s + 2/y_m)^-1
-    Matrix2 primitive_admittance() const {
+    // the winding voltages u1' and u2' at the tap position
+    std::pair<double, double> tap_adjusted_voltages() const {
         double u1 = u1_;
         double u2 = u2_;
         double const tap_offset = tap_direction_ * (tap_pos_ - tap_nom_) * tap_size_;
@@ -321,8 +378,21 @@ class SinglePhaseTransformer : public Branch {
         } else {
             u2 += tap_offset;
         }
-        double const uk = tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, uk_, uk_min_, uk_max_);
-        double const pk = tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, pk_, pk_min_, pk_max_);
+        return {u1, u2};
+    }
+
+    // the short circuit parameters uk' and pk' at the tap position
+    std::pair<double, double> tap_adjusted_short_circuit() const {
+        return {tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, uk_, uk_min_, uk_max_),
+                tap_adjust_impedance(tap_pos_, tap_min(), tap_max(), tap_nom_, pk_, pk_min_, pk_max_)};
+    }
+
+    // primitive admittance of the two windings in siemens (winding currents from winding voltages), including the
+    // off-nominal tap; with one side open, the open winding carries no current and the connected winding sees the
+    // open-end shunt 1/2 y_m + (1/y_s + 2/y_m)^-1
+    Matrix2 primitive_admittance() const {
+        auto const [u1, u2] = tap_adjusted_voltages();
+        auto const [uk, pk] = tap_adjusted_short_circuit();
 
         // series impedance referred to side 2, as for transformer
         double const z_series_abs = std::abs(uk) * u2 * u2 / sn_;
@@ -360,9 +430,116 @@ class SinglePhaseTransformer : public Branch {
         return y_prim;
     }
 
+    // series impedance in per unit on sn from the short circuit voltage and the load losses, as for transformer
+    static DoubleComplex short_circuit_impedance(double uk, double pk, double sn) {
+        double const r = pk / sn;
+        double const x_squared = uk * uk - r * r;
+        return {r, (uk >= 0 ? 1.0 : -1.0) * (x_squared > 0.0 ? std::sqrt(x_squared) : 0.0)};
+    }
+
+    // short circuit impedance between the primary and one half of a centre-tapped winding (the other half open), in
+    // per unit on sn and the half voltage, at the nominal tap; uk_half and pk_half are on the pair rating sn / 2, so
+    // r = 4 pk_half / sn and |z| = 2 uk_half; not provided, each follows the split of Kersting (primary 0.5 r + j0.8 x,
+    // each half r + j0.4 x), which gives 1.5 r + j1.2 x
+    DoubleComplex half_winding_impedance() const {
+        DoubleComplex const z_nominal = short_circuit_impedance(uk_, pk_, sn_);
+        double const uk_half =
+            is_nan(uk_half_)
+                ? (uk_ >= 0 ? 0.5 : -0.5) * cabs(DoubleComplex{1.5 * z_nominal.real(), 1.2 * z_nominal.imag()})
+                : uk_half_;
+        double const pk_half = is_nan(pk_half_) ? 0.375 * pk_ : pk_half_;
+        return short_circuit_impedance(2.0 * uk_half, 4.0 * pk_half, sn_);
+    }
+
+    // primitive admittance in siemens of the primary (0) and the two halves (1, 2) of a centre-tapped winding, in the
+    // N-winding form A^T Z_B^-1 A of OpenDSS, with Z_B = z_0 1 + z_b I in per unit on sn; z_b is the branch of each
+    // half, fixed at the nominal tap, and z_0 = z_f - z_b / 2 the branch of the primary, which takes the tap
+    // dependence of the full-winding impedance z_f; the magnetising admittance is diag(y_m / 2, y_m / 4, y_m / 4)
+    // with the from side open, the primary is eliminated and the halves stay coupled (a balancer); with the to side
+    // open, both halves are eliminated
+    Matrix3 primitive_admittance_center_tapped() const {
+        auto const [u1, u2] = tap_adjusted_voltages();
+        auto const [uk, pk] = tap_adjusted_short_circuit();
+        DoubleComplex const z_full = short_circuit_impedance(uk, pk, sn_);
+        DoubleComplex const z_half_branch = 2.0 * (half_winding_impedance() - short_circuit_impedance(uk_, pk_, sn_));
+        DoubleComplex const z_primary_branch = z_full - 0.5 * z_half_branch;
+        double const g_shunt = p0_ / sn_;
+        double const b_shunt_squared = i0_ * i0_ - g_shunt * g_shunt;
+        DoubleComplex const y_shunt{g_shunt, b_shunt_squared > 0.0 ? -std::sqrt(b_shunt_squared) : 0.0};
+
+        // per unit on sn and the winding voltages u1' and u2' / 2, scaled to siemens with sn / (V_i V_j)
+        double const u_half = 0.5 * u2;
+        DoubleComplex const y_primary = (1.0 / z_full + 0.5 * y_shunt) * (sn_ / (u1 * u1));
+        DoubleComplex const y_mutual = -0.5 / z_full * (sn_ / (u1 * u_half));
+        DoubleComplex const denominator = 2.0 * z_half_branch * z_full;
+        DoubleComplex const y_half =
+            ((z_primary_branch + z_half_branch) / denominator + 0.25 * y_shunt) * (sn_ / (u_half * u_half));
+        DoubleComplex const y_halves = -z_primary_branch / denominator * (sn_ / (u_half * u_half));
+        Matrix3 y_prim;
+        y_prim << y_primary, y_mutual, y_mutual, y_mutual, y_half, y_halves, y_mutual, y_halves, y_half;
+
+        if (edge_status()) {
+            return y_prim;
+        }
+        if (from_status()) {
+            // the tolerance applies to the magnetising admittance in per unit of the to side, as in the two-winding
+            // case
+            if (cabs(y_shunt) * sn_ / u2 / u2 * base_u_to_ * base_u_to_ / base_power_1p < numerical_tolerance) {
+                return Matrix3::Zero();
+            }
+            kron_eliminate(y_prim, 1);
+            kron_eliminate(y_prim, 2);
+            return y_prim;
+        }
+        if (to_status()) {
+            kron_eliminate(y_prim, 0);
+            return y_prim;
+        }
+        return Matrix3::Zero();
+    }
+
+    // a non-zero earthing impedance is only possible on a phase-to-earth or centre-tapped winding, whose earthed
+    // terminal is then the electrode
+    void add_electrodes(Matrix8& y) const {
+        if (z_grounding_from_ != DoubleComplex{}) {
+            y(electrode_from, electrode_from) += 1.0 / z_grounding_from_;
+            kron_eliminate(y, electrode_from);
+        }
+        if (z_grounding_to_ != DoubleComplex{}) {
+            y(electrode_to, electrode_to) += 1.0 / z_grounding_to_;
+            kron_eliminate(y, electrode_to);
+        }
+    }
+
+    // nodal admittance of a centre-tapped to winding: half 1 from slot a to the centre tap, half 2 from the centre tap
+    // to slot b; clock 6 reverses both halves
+    Matrix8 nodal_admittance_center_tapped() const {
+        Matrix3 const y_prim = primitive_admittance_center_tapped();
+        Idx const centre_tap = z_grounding_to_ == DoubleComplex{} ? earth : electrode_to;
+        std::array<Terminals, 3> terminals{terminals_of(from_, 0, electrode_from, z_grounding_from_),
+                                           Terminals{.positive = to_offset + to_.positive, .negative = centre_tap},
+                                           Terminals{.positive = centre_tap, .negative = to_offset + to_.negative}};
+        if (clock_ == IntS{6}) {
+            std::swap(terminals[1].positive, terminals[1].negative);
+            std::swap(terminals[2].positive, terminals[2].negative);
+        }
+
+        Matrix8 y = Matrix8::Zero();
+        for (size_t row = 0; row != terminals.size(); ++row) {
+            for (size_t col = 0; col != terminals.size(); ++col) {
+                stamp(y, terminals[row], terminals[col], y_prim(static_cast<Idx>(row), static_cast<Idx>(col)));
+            }
+        }
+        add_electrodes(y);
+        return y;
+    }
+
     // nodal admittance in siemens of the from and to slots: the windings stamped onto their terminals, the earthing
     // impedances added and their terminals eliminated
     Matrix8 nodal_admittance() const {
+        if (to_.center_tapped()) {
+            return nodal_admittance_center_tapped();
+        }
         Matrix2 const y_prim = primitive_admittance();
         Terminals const from_terminals = terminals_of(from_, 0, electrode_from, z_grounding_from_);
         Terminals to_terminals = terminals_of(to_, to_offset, electrode_to, z_grounding_to_);
@@ -375,17 +552,7 @@ class SinglePhaseTransformer : public Branch {
         stamp(y, from_terminals, to_terminals, y_prim(0, 1));
         stamp(y, to_terminals, from_terminals, y_prim(1, 0));
         stamp(y, to_terminals, to_terminals, y_prim(1, 1));
-
-        // a non-zero earthing impedance is only possible on a phase-to-earth winding, whose earthed terminal is then
-        // the electrode
-        if (z_grounding_from_ != DoubleComplex{}) {
-            y(electrode_from, electrode_from) += 1.0 / z_grounding_from_;
-            kron_eliminate(y, electrode_from);
-        }
-        if (z_grounding_to_ != DoubleComplex{}) {
-            y(electrode_to, electrode_to) += 1.0 / z_grounding_to_;
-            kron_eliminate(y, electrode_to);
-        }
+        add_electrodes(y);
         return y;
     }
 
@@ -397,7 +564,8 @@ class SinglePhaseTransformer : public Branch {
     }
 
     // the common mode of a phase-to-phase winding has no earth reference: add a small admittance to earth of
-    // y_low / 2 on each entry of its two slots, the analogue of the zero-sequence low susceptance of transformer
+    // y_low / 2 on each entry of its two slots, the analogue of the zero-sequence low susceptance of transformer; a
+    // centre-tapped winding is earthed at its centre tap and gets none
     void add_low_susceptance(ComplexTensor<asymmetric_t>& y_block, Winding const& winding) const {
         if (!winding.phase_to_phase()) {
             return;

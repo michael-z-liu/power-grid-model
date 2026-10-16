@@ -229,7 +229,7 @@ struct get_attributes_list<TransformerInput> {
 
 template<>
 struct get_attributes_list<SinglePhaseTransformerInput> {
-    static constexpr std::array<MetaAttribute, 29> value{
+    static constexpr std::array<MetaAttribute, 31> value{
             // all attributes including base class
             
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::id>(offsetof(SinglePhaseTransformerInput, id), "id"),
@@ -244,6 +244,8 @@ struct get_attributes_list<SinglePhaseTransformerInput> {
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk>(offsetof(SinglePhaseTransformerInput, pk), "pk"),
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::i0>(offsetof(SinglePhaseTransformerInput, i0), "i0"),
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::p0>(offsetof(SinglePhaseTransformerInput, p0), "p0"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::uk_half>(offsetof(SinglePhaseTransformerInput, uk_half), "uk_half"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk_half>(offsetof(SinglePhaseTransformerInput, pk_half), "pk_half"),
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::from_connection>(offsetof(SinglePhaseTransformerInput, from_connection), "from_connection"),
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::to_connection>(offsetof(SinglePhaseTransformerInput, to_connection), "to_connection"),
             meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::clock>(offsetof(SinglePhaseTransformerInput, clock), "clock"),

@@ -236,6 +236,8 @@ struct SinglePhaseTransformerInput {
     double pk{nan};  // short circuit and open testing parameters
     double i0{nan};  // short circuit and open testing parameters
     double p0{nan};  // short circuit and open testing parameters
+    double uk_half{nan};  // short circuit parameters between the primary and one half of a centre-tapped winding (on sn/2); default from uk and pk
+    double pk_half{nan};  // short circuit parameters between the primary and one half of a centre-tapped winding (on sn/2); default from uk and pk
     WindingConnection1P from_connection{static_cast<WindingConnection1P>(na_IntS)};  // phase slots of the winding at each side
     WindingConnection1P to_connection{static_cast<WindingConnection1P>(na_IntS)};  // phase slots of the winding at each side
     IntS clock{na_IntS};  // 0 or 6 (reversed polarity); default 0

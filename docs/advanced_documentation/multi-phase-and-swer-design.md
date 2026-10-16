@@ -299,7 +299,8 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
   `PhaseConnection`/`FaultPhase` without `abc`. The connection is required: not provided (`na`), 0 and unknown values
   raise `MissingCaseForEnumError`. The first letter is the positive terminal: `ab` is $U_a - U_b$, `ac` is
   $U_a - U_c$ (the design's `ca` is `ac` with reversed polarity), and `a` is $U_a - U_E$ with $E$ the earthed end.
-  The centre-tapped values are not part of M5; M6 appends them (7, 8, 9), which is ABI-compatible.
+  The centre-tapped values are not part of M5; M6 appends only `ab_center_tapped = 7` (decision D19), which is
+  ABI-compatible.
 * **D13. Polarity through `clock`.** A `clock` attribute (`IntS`, not provided means 0) expresses the relative
   polarity: any value equal to 0 or 6 modulo 12 is accepted, 6 reverses the to winding; any other value raises
   `InvalidTransformerClock`. This covers phase-to-earth and phase-to-phase windings uniformly and keeps the enum
@@ -348,6 +349,68 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
   `uk_min`/`pk_min` only apply when `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided;
   otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The tap regulator stays
   "Later"; a `transformer_tap_regulator` on a `single_phase_transformer` raises `InvalidRegulatedObject`.
+
+Taken in M6, for the centre-tapped (split-phase) secondary of `single_phase_transformer` (all decided by Michael,
+2026-10-16):
+
+* **D19. One centre-tapped value, to side only.** `WindingConnection1P` gets only `ab_center_tapped = 7`, in C++ and
+  Python. The legs map to slots a and b and the split-phase node is always a node of its own, so `ac`/`bc` variants
+  would add test surface without a use; 8 and 9 stay unused (appending them later is ABI-compatible). The value is
+  only allowed on the to side: on the from side it raises `InvalidPhaseConnection` with the ID ("a centre-tapped
+  winding is only allowed on the to side"). 8, 9, 0 and `na` keep raising `MissingCaseForEnumError`. The primary is
+  any of `a`, `b`, `c`, `ab`, `ac`, `bc`, as in M5.
+* **D20. Half-winding impedances `uk_half` and `pk_half`** (optional). They are the short-circuit test between the
+  primary and *one* half, with the other half open, on the pair rating $\min(s_n, s_n/2) = s_n/2$ and the half
+  voltage $u_2/2$; the same convention as `three_winding_transformer`, whose `uk_12` is on
+  $\min(s_{n,1}, s_{n,2})$. In per unit on $s_n$ and the half voltage: $r_h = 4\,p_{k,half}/s_n$,
+  $|z_h| = 2\,u_{k,half}$ and $x_h = \operatorname{sgn}(u_{k,half})\sqrt{\max(|z_h|^2 - r_h^2, 0)}$.
+  * **Defaults.** Not provided, each follows the split of Kersting (and Hopkinson), which OpenDSS's own centre-tap
+    example uses: the primary $0.5R + j0.8X$ and each half $R + j0.4X$, in per unit on $s_n$, with $R + jX$ from
+    `uk`/`pk`. That gives $z_{half} = 1.5R + j1.2X$, so `pk_half` defaults to $0.375\,p_k$ and `uk_half` to
+    $\tfrac12|1.5R + j1.2X|$. The two default independently.
+  * **On a winding that is not centre-tapped,** a non-empty `uk_half`/`pk_half` raises `InvalidPhaseConnection`
+    ("… refers to a centre-tapped winding and must be left empty"), following D11: reject rather than ignore.
+  * **Valid ranges** (M9 Python rules; no C++ check, as `transformer` does not check `uk = 0` either):
+    `uk_half >= pk_half / (sn/2)`; `uk_half > uk/2` (otherwise the half branch $z_b$ is 0 or negative, and singular
+    at equality); `pk/4 <= pk_half <= pk/2` (non-negative branch resistances).
+* **D21. `u2`, `uk`, `pk` and `sn` describe the full winding.** `u2` is the full winding, end to end: 480 V for
+  240-0-240 V, consistent with D15 (the voltage across the connection terminals a-b). `uk`, `pk` and `sn` are the
+  full-winding nameplate: the primary against both halves in series, at rated `sn`. Each half is $u_2/2$. The
+  split-phase node has `u_rated` $= 240\sqrt3 = 415.692$ V, because each leg is 240 V to the earthed centre tap; the
+  nominal winding voltage implied by the node is therefore $2u_{rated}/\sqrt3$. M9 adds this form to the warning
+  rule of D15.
+* **D22. Earthing of the centre tap.** Solid by default, or through `r_grounding_to`/`x_grounding_to`, the M5
+  fields; not provided means solid. `r/x_grounding_from` follows the M5 rule for the primary. Caveat: PGM has no
+  neutral node, so wye loads on the split-phase node are leg-to-*true-earth*. With an electrode, the whole
+  out-of-balance load current therefore returns through the electrode. That is right for earth faults (the current
+  to true earth returns through the electrode) and pessimistic for loads with a neutral conductor (MEN). Loads to a
+  floating neutral are "Later".
+* **D23. Loading of a centre-tapped side:** $\max(|\sum_p s_{from,p}|,\ 2|s_{to,a}|,\ 2|s_{to,b}|)/s_n$. Each half
+  is rated $s_n/2$: for example 12.5 kVA per leg on a 25 kVA unit is rated current at 120 V. Balanced full load gives
+  1.0 on both sides, and all load on one leg at $s_n/2$ gives 1.0, where D17's $|s_a + s_b|$ would say 0.5. The
+  primary keeps D17.
+* **D24. Other points of the centre-tapped model.**
+  * **Taps** are allowed, as in M5. A to-side tap scales both halves ($u_2'/2$). The half branch $z_b$ is fixed at
+    the nominal tap and the primary branch takes the tap dependence of `uk`/`pk` (`uk_min/max`, `pk_min/max`):
+    $z_0 = z_f(tap) - z_b/2$, because the tap winding is physically on the primary. Without `uk_min/max` this is the
+    nominal split. There is no `uk_half_min/max`.
+  * **Clock** 0 or 6. Clock 6 reverses both halves, so $U_a$ and $U_b$ change sign; the phase shift gets $+\pi$
+    as in M5.
+  * **Low susceptance:** never on a centre-tapped side (the centre tap is earthed). A phase-to-phase primary keeps
+    it (D14).
+  * **Status.** With the from side open, the primary is eliminated (the Schur complement in the 3×3 primitive): the
+    halves stay coupled through $2z_b$, a **balancer**, which with $y_m = 0$ is
+    $\frac{1}{2z_b}\begin{bmatrix}1&-1\\-1&1\end{bmatrix}$ in half-winding per unit, not zero. This differs from
+    the "exactly 0" of a single connected M5 side, and is kept because it is physical. With the to side open, both
+    halves are eliminated; this is exactly 0 when $y_m$ is below `numerical_tolerance` (the M5 rule), and otherwise
+    the open-end shunt $\tfrac{y_m}{2} + (z_f + 2/y_m)^{-1}$ of M5.
+  * **Magnetising:** the $\pi$ convention extended to $\mathrm{diag}(y_m/2, y_m/4, y_m/4)$, in per unit on $s_n$
+    and the winding voltages. The two quarters at half voltage carry the same power as the secondary half of M5.
+    OpenDSS places it differently, so the OpenDSS cases use $i_0 = p_0 = 0$.
+  * **Short circuit at a split-phase node:** `single_phase_to_ground` on a or b (leg to earth, which is the centre
+    tap when it is solidly earthed), `two_phase` ab (480 V) and `two_phase_to_ground` ab are valid. `three_phase`,
+    and the default phases (bc for the two-phase faults), raise `InvalidShortCircuitPhases`.
+  * **480 V loads** wait for the delta loads of M7.
 
 ## Component models (phase domain)
 
@@ -419,8 +482,10 @@ clock number, and enforces three-phase winding types.
   single-phase transformer.
 * Tap fields, mirroring `transformer`, all optional (decision D18).
 * `from_connection` and `to_connection`, of a new enum `WindingConnection1P`
-  `{a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6}` (decision D12). The centre-tapped values are reserved for M6,
-  which appends them after `bc`; they will be allowed on the to side only.
+  `{a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6}` (decision D12), plus `ab_center_tapped = 7` for a centre-tapped
+  (split-phase) winding, on the to side only (M6, decision D19).
+* `uk_half`, `pk_half`: the short-circuit parameters between the primary and one half of a centre-tapped winding,
+  optional, only for a centre-tapped to side (decision D20).
 * `clock`: 0 or 6 (modulo 12); 6 reverses the polarity of the to winding (decision D13).
 * `r_grounding_from`, `x_grounding_from`, `r_grounding_to`, `x_grounding_to`: the impedance between the earthed
   winding terminal and true earth, only for a phase-to-earth winding (decision D14). For SWER this is the earth
@@ -502,18 +567,38 @@ M5:
   the charging current of the SWER line, so its magnitude is close to, but not equal to, that of the fault current
   (188.816 A against 188.876 A for a bolted fault at the end of the SWER line).
 
-**Centre-tapped (split-phase) secondary.**
+**Centre-tapped (split-phase) secondary** (M6; decisions D19-D24). A `to_connection` of `ab_center_tapped` makes
+the to winding a centre-tapped 240-0-240 V winding: half 1 from slot a to the centre tap $N$ and half 2 from $N$ to
+slot b. The centre tap is earthed directly or through `r/x_grounding_to`. The legs map to **slots a and b**, both
+measured to the earthed centre tap; slot c is absent. In normal operation $U_b \approx -U_a$; 240 V loads are wye
+`asym_load` on a or b, and 480 V loads are delta a-b (M7).
 
-* Model it as a three-winding single-phase transformer: primary, half 1 and half 2, in the Dugan/OpenDSS
-  N-winding form $Y_{prim} = A^{T} Z_B^{-1} A$.
-* Half 1 is $U_a - U_N$ and half 2 is $U_N - U_b$. The centre tap $N$ is earthed directly or through the earthing
-  impedance.
-* Split-phase legs map to **slots a and b**, both measured to the earthed centre tap. Slot c is absent.
-* In normal operation $U_b \approx -U_a$.
-  * 240 V loads are wye `asym_load` on a or b.
-  * 480 V loads are delta a-b.
-* The half-winding impedances default to the usual approximations, with optional `uk_half`/`pk_half` overrides.
-  Check them against Kersting, *Distribution System Modeling and Analysis*, and against OpenDSS.
+* **Three-winding model.** The primary (0) and the halves (1, 2) are three coupled windings in the Dugan/OpenDSS
+  N-winding form $Y = A^{T} Z_B^{-1} A$, with $A = \begin{bmatrix}1&-1&0\\1&0&-1\end{bmatrix}$ and
+  $Z_B = z_0\mathbf{1} + z_b I$, in per unit on $s_n$ and the winding voltages $V_0 = u_1'$, $V_1 = V_2 = u_2'/2$
+  (tap-adjusted as in the two-winding model).
+  * $z_f = r + jx$ from `uk'`/`pk'` is the full winding (primary against both halves in series), and $z_{hs}$ the
+    primary against one half, from `uk_half`/`pk_half` or the Kersting default $1.5r + j1.2x$ at the nominal tap
+    (decision D20).
+  * $z_b = 2(z_{hs} - z_{f,nom})$ is the branch of each half and $z_0 = z_f - z_b/2$ the branch of the primary, so
+    $z_b + 2z_0 = 2z_f$ always.
+  * In closed form: $Y_{00} = 1/z_f + y_m/2$, $Y_{01} = Y_{02} = -1/(2z_f)$,
+    $Y_{11} = Y_{22} = (z_0 + z_b)/(2z_bz_f) + y_m/4$ and $Y_{12} = -z_0/(2z_bz_f)$. Without $y_m$ every row sums
+    to 0. In siemens, $Y_{ij}\,s_n/(V_iV_j)$.
+  * Two self-checks: with the primary shorted and the other half open, a leg sees $z_{hs}(u_2/2)^2/s_n$ (plus the
+    earthing impedance of the centre tap); between a and b it sees $z_f u_2^2/s_n$. With $U_{to} = (v, -v, 0)$ the
+    model gives the same currents as an `ab` secondary with the same `u2`.
+* **Terminals.** The primary as in the two-winding model; half 1 is (+ slot a, − $N$) and half 2 (+ $N$, − slot b),
+  where $N$ is earth when the centre tap is solidly earthed and the electrode terminal otherwise. Clock 6 swaps both
+  pairs. The three windings are stamped on the 8-terminal nodal matrix, the electrode is eliminated with
+  `kron_eliminate`, and the blocks are scaled to per unit as before; slot c is exactly 0 by assignment.
+* **Phase shift.** $\varphi(\text{ab\_center\_tapped}) = 0$: the reference slot a is the positive terminal of half
+  1. So `phase_shift` $= -\varphi(\text{from}) + \text{clock}\cdot\pi/6$: 0 for `a` → ct and $-\pi/6$ for `ab` → ct.
+  The start values of slot b (180° from slot a, not 120°) come with the slot patterns of M6b.
+* **Status, magnetising, low susceptance, loading and taps** follow decisions D23 and D24: from side open gives the
+  balancer $\frac{1}{2z_b}\begin{bmatrix}1&-1\\-1&1\end{bmatrix}$; the magnetising admittance is
+  $\mathrm{diag}(y_m/2, y_m/4, y_m/4)$; a centre-tapped side has no low susceptance; each half is rated $s_n/2$;
+  and the half branch is fixed at the nominal tap.
 
 ### Phase-to-phase loads: `connection` on `asym_load` / `asym_gen`
 
