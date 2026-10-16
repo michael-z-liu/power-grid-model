@@ -11,6 +11,8 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
   reduced-phase-feeder, reduced-phase-feeder-linear, reduced-phase-symmetric-not-supported}
 - tests/data/state_estimation/reduced-phase-not-supported
 - tests/data/short_circuit/{asym-line-reduced-phase, asym-line-swer-a}
+- tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
+  missing-phase-for-winding}
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
 
@@ -30,6 +32,17 @@ Modelling choices:
   const_pq -> model=1, const_y -> model=2, const_i -> model=5; a generator is a load with negative power
 - a branch side with status 0 is connected to its own dummy bus in OpenDSS (the open-end pi model); PGM reports
   the isolated node and the open side as 0, so the reference writes 0 for them as well
+- single-phase transformers: a 1-phase, 2-winding wye-wye Transformer whose windings are on the winding phases
+  (node 0 for a solidly earthed phase-to-earth winding; the two nodes of the to side are swapped for clock 6) with
+  kVs = u1, u2, XHL and %loadloss from uk and pk, taps from the tap changer and ppm_antifloat=0. An earthing impedance
+  is a Reactor from node 4 of the bus (the earthed end of the winding) to earth. The cases use i0 = p0 = 0, since
+  OpenDSS places the magnetising branch differently from the pi model of PGM, and only from-side taps (both models
+  then keep the ohmic impedance on the to side). The low susceptance that PGM adds to earth on the two phases of a
+  phase-to-phase winding (about 1e-8 of sn / uk) is mirrored by a shunt Reactor whose power is added to that side of
+  the transformer; without it the transformer powers differ by about 5e-7 relative. Each transformer is first checked
+  on its own (open-circuit ratio and short-circuit impedance, so kVs are the winding voltages); node voltages,
+  winding powers (without the conductors at earth and at node 4) and the loading (the larger complex sum per side
+  divided by sn) are the reference
 """
 
 import json
@@ -193,6 +206,149 @@ class Load:
         return [sign * x for x in self.p], [sign * x for x in self.q]
 
 
+WINDING_CONNECTION = {"a": 1, "b": 2, "c": 3, "ab": 4, "ac": 5, "bc": 6}
+BRANCH_SIDE = {"from": 0, "to": 1}
+
+
+@dataclass
+class Transformer1P:
+    id: int
+    from_node: int
+    to_node: int
+    from_conn: str  # winding phases: "a", "b", "c" (phase-to-earth) or "ab", "ac", "bc" (phase-to-phase)
+    to_conn: str
+    u1: float  # winding voltages (V)
+    u2: float
+    sn: float
+    uk: float
+    pk: float
+    i0: float = 0.0
+    p0: float = 0.0
+    clock: int = 0
+    # earthing impedance of a phase-to-earth winding; None means solidly earthed
+    r_g_from: float | None = None
+    x_g_from: float | None = None
+    r_g_to: float | None = None
+    x_g_to: float | None = None
+    tap_pos: int | None = None
+    tap_nom: int | None = None
+    tap_min: int | None = None
+    tap_max: int | None = None
+    tap_size: float | None = None
+    tap_side: str | None = None  # "from" or "to"
+    from_status: int = 1
+    to_status: int = 1
+
+    def pgm(self):
+        result = {
+            "id": self.id,
+            "from_node": self.from_node,
+            "to_node": self.to_node,
+            "from_status": self.from_status,
+            "to_status": self.to_status,
+            "u1": self.u1,
+            "u2": self.u2,
+            "sn": self.sn,
+            "uk": self.uk,
+            "pk": self.pk,
+            "i0": self.i0,
+            "p0": self.p0,
+            "from_connection": WINDING_CONNECTION[self.from_conn],
+            "to_connection": WINDING_CONNECTION[self.to_conn],
+            "clock": self.clock,
+        }
+        optional = {
+            "tap_side": None if self.tap_side is None else BRANCH_SIDE[self.tap_side],
+            "tap_pos": self.tap_pos,
+            "tap_min": self.tap_min,
+            "tap_max": self.tap_max,
+            "tap_nom": self.tap_nom,
+            "tap_size": self.tap_size,
+            "r_grounding_from": self.r_g_from,
+            "x_grounding_from": self.x_g_from,
+            "r_grounding_to": self.r_g_to,
+            "x_grounding_to": self.x_g_to,
+        }
+        result.update({k: v for k, v in optional.items() if v is not None})
+        return result
+
+    def taps(self):
+        """OpenDSS taps (per unit of the winding voltage) of the from and to windings, as PGM applies them"""
+        if self.tap_pos is None or self.tap_size is None:
+            return 1.0, 1.0
+        nom = self.tap_nom or 0
+        lower = self.tap_min if self.tap_min is not None else min(self.tap_pos, nom)
+        upper = self.tap_max if self.tap_max is not None else max(self.tap_pos, nom)
+        direction = 1 if upper > lower else -1
+        offset = direction * (self.tap_pos - nom) * self.tap_size
+        if self.tap_side == "to":
+            return 1.0, (self.u2 + offset) / self.u2
+        return (self.u1 + offset) / self.u1, 1.0
+
+    def dss_parameters(self):
+        """the OpenDSS transformer definition without the buses"""
+        r_pct = 100.0 * self.pk / self.sn
+        x_pct = 100.0 * math.sqrt(self.uk**2 - (self.pk / self.sn) ** 2)
+        imag_pct = 100.0 * math.sqrt(self.i0**2 - (self.p0 / self.sn) ** 2)
+        t1, t2 = self.taps()
+        return (
+            f"conns=[wye wye] kVs=[{self.u1 / 1e3!r} {self.u2 / 1e3!r}] kVAs=[{self.sn / 1e3!r} {self.sn / 1e3!r}]"
+            f" XHL={x_pct!r} %loadloss={r_pct!r} %noloadloss={100.0 * self.p0 / self.sn!r} %imag={imag_pct!r}"
+            f" ppm_antifloat=0 taps=[{t1!r} {t2!r}]"
+        )
+
+    def low_susceptance(self, bus, conn, u_rated):
+        """PGM holds the common mode of a phase-to-phase winding with a small admittance to earth, -j b [[1, 1], [1, 1]]
+        on its two phases (in siemens, b = 0.5e-8 sn / uk / (u_rated / sqrt(3))^2, the analogue of the zero-sequence
+        low susceptance of transformer). The reference includes it as a shunt reactor with the X matrix of
+        b ([[1, 1], [1, 1]] + eps I) (eps = 1e-6, as the matrix itself is singular), so it is exact to 1e-6 of this
+        already negligible admittance."""
+        b = 0.5e-8 * self.sn / self.uk / (u_rated / math.sqrt(3.0)) ** 2
+        eps = 1e-6
+        x = np.array([[1.0 + eps, -1.0], [-1.0, 1.0 + eps]]) / (b * eps * (2.0 + eps))
+        nodes = "".join(f".{'abc'.index(p) + 1}" for p in conn)
+        return (
+            f"New Reactor.lo{self.id}{bus} phases=2 bus1={bus}{nodes} rmatrix={fmt_matrix(np.zeros((2, 2)))}"
+            f" xmatrix={fmt_matrix(x)}"
+        )
+
+    def dss_lines(self, u_from, u_to):
+        """the OpenDSS transformer, its earth electrodes and the low susceptance of its phase-to-phase windings; u_from
+        and u_to are the u_rated of the nodes"""
+        buses = []
+        shunts = []
+        for side, node, conn, r_g, x_g, status, u_rated in (
+            ("from", self.from_node, self.from_conn, self.r_g_from, self.x_g_from, self.from_status, u_from),
+            ("to", self.to_node, self.to_conn, self.r_g_to, self.x_g_to, self.to_status, u_to),
+        ):
+            bus = f"n{node}" if status else f"open_t{self.id}_{side}"
+            if len(conn) == 2:
+                assert r_g is None, "a phase-to-phase winding has no earthed terminal"
+                assert x_g is None, "a phase-to-phase winding has no earthed terminal"
+                terminals = ["abc".index(p) + 1 for p in conn]
+                if status:
+                    shunts.append(self.low_susceptance(bus, conn, u_rated))
+            elif r_g is None and x_g is None:
+                terminals = ["abc".index(conn) + 1, 0]
+            else:
+                # node 4 of the bus is the earthed end of the winding, connected to earth through the electrode; OpenDSS
+                # may treat a Reactor with X = 0 specially, so the cases use x > 0
+                assert x_g is not None, "use x_grounding > 0 for an electrode"
+                assert x_g > 0.0, "use x_grounding > 0 for an electrode"
+                terminals = ["abc".index(conn) + 1, 4]
+                shunts.append(
+                    f"New Reactor.g{self.id}{side} phases=1 bus1={bus}.4 bus2={bus}.0 R={r_g or 0.0!r} X={x_g or 0.0!r}"
+                )
+            if side == "to" and self.clock == 6:
+                # reversed polarity of the to-side winding
+                terminals.reverse()
+            buses.append(bus + "".join(f".{t}" for t in terminals))
+        return [
+            f"New Transformer.t{self.id} phases=1 windings=2 buses=[{buses[0]} {buses[1]}] {self.dss_parameters()}",
+            *shunts,
+        ]
+
+
 @dataclass
 class Fault:
     id: int
@@ -219,6 +375,12 @@ class Case:
     sk: float = 100e6
     rx_ratio: float = 0.1
     z01_ratio: float = 1.0
+    # u_rated per node where it differs from u_rated (the source node always has u_rated)
+    node_u_rated: dict[int, float] = field(default_factory=dict)
+    transformers: list = field(default_factory=list)
+
+    def u_node(self, node):
+        return self.node_u_rated.get(node, self.u_rated)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -227,7 +389,7 @@ class Case:
 
 def pgm_input(case: Case, fault: Fault | None):
     data = {
-        "node": [{"id": n, "u_rated": case.u_rated} for n in case.nodes],
+        "node": [{"id": n, "u_rated": case.u_node(n)} for n in case.nodes],
         "asym_line": [line.pgm() for line in case.lines],
         "source": [
             {
@@ -241,6 +403,8 @@ def pgm_input(case: Case, fault: Fault | None):
             }
         ],
     }
+    if case.transformers:
+        data["single_phase_transformer"] = [transformer.pgm() for transformer in case.transformers]
     for kind in ("sym_load", "asym_load", "asym_gen"):
         items = [load.pgm() for load in case.loads if load.kind == kind]
         if items:
@@ -327,11 +491,20 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
             f"New Line.l{line.id} phases={len(line.phases)} bus1={bus1}{nodes} bus2={bus2}{nodes} length=1 units=km"
             f" rmatrix={fmt_matrix(z.real)} xmatrix={fmt_matrix(z.imag)} cmatrix={fmt_matrix(c_nf)}"
         )
+    electrode_buses = [
+        node
+        for t in case.transformers
+        for node, r_g, x_g in ((t.from_node, t.r_g_from, t.x_g_from), (t.to_node, t.r_g_to, t.x_g_to))
+        if r_g is not None or x_g is not None
+    ]
+    assert len(electrode_buses) == len(set(electrode_buses)), "one electrode (node 4) per bus"
+    for transformer in case.transformers:
+        lines += transformer.dss_lines(case.u_node(transformer.from_node), case.u_node(transformer.to_node))
     if with_loads:
-        kv_phase = case.u_rated / math.sqrt(3.0) / 1e3
         for load in case.loads:
             if not load.status:
                 continue
+            kv_phase = case.u_node(load.node) / math.sqrt(3.0) / 1e3
             p, q = load.per_phase()
             for k in range(3):
                 if p[k] == 0.0 and q[k] == 0.0:
@@ -357,7 +530,8 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
             )
         else:
             raise NotImplementedError(fault.fault_type)
-    lines += [f"Set VoltageBases=[{kv!r}]", "CalcVoltageBases", "Set Tolerance=1e-12", "Set MaxIterations=200"]
+    bases = ", ".join(repr(u / 1e3) for u in sorted({case.u_node(n) for n in case.nodes}, reverse=True))
+    lines += [f"Set VoltageBases=[{bases}]", "CalcVoltageBases", "Set Tolerance=1e-12", "Set MaxIterations=200"]
     if fault is not None:
         lines.append("Set Mode=Snapshot")
     lines.append("Solve")
@@ -420,6 +594,60 @@ def check_kron_against_opendss(case: Case):
         print(f"  Kron check line {line.id}: OpenDSS LineCode agrees with numpy (max dev {dev:.1e} ohm)")
 
 
+def check_transformer(transformer: Transformer1P):
+    """sanity checks of the OpenDSS single-phase transformer on its own, fed with the from-side winding voltage:
+
+    - open circuit: the to-side winding voltage is u2 (times the tap ratio), so kVs are the winding voltages
+    - short circuit: the impedance seen from the from side is uk * u1^2 / sn (with pk / sn as the resistive part),
+      so the per-unit base of a phases=1 transformer is the winding voltage (and not, e.g., the voltage / sqrt(3))
+    """
+    assert transformer.i0 == 0.0, "the OpenDSS cases use i0 = p0 = 0, see the script"
+    assert transformer.p0 == 0.0, "the OpenDSS cases use i0 = p0 = 0, see the script"
+    assert transformer.tap_side in (None, "from"), "a to-side tap changes the ohmic impedance differently"
+    t1, t2 = transformer.taps()
+    u1 = transformer.u1
+    params = transformer.dss_parameters()
+    results = {}
+    for test, secondary in (("open", ""), ("short", "New Fault.short phases=1 bus1=sec.1 r=1e-9")):
+        dss.Basic.ClearAll()
+        for command in (
+            "Clear",
+            f"Set DefaultBaseFrequency={FREQ:g}",
+            f"New Circuit.t phases=1 basekv={u1 / 1e3!r} pu=1 angle=0 bus1=src.1 Z1=[0, 1e-9] Z0=[0, 1e-9]",
+            f"New Transformer.t phases=1 windings=2 buses=[src.1.0 sec.1.0] {params}",
+            secondary,
+            "Set VoltageBases=[1]",
+            "CalcVoltageBases",
+            "Set Tolerance=1e-12",
+            "Solve",
+        ):
+            if command:
+                dss.Text.Command(command)
+        assert dss.Solution.Converged()
+        dss.Circuit.SetActiveBus("src")
+        v1 = complex(*dss.Bus.Voltages()[:2])
+        dss.Circuit.SetActiveBus("sec")
+        v2 = complex(*dss.Bus.Voltages()[:2])
+        dss.Circuit.SetActiveElement("Transformer.t")
+        i1 = complex(*dss.CktElement.Currents()[:2])
+        results[test] = (v1, v2, i1)
+    v1, v2, _ = results["open"]
+    assert abs(abs(v1) / u1 - 1.0) < 1e-9, f"the 1-phase source is not at the winding voltage: {abs(v1)}"
+    ratio = v2 / v1
+    expected_ratio = transformer.u2 * t2 / (u1 * t1)
+    assert abs(ratio / expected_ratio - 1.0) < 1e-9, f"open-circuit ratio {ratio} instead of {expected_ratio}"
+    v1, _, i1 = results["short"]
+    z = v1 / i1
+    r_pu = transformer.pk / transformer.sn
+    z_to = complex(r_pu, math.sqrt(transformer.uk**2 - r_pu**2)) * transformer.u2**2 / transformer.sn
+    expected_z = z_to * (u1 * t1 / (transformer.u2 * t2)) ** 2
+    assert abs(z / expected_z - 1.0) < 1e-6, f"short-circuit impedance {z} instead of {expected_z}"
+    print(
+        f"  transformer {transformer.id}: open-circuit ratio and short-circuit impedance agree"
+        f" (dev {abs(ratio / expected_ratio - 1.0):.1e}, {abs(z / expected_z - 1.0):.1e})"
+    )
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # reference output
 
@@ -457,9 +685,9 @@ def isolated_nodes(case: Case):
     changed = True
     while changed:
         changed = False
-        for line in case.lines:
-            if line.from_status and line.to_status:
-                for a, b in ((line.from_node, line.to_node), (line.to_node, line.from_node)):
+        for branch in case.lines + case.transformers:
+            if branch.from_status and branch.to_status:
+                for a, b in ((branch.from_node, branch.to_node), (branch.to_node, branch.from_node)):
                     if a in energized and b not in energized:
                         energized.add(b)
                         changed = True
@@ -493,7 +721,32 @@ def pf_reference(case: Case):
                 "q_to": [float(v.imag) for v in s_to],
             }
         )
-    return {"node": nodes, "asym_line": lines}
+    result = {"node": nodes, "asym_line": lines}
+    if case.transformers:
+        result["single_phase_transformer"] = [transformer_pf_reference(t) for t in case.transformers]
+    return result
+
+
+def transformer_pf_reference(transformer: Transformer1P):
+    """per-phase powers of both windings (the conductors at earth and at the electrode are dropped) and the loading"""
+    s_from, s_to = terminal_values(f"Transformer.t{transformer.id}", dss.CktElement.Powers, 2)
+    # PGM includes the low susceptance of a phase-to-phase winding in the branch, so its power belongs to that side
+    for k, (node, conn) in enumerate(
+        ((transformer.from_node, transformer.from_conn), (transformer.to_node, transformer.to_conn))
+    ):
+        if len(conn) == 2 and (transformer.from_status, transformer.to_status)[k]:
+            s_low, _ = terminal_values(f"Reactor.lo{transformer.id}n{node}", dss.CktElement.Powers, 2)
+            (s_from if k == 0 else s_to)[:] += s_low
+    s_from = s_from * 1e3 if transformer.from_status else np.zeros(3, dtype=complex)
+    s_to = s_to * 1e3 if transformer.to_status else np.zeros(3, dtype=complex)
+    return {
+        "id": transformer.id,
+        "p_from": [float(v.real) for v in s_from],
+        "q_from": [float(v.imag) for v in s_from],
+        "p_to": [float(v.real) for v in s_to],
+        "q_to": [float(v.imag) for v in s_to],
+        "loading": float(max(abs(np.sum(s_from)), abs(np.sum(s_to))) / transformer.sn),
+    }
 
 
 def sc_reference(case: Case, fault: Fault):
@@ -570,6 +823,8 @@ def generate(case: Case, root: Path):
     if case.raises_only is not None:
         output_type, _ = case.raises_only
         component_ids = {"node": case.nodes, "asym_line": [line.id for line in case.lines]}
+        if case.transformers:
+            component_ids["single_phase_transformer"] = [t.id for t in case.transformers]
         write_json(
             target / f"{output_type}.json",
             output_dataset(output_type, {k: [{"id": i} for i in v] for k, v in component_ids.items()}),
@@ -577,6 +832,8 @@ def generate(case: Case, root: Path):
         return
 
     check_kron_against_opendss(case)
+    for transformer in case.transformers:
+        check_transformer(transformer)
 
     if case.calculation == "power_flow":
         script = dss_script(case, None, 1.0, with_loads=True)
@@ -676,6 +933,85 @@ def swer_lines():
         Line(102, 2, 3, "a", 10.0, swer=True),
         Line(103, 2, 4, "a", 5.0, swer=True, to_status=0),
     ]
+
+
+# u_rated of a node with 240 V phase-to-earth
+LV_U = 240.0 * math.sqrt(3.0)
+
+
+def swer_chain_case():
+    """22 kV abc -> isolating transformer ab -> a with an earth electrode -> SWER line -> distribution transformers"""
+    return Case(
+        path="power_flow/single-phase-transformer/swer-chain",
+        u_rated=SWER_U,
+        nodes=[1, 2, 3, 4, 5, 6],
+        node_u_rated={5: LV_U, 6: LV_U},
+        lines=[Line(101, 1, 2, "abc", 2.0), Line(102, 3, 4, "a", 20.0, swer=True)],
+        transformers=[
+            Transformer1P(151, 2, 3, "ab", "a", 22e3, 12.7e3, 200e3, 0.05, 2000.0, r_g_to=5.0, x_g_to=0.1),
+            Transformer1P(
+                152,
+                4,
+                5,
+                "a",
+                "a",
+                12.7e3,
+                240.0,
+                25e3,
+                0.04,
+                400.0,
+                tap_pos=1,
+                tap_nom=0,
+                tap_min=-2,
+                tap_max=2,
+                tap_size=0.025 * 12.7e3,
+                tap_side="from",
+            ),
+            Transformer1P(153, 3, 6, "a", "a", 12.7e3, 240.0, 10e3, 0.035, 180.0),
+        ],
+        loads=[
+            Load(301, 3, "asym_load", "const_pq", [30e3, 0.0, 0.0], [10e3, 0.0, 0.0]),
+            Load(302, 4, "asym_load", "const_pq", [40e3, 0.0, 0.0], [12e3, 0.0, 0.0]),
+            Load(303, 5, "asym_load", "const_pq", [12e3, 0.0, 0.0], [4e3, 0.0, 0.0]),
+            Load(304, 5, "asym_load", "const_y", [6e3, 0.0, 0.0], [2e3, 0.0, 0.0]),
+            Load(305, 6, "asym_load", "const_pq", [5e3, 0.0, 0.0], [1.5e3, 0.0, 0.0]),
+            Load(306, 6, "asym_load", "const_y", [3e3, 0.0, 0.0], [1e3, 0.0, 0.0]),
+        ],
+        # limited by the iterative_current convergence and by near-zero powers of phase c of line 101; no tolerance with
+        # atol <= 1e-6 passes with a 10x margin (rtol 1e-7, atol 1e-6 gives 0.103)
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-5),
+    )
+
+
+def phase_to_phase_case(path, all_const_y, methods):
+    """11 kV abc -> ab -> ab (415 V, floating common mode) and bc -> a with clock 6 (240 V)"""
+    if all_const_y:
+        loads = [
+            Load(301, 3, "asym_load", "const_y", [20e3, 12e3, 0.0], [5e3, 3e3, 0.0]),
+            Load(302, 4, "asym_load", "const_y", [15e3, 0.0, 0.0], [4e3, 0.0, 0.0]),
+        ]
+    else:
+        # the common mode of n3 is set by the loads only; OpenDSS cannot solve it when they are mostly const_pq (its
+        # fixed-point iteration ends on the constant-impedance fallback of the loads, or diverges), so most of the load
+        # at n3 is const_y, with a small const_pq part
+        loads = [
+            Load(301, 3, "asym_load", "const_y", [19e3, 11.5e3, 0.0], [4.75e3, 2.875e3, 0.0]),
+            Load(303, 3, "asym_load", "const_pq", [1e3, 0.5e3, 0.0], [0.25e3, 0.125e3, 0.0]),
+            Load(302, 4, "asym_load", "const_pq", [15e3, 0.0, 0.0], [4e3, 0.0, 0.0]),
+        ]
+    return Case(
+        path=path,
+        u_rated=11e3,
+        nodes=[1, 2, 3, 4],
+        node_u_rated={3: 415.0, 4: LV_U},
+        lines=[Line(101, 1, 2, "abc", 1.0)],
+        transformers=[
+            Transformer1P(151, 2, 3, "ab", "ab", 11e3, 415.0, 50e3, 0.04, 600.0),
+            Transformer1P(152, 2, 4, "bc", "a", 11e3, 240.0, 25e3, 0.04, 350.0, clock=6),
+        ],
+        loads=loads,
+        params=pf_params(methods, 1e-8, 1e-8),
+    )
 
 
 def small_reduced_case(path, raises_only, params):
@@ -793,6 +1129,34 @@ CASES = [
         calculation="short_circuit",
         params=SC_PARAMS,
         faults=[Fault(601, 3, "single_phase_to_ground", "a", 10.0)],
+    ),
+    swer_chain_case(),
+    # the floating common mode of n3 makes iterative_current diverge with const_pq loads, so only newton_raphson
+    phase_to_phase_case(
+        "power_flow/single-phase-transformer/phase-to-phase", all_const_y=False, methods="newton_raphson"
+    ),
+    phase_to_phase_case(
+        "power_flow/single-phase-transformer/phase-to-phase-linear",
+        all_const_y=True,
+        methods=["linear", "linear_current"],
+    ),
+    Case(
+        path="power_flow/single-phase-transformer/missing-phase-for-winding",
+        u_rated=SWER_U,
+        nodes=[1, 2, 3],
+        lines=[Line(101, 1, 2, "a", 5.0)],
+        transformers=[Transformer1P(151, 2, 3, "ab", "a", 22e3, 12.7e3, 200e3, 0.05, 2000.0)],
+        params={
+            "calculation_method": "newton_raphson",
+            "rtol": 1e-6,
+            "atol": 1e-4,
+            "experimental_features": "enabled",
+            "raises": {
+                "raises": "MissingPhaseForWinding",
+                "reason": "The ab winding of the single-phase transformer is at a node that only has phase a.",
+            },
+        },
+        raises_only=("asym_output", "MissingPhaseForWinding"),
     ),
 ]
 

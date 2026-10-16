@@ -1,0 +1,21 @@
+Clear
+Set DefaultBaseFrequency=50
+New Circuit.c phases=3 basekv=22.0 pu=1.0 angle=0 bus1=n1 Z1=[0.4815980000616348, 4.815980000616348] Z0=[0.4815980000616348, 4.815980000616348]
+New Line.l101 phases=3 bus1=n1.1.2.3 bus2=n2.1.2.3 length=1 units=km rmatrix=[0.5 | 0.1 0.5 | 0.096 0.1 0.5] xmatrix=[0.8 | 0.3 0.8 | 0.26 0.3 0.8] cmatrix=[18.0 | -3.0 18.4 | -2.4 -3.0 18.0]
+New Line.l102 phases=1 bus1=n3.1 bus2=n4.1 length=1 units=km rmatrix=[28.986960440108934] xmatrix=[16.971230962241698] cmatrix=[119.99999999999999]
+New Transformer.t151 phases=1 windings=2 buses=[n2.1.2 n3.1.4] conns=[wye wye] kVs=[22.0 12.7] kVAs=[200.0 200.0] XHL=4.8989794855663575 %loadloss=1.0 %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[1.0 1.0]
+New Reactor.lo151n2 phases=2 bus1=n2.1.2 rmatrix=[0.0 | 0.0 0.0] xmatrix=[4033335349998992.0 | -4033331316667676.0 4033335349998992.0]
+New Reactor.g151to phases=1 bus1=n3.4 bus2=n3.0 R=5.0 X=0.1
+New Transformer.t152 phases=1 windings=2 buses=[n4.1.0 n5.1.0] conns=[wye wye] kVs=[12.7 0.24] kVAs=[25.0 25.0] XHL=3.6660605559646724 %loadloss=1.6 %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[1.025 1.0]
+New Transformer.t153 phases=1 windings=2 buses=[n3.1.0 n6.1.0] conns=[wye wye] kVs=[12.7 0.24] kVAs=[10.0 10.0] XHL=3.001666203960727 %loadloss=1.8 %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[1.0 1.0]
+New Load.ld301_a bus1=n3.1 phases=1 conn=wye model=1 kV=12.701705922171769 kW=30.0 kvar=10.0 vminpu=0.1 vmaxpu=2
+New Load.ld302_a bus1=n4.1 phases=1 conn=wye model=1 kV=12.701705922171769 kW=40.0 kvar=12.0 vminpu=0.1 vmaxpu=2
+New Load.ld303_a bus1=n5.1 phases=1 conn=wye model=1 kV=0.24 kW=12.0 kvar=4.0 vminpu=0.1 vmaxpu=2
+New Load.ld304_a bus1=n5.1 phases=1 conn=wye model=2 kV=0.24 kW=6.0 kvar=2.0 vminpu=0.1 vmaxpu=2
+New Load.ld305_a bus1=n6.1 phases=1 conn=wye model=1 kV=0.24 kW=5.0 kvar=1.5 vminpu=0.1 vmaxpu=2
+New Load.ld306_a bus1=n6.1 phases=1 conn=wye model=2 kV=0.24 kW=3.0 kvar=1.0 vminpu=0.1 vmaxpu=2
+Set VoltageBases=[22.0, 0.4156921938165305]
+CalcVoltageBases
+Set Tolerance=1e-12
+Set MaxIterations=200
+Solve

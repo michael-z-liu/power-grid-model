@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {
+        "id": 1,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 2,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 3,
+        "u_rated": 22000.0
+      }
+    ],
+    "asym_line": [
+      {
+        "id": 101,
+        "from_node": 1,
+        "to_node": 2,
+        "from_status": 1,
+        "to_status": 1,
+        "phases": 1,
+        "r_aa": 1.25,
+        "x_aa": 2.0,
+        "c_aa": 4.5e-08
+      }
+    ],
+    "source": [
+      {
+        "id": 201,
+        "node": 1,
+        "status": 1,
+        "u_ref": 1.0,
+        "sk": 100000000.0,
+        "rx_ratio": 0.1,
+        "z01_ratio": 1.0
+      }
+    ],
+    "single_phase_transformer": [
+      {
+        "id": 151,
+        "from_node": 2,
+        "to_node": 3,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 22000.0,
+        "u2": 12700.0,
+        "sn": 200000.0,
+        "uk": 0.05,
+        "pk": 2000.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 4,
+        "to_connection": 1,
+        "clock": 0
+      }
+    ]
+  }
+}
