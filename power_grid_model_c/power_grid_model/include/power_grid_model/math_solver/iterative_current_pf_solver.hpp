@@ -95,6 +95,7 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     void initialize_derived_solver(YBus<sym> const& y_bus, PowerFlowInput<sym> const& input,
                                    SolverOutput<sym>& output) {
         this->make_average_source_start(input, output.u);
+        detail::apply_slot_patterns<sym>(y_bus.math_topology(), output.u);
         detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u);
 
         auto const& sources_per_bus = this->sources_per_bus_.get();

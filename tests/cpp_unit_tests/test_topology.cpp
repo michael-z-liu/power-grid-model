@@ -177,6 +177,11 @@ constexpr BranchPhaseIncidence pp(PhaseMask mask) {
 constexpr BranchPhaseIncidence winding(PhaseMask from, PhaseMask to) {
     return {.from = from, .to = to, .coupling = PhaseCoupling::winding};
 }
+// winding branch with a centre-tapped (split-phase) to side
+constexpr BranchPhaseIncidence winding_ct(PhaseMask from) {
+    return {
+        .from = from, .to = phase_mask_ab, .coupling = PhaseCoupling::winding, .to_pattern = SlotPattern::split_phase};
+}
 
 struct PhaseTestBranch {
     BranchIdx nodes;
@@ -230,6 +235,11 @@ std::vector<std::string> node_phase_letters(TopologyResult const& result, std::v
 }
 
 using Letters = std::vector<std::string>;
+
+SlotPattern node_slot_pattern(TopologyResult const& result, Idx node) {
+    auto const [group, pos] = result.second->node[static_cast<size_t>(node)];
+    return result.first[static_cast<size_t>(group)]->slot_pattern(pos);
+}
 
 double node_phase_shift(TopologyResult const& result, Idx node) {
     auto const [group, pos] = result.second->node[static_cast<size_t>(node)];
@@ -477,6 +487,7 @@ TEST_CASE("Test topology") {
             CHECK(math.n_bus() == math_ref.n_bus());
             CHECK_FALSE(math.has_reduced_phase);
             CHECK(math.bus_phase_mask.empty());
+            CHECK(math.bus_slot_pattern.empty());
             check_equal(math.sources_per_bus, math_ref.sources_per_bus);
             CHECK(math.branch_bus_idx == math_ref.branch_bus_idx);
             CHECK(math.phase_shift == math_ref.phase_shift);
@@ -531,6 +542,7 @@ TEST_CASE("Test topology phase mask") {
         for (size_t i = 0; i < math.size(); i++) {
             CHECK_FALSE(math[i]->has_reduced_phase);
             CHECK(math[i]->bus_phase_mask.empty());
+            CHECK(math[i]->bus_slot_pattern.empty());
             CHECK(math[i]->slack_bus == math_ref[i]->slack_bus);
             CHECK(math[i]->n_bus() == math_ref[i]->n_bus());
             CHECK(math[i]->phase_shift == math_ref[i]->phase_shift);
@@ -546,7 +558,9 @@ TEST_CASE("Test topology phase mask") {
         REQUIRE(result.first.size() == 1);
         CHECK_FALSE(result.first[0]->has_reduced_phase);
         CHECK(result.first[0]->bus_phase_mask.empty());
+        CHECK(result.first[0]->bus_slot_pattern.empty());
         CHECK(node_phase(result, 2) == phase_mask_abc);
+        CHECK(node_slot_pattern(result, 2) == SlotPattern::three_phase);
     }
 
     SUBCASE("Per phase branches restrict the phases of the far bus") {
@@ -561,6 +575,7 @@ TEST_CASE("Test topology phase mask") {
         REQUIRE(result.first.size() == 1);
         CHECK(result.first[0]->has_reduced_phase);
         CHECK(result.first[0]->bus_phase_mask.size() == 4);
+        CHECK(result.first[0]->bus_slot_pattern == std::vector<SlotPattern>(4, SlotPattern::three_phase));
         CHECK(node_phase_letters(result, {0, 1, 2, 3}) == Letters{"abc", "a", "a", "abc"});
     }
 
@@ -896,6 +911,133 @@ TEST_CASE("Test topology single-phase transformer windings") {
         CHECK(node_phase_shift(result, 1) == doctest::Approx(pi / 6.0));
         CHECK(node_phase_shift(result, 2) == doctest::Approx(pi / 6.0));
         CHECK(node_phase_shift(result, 3) == doctest::Approx(pi / 6.0 - pi));
+    }
+}
+
+TEST_CASE("Test topology centre-tapped split-phase slot patterns") {
+    using enum SlotPattern;
+    // the split-phase pattern of a centre-tapped winding spreads along per-phase branches and links, never through a
+    // winding, and only holds at nodes without phase c
+    SUBCASE("A phase-to-earth primary feeds a split-phase node") {
+        PhaseTestNetwork const network{2, {0}, {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a)}}};
+        auto const result = network.build();
+        REQUIRE(result.first.size() == 1);
+        CHECK(result.first[0]->bus_slot_pattern.size() == 2);
+        CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "ab"});
+        CHECK(node_slot_pattern(result, 0) == three_phase);
+        CHECK(node_slot_pattern(result, 1) == split_phase);
+    }
+    SUBCASE("An ab line off a split-phase node is split") {
+        PhaseTestNetwork const network{3,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_bc)},
+                                        {.nodes = {1, 2}, .incidence = pp(phase_mask_ab)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "ab", "ab"});
+        CHECK(node_slot_pattern(result, 1) == split_phase);
+        CHECK(node_slot_pattern(result, 2) == split_phase);
+    }
+    SUBCASE("A single-leg line off a split-phase node is split") {
+        // the line is fed from the to side of a second line, so the pattern also spreads against the branch direction
+        PhaseTestNetwork const network{4,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {3, 1}, .incidence = pp(phase_mask_b)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2, 3}) == Letters{"abc", "ab", "a", "b"});
+        CHECK(node_slot_pattern(result, 2) == split_phase);
+        CHECK(node_slot_pattern(result, 3) == split_phase);
+    }
+    SUBCASE("A winding off a split-phase node blocks the pattern") {
+        PhaseTestNetwork const network{3,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = winding(phase_mask_a, phase_mask_a)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "ab", "a"});
+        CHECK(node_slot_pattern(result, 1) == split_phase);
+        CHECK(node_slot_pattern(result, 2) == three_phase);
+    }
+    SUBCASE("A centre-tapped to side at a node that is also fed three-phase stays three-phase") {
+        // node 1 is abc through the line from the source; the a lines to nodes 2 and 3 make the math model reduced
+        PhaseTestNetwork const network{4,
+                                       {0},
+                                       {{.nodes = {0, 1}},
+                                        {.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a)},
+                                        {.nodes = {1, 2}, .incidence = pp(phase_mask_a)},
+                                        {.nodes = {0, 3}, .incidence = pp(phase_mask_a)}}};
+        auto const result = network.build();
+        REQUIRE(result.first[0]->has_reduced_phase);
+        CHECK(node_phase_letters(result, {0, 1, 2, 3}) == Letters{"abc", "abc", "a", "a"});
+        CHECK(node_slot_pattern(result, 1) == three_phase);
+        // a three-phase node does not pass the pattern on
+        CHECK(node_slot_pattern(result, 2) == three_phase);
+        CHECK(node_slot_pattern(result, 3) == three_phase);
+    }
+    SUBCASE("The pattern does not leak through a three-phase node into another lateral") {
+        // 0 (abc) -abc- 1 (abc) -a/ct- 2 (ab); node 0 also feeds an a lateral to node 3, which stays three-phase
+        // although the per-phase arcs link it to the split-phase node 2 through nodes 1 and 0
+        PhaseTestNetwork const network{4,
+                                       {0},
+                                       {{.nodes = {0, 1}},
+                                        {.nodes = {1, 2}, .incidence = winding_ct(phase_mask_a)},
+                                        {.nodes = {2, 1}, .incidence = pp(phase_mask_ab)},
+                                        {.nodes = {0, 3}, .incidence = pp(phase_mask_a)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2, 3}) == Letters{"abc", "abc", "ab", "a"});
+        CHECK(node_slot_pattern(result, 2) == split_phase);
+        CHECK(node_slot_pattern(result, 1) == three_phase);
+        CHECK(node_slot_pattern(result, 3) == three_phase);
+    }
+    SUBCASE("A link carries the pattern") {
+        PhaseTestNetwork const network{
+            3,
+            {0},
+            {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a)}, {.nodes = {1, 2}, .incidence = link_incidence}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1, 2}) == Letters{"abc", "ab", "ab"});
+        CHECK(node_slot_pattern(result, 2) == split_phase);
+    }
+    SUBCASE("A disconnected to side does not seed the pattern") {
+        // node 1 is fed by the ab line only
+        PhaseTestNetwork const network{2,
+                                       {0},
+                                       {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_a), .connected = {1, 0}},
+                                        {.nodes = {0, 1}, .incidence = pp(phase_mask_ab)}}};
+        auto const result = network.build();
+        CHECK(node_phase_letters(result, {0, 1}) == Letters{"abc", "ab"});
+        CHECK(node_slot_pattern(result, 1) == three_phase);
+    }
+    SUBCASE("Missing winding phases (D1)") {
+        SUBCASE("A phase-to-phase primary at a single-phase node") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_a)},
+                                      {.nodes = {1, 2}, .incidence = winding_ct(phase_mask_ab)}}};
+            network.comp_conn.branch_id = {10, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), MissingPhaseForWinding);
+        }
+        SUBCASE("A centre-tapped to side at a node without a and b") {
+            PhaseTestNetwork network{3,
+                                     {0},
+                                     {{.nodes = {0, 1}, .incidence = pp(phase_mask_c)},
+                                      {.nodes = {2, 1}, .incidence = winding_ct(phase_mask_a)}}};
+            network.comp_conn.branch_id = {10, 42};
+            CHECK_THROWS_WITH_AS(network.build(), doctest::Contains("branch with ID 42"), MissingPhaseForWinding);
+        }
+    }
+    SUBCASE("The phase shift of a centre-tapped winding accumulates") {
+        // ab -> ct: theta_from - theta_to = 0 - pi/6
+        PhaseTestNetwork const network{
+            3,
+            {0},
+            {{.nodes = {0, 1}, .incidence = winding_ct(phase_mask_ab), .phase_shift = -pi / 6.0},
+             {.nodes = {1, 2}, .incidence = pp(phase_mask_ab)}}};
+        auto const result = network.build();
+        CHECK(node_phase_shift(result, 1) == doctest::Approx(pi / 6.0));
+        CHECK(node_phase_shift(result, 2) == doctest::Approx(pi / 6.0));
+        CHECK(node_slot_pattern(result, 2) == split_phase);
     }
 }
 

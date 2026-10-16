@@ -58,6 +58,24 @@ inline void mask_absent_phase_values(MathModelTopology const& topo, ComplexValue
     }
 }
 
+// start values only: give each split-phase bus (the legs of a centre-tapped winding, see SlotPattern) its 180 degree
+// pattern, U_b = -U_a, instead of the 120 degree pattern of a three-phase start; slot a already carries the reference
+// angle plus the phase shift of the bus, and slot c is left to mask_absent_phase_values
+// no-op for a symmetric calculation or if all buses have all phases
+template <symmetry_tag sym> inline void apply_slot_patterns(MathModelTopology const& topo, ComplexValueVector<sym>& u) {
+    if constexpr (!is_symmetric_v<sym>) {
+        if (!topo.has_reduced_phase) {
+            return;
+        }
+        assert(std::ssize(u) == topo.n_bus());
+        for (Idx bus = 0; bus != topo.n_bus(); ++bus) {
+            if (topo.slot_pattern(bus) == SlotPattern::split_phase) {
+                u[bus](1) = -u[bus](0);
+            }
+        }
+    }
+}
+
 // the value with its absent phase slots set to exactly zero; the value itself if the bus has all phases
 template <symmetry_tag sym>
 inline ComplexValue<sym> absent_phases_masked(ComplexValue<sym> value, [[maybe_unused]] PhaseMask phases) {

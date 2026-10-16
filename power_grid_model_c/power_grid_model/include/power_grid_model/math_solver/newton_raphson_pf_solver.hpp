@@ -267,9 +267,12 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             using enum CalculationInitialization;
         case flat:
             make_flat_start(input, output.u);
+            // the linear start solves the network, so only the flat and average-source starts need the slot patterns
+            detail::apply_slot_patterns<sym>(y_bus.math_topology(), output.u);
             break;
         case average_source:
             this->make_average_source_start(input, output.u);
+            detail::apply_slot_patterns<sym>(y_bus.math_topology(), output.u);
             break;
         default:
             make_linear_start(y_bus, input, output.u);

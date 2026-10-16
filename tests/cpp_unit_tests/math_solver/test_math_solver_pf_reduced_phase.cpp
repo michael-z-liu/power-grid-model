@@ -18,6 +18,7 @@
 #include <power_grid_model/common/exception.hpp>
 #include <power_grid_model/common/grouped_index_vector.hpp>
 #include <power_grid_model/common/three_phase_tensor.hpp>
+#include <power_grid_model/math_solver/common_solver_functions.hpp>
 #include <power_grid_model/math_solver/iterative_current_pf_solver.hpp>
 #include <power_grid_model/math_solver/linear_pf_solver.hpp>
 #include <power_grid_model/math_solver/math_solver.hpp>
@@ -147,6 +148,7 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
                                                  IdxVector(static_cast<size_t>(2 * n_load_per_bus + 1), 0)};
     grid.topo.has_reduced_phase = true;
     grid.topo.bus_phase_mask = {phase_mask_abc, rpc.mask1};
+    grid.topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::three_phase};
 
     // parameters
     grid.param.branch_param = {{rpc.y_branch, -rpc.y_branch, -rpc.y_branch, rpc.y_branch}};
@@ -314,6 +316,7 @@ MathModelTopology make_meshed_topo(bool const_y_only, bool with_regulator) {
                                             with_regulator ? IdxVector{0, 0, 0, 0, 0, 1} : IdxVector{0, 0, 0, 0, 0, 0}};
     topo.has_reduced_phase = true;
     topo.bus_phase_mask = {phase_mask_a, phase_mask_abc, phase_mask_abc, phase_mask_abc};
+    topo.bus_slot_pattern.assign(4, SlotPattern::three_phase);
     return topo;
 }
 
@@ -475,6 +478,7 @@ TEST_CASE_TEMPLATE("Test math solver - PF with absent phases", SolverCaseType, N
             if (reduced) {
                 topo.has_reduced_phase = true;
                 topo.bus_phase_mask = {phase_mask_abc, phase_mask_a};
+                topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::three_phase};
             }
             return topo;
         };
@@ -527,6 +531,7 @@ TEST_CASE_TEMPLATE("Test math solver - PF with all phases flagged as reduced is 
     MathModelTopology topo_flagged = grid.topo();
     topo_flagged.has_reduced_phase = true;
     topo_flagged.bus_phase_mask.assign(static_cast<size_t>(topo_flagged.n_bus()), phase_mask_abc);
+    topo_flagged.bus_slot_pattern.assign(static_cast<size_t>(topo_flagged.n_bus()), SlotPattern::three_phase);
 
     YBus<asymmetric_t> const y_bus_ref{topo_ref, grid.param()};
     YBus<asymmetric_t> const y_bus_flagged{topo_flagged, grid.param()};
@@ -606,6 +611,7 @@ TEST_CASE("Test math solver - PF with absent phases rejects voltage regulation")
     topo.voltage_regulators_per_load_gen = {from_sparse, {0, 1}};
     topo.has_reduced_phase = true;
     topo.bus_phase_mask = {phase_mask_abc, phase_mask_a};
+    topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::three_phase};
 
     MathModelParam<asymmetric_t> param;
     Tensor const y_branch = single_phase_branch({10.0, -20.0});
@@ -635,6 +641,65 @@ TEST_CASE("Test math solver - PF with absent phases rejects voltage regulation")
         REQUIRE_NOTHROW(output = solver.run_power_flow(y_bus, input(0), 1e-12, 20, cache_run, log));
         CHECK(output.u[1](1) == 0.0);
         CHECK(output.u[1](2) == 0.0);
+    }
+}
+
+TEST_CASE("Test math solver - split-phase slot patterns of the start values") {
+    // bus0 abc; bus1 ab behind a centre-tapped winding (split); bus2 a, a leg line off bus1 (split); bus3 ab behind a
+    // phase-to-phase winding (three_phase)
+    MathModelTopology topo;
+    topo.phase_shift = {0.0, -0.4, -0.4, 0.7};
+    topo.has_reduced_phase = true;
+    topo.bus_phase_mask = {phase_mask_abc, phase_mask_ab, phase_mask_a, phase_mask_ab};
+    topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::split_phase, SlotPattern::split_phase,
+                             SlotPattern::three_phase};
+    // a three-phase start: the reference angle plus the phase shift of each bus, 120 degrees between the slots
+    DoubleComplex const u_ref_start = std::polar(1.02, 0.1);
+    ComplexValueVector<asymmetric_t> start;
+    for (double const shift : topo.phase_shift) {
+        start.emplace_back(u_ref_start * std::exp(1.0i * shift));
+    }
+    auto const check_unchanged = [&start](ComplexValueVector<asymmetric_t> const& u, Idx bus) {
+        for (Idx phase = 0; phase != 3; ++phase) {
+            CHECK(u[bus](phase) == start[bus](phase));
+        }
+    };
+
+    SUBCASE("Slot b of a split-phase bus is opposite to slot a; slot c is left to the mask") {
+        ComplexValueVector<asymmetric_t> u = start;
+        detail::apply_slot_patterns<asymmetric_t>(topo, u);
+        check_unchanged(u, 0);
+        check_unchanged(u, 3);
+        for (Idx const bus : {1, 2}) {
+            CAPTURE(bus);
+            CHECK(u[bus](0) == start[bus](0));
+            CHECK(u[bus](1) == -start[bus](0));
+            CHECK(u[bus](2) == start[bus](2));
+            CHECK(std::abs(std::arg(u[bus](1) / u[bus](0))) == doctest::Approx(pi));
+        }
+        detail::mask_absent_phase_values<asymmetric_t>(topo, u);
+        CHECK(u[1](1) == -start[1](0));
+        CHECK(u[1](2) == 0.0);
+        CHECK(u[2](1) == 0.0);
+        CHECK(u[2](2) == 0.0);
+    }
+
+    SUBCASE("No-op without reduced phases") {
+        // the accessor ignores the pattern vector when the flag is off
+        MathModelTopology topo_full = topo;
+        topo_full.has_reduced_phase = false;
+        ComplexValueVector<asymmetric_t> u = start;
+        detail::apply_slot_patterns<asymmetric_t>(topo_full, u);
+        for (Idx bus = 0; bus != topo.n_bus(); ++bus) {
+            check_unchanged(u, bus);
+        }
+    }
+
+    SUBCASE("No-op for a symmetric calculation") {
+        ComplexValueVector<symmetric_t> const start_sym(4, u_ref_start);
+        ComplexValueVector<symmetric_t> u_sym = start_sym;
+        detail::apply_slot_patterns<symmetric_t>(topo, u_sym);
+        CHECK(u_sym == start_sym);
     }
 }
 

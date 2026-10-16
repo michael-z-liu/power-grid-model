@@ -14,6 +14,7 @@ from power_grid_model._core.power_grid_meta import initialize_array
 from power_grid_model.enum import (
     AngleMeasurementType,
     BranchSide,
+    CalculationInitialization,
     CalculationMethod,
     FaultPhase,
     FaultType,
@@ -40,6 +41,7 @@ from power_grid_model.errors import (
     InvalidMeasuredObject,
     InvalidPhaseConnection,
     InvalidRegulatedObject,
+    InvalidShortCircuitPhaseOrType,
     InvalidTransformerClock,
     IterationDiverge,
     LoadGenOnAbsentPhase,
@@ -1100,3 +1102,92 @@ def test_single_phase_transformer_status_batch():
     assert np.all(i_from[[0, 2, 4]] > 0.0)
     assert np.all(batch_result[CT.node][AT.u][[1, 2, 3], 1] == 0.0)
     assert np.all(batch_result[CT.node][AT.u][[0, 4], 1, 0] > 0.0)
+
+
+def _split_phase_input():
+    """node 0 (abc, 22 kV, source) -- single_phase_transformer 400 a -> ab_center_tapped (12.7 kV / 240-0-240 V,
+    solidly earthed centre tap) -- node 1 (split phase, u_rated 240 sqrt3) with unbalanced loads on the legs a and b"""
+    input_data = _single_phase_transformer_input()
+    input_data[CT.node][AT.u_rated] = [22e3, 240.0 * np.sqrt(3.0)]
+    transformer_input = input_data[CT.single_phase_transformer]
+    transformer_input[AT.u1] = [22e3 / np.sqrt(3.0)]
+    transformer_input[AT.u2] = [480.0]
+    transformer_input[AT.sn] = [25e3]
+    transformer_input[AT.pk] = [400.0]
+    transformer_input[AT.from_connection] = [WindingConnection1P.a]
+    transformer_input[AT.to_connection] = [WindingConnection1P.ab_center_tapped]
+    transformer_input[AT.r_grounding_to] = [np.nan]
+    input_data[CT.asym_load][AT.p_specified] = [[8e3, 2e3, 0.0]]
+    input_data[CT.asym_load][AT.q_specified] = [[2e3, 0.5e3, 0.0]]
+    return input_data
+
+
+@pytest.mark.parametrize(
+    ("calculation_method", "calculation_initialization"),
+    [
+        (CalculationMethod.newton_raphson, CalculationInitialization.default),
+        (CalculationMethod.newton_raphson, CalculationInitialization.flat),
+        (CalculationMethod.newton_raphson, CalculationInitialization.average_source),
+        (CalculationMethod.iterative_current, CalculationInitialization.default),
+    ],
+)
+def test_single_phase_transformer_center_tapped(calculation_method, calculation_initialization):
+    model = PowerGridModelWithExt(_split_phase_input())
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False,
+        calculation_method=calculation_method,
+        calculation_initialization=calculation_initialization,
+        experimental_features=_ExperimentalFeatures.enabled,
+    )
+    u = result[CT.node][AT.u][1]
+    u_angle = result[CT.node][AT.u_angle][1]
+    # the legs of the split-phase node are close to opposite, leg a is loaded more, and there is no phase c
+    assert 0.0 < u[0] < u[1]
+    assert u[2] == 0.0
+    leg_angle = np.remainder(u_angle[1] - u_angle[0], 2.0 * np.pi)
+    assert leg_angle == pytest.approx(np.pi, abs=0.05)
+
+    # each half is rated sn / 2
+    transformer = result[CT.single_phase_transformer]
+    s_from = np.sum(transformer[AT.p_from][0] + 1j * transformer[AT.q_from][0])
+    s_to = transformer[AT.p_to][0] + 1j * transformer[AT.q_to][0]
+    assert s_to[2] == 0.0
+    expected_loading = max(abs(s_from), 2.0 * abs(s_to[0]), 2.0 * abs(s_to[1])) / 25e3
+    assert transformer[AT.loading][0] == pytest.approx(expected_loading, rel=1e-12)
+    assert transformer[AT.loading][0] == pytest.approx(2.0 * abs(s_to[0]) / 25e3, rel=1e-12)
+
+
+def test_single_phase_transformer_center_tapped_invalid_input():
+    input_data = _split_phase_input()
+    input_data[CT.single_phase_transformer][AT.from_connection] = [WindingConnection1P.ab_center_tapped]
+    with pytest.raises(InvalidPhaseConnection, match="only allowed on the to side"):
+        PowerGridModel(input_data)
+
+    # uk_half and pk_half only apply to a centre-tapped winding
+    for attribute in (AT.uk_half, AT.pk_half):
+        input_data = _single_phase_transformer_input()
+        input_data[CT.single_phase_transformer][attribute] = [0.03]
+        with pytest.raises(InvalidPhaseConnection, match=attribute):
+            PowerGridModel(input_data)
+
+
+def test_single_phase_transformer_center_tapped_short_circuit():
+    enabled = _ExperimentalFeatures.enabled
+    input_data = _split_phase_input()
+    fault_input = initialize_array(DatasetType.input, CT.fault, 1)
+    fault_input[AT.id] = [600]
+    fault_input[AT.status] = [1]
+    fault_input[AT.fault_type] = [FaultType.two_phase]
+    fault_input[AT.fault_phase] = [FaultPhase.ab]
+    fault_input[AT.fault_object] = [1]
+    input_data[CT.fault] = fault_input
+    sc_result = PowerGridModelWithExt(input_data).calculate_short_circuit_with_ext(experimental_features=enabled)
+    i_f = sc_result[CT.fault][AT.i_f][0]
+    assert i_f[0] > 0.0
+    assert i_f[1] == pytest.approx(i_f[0])
+    assert i_f[2] == 0.0
+
+    # the default phases of a two-phase fault are bc, and the split-phase node has no phase c
+    input_data[CT.fault][AT.fault_phase] = [FaultPhase.default_value]
+    with pytest.raises(InvalidShortCircuitPhaseOrType, match="not all present at the faulted node"):
+        PowerGridModelWithExt(input_data).calculate_short_circuit_with_ext(experimental_features=enabled)

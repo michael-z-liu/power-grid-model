@@ -134,8 +134,9 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
   * `std::vector<PhaseMask> bus_phase_mask`: one entry per bus.
   * `bool has_reduced_phase`: a fast-path flag. When it is false the mask stays empty and nothing below runs.
     Read the mask through `bus_phase(bus)`, which returns abc when the flag is false.
-  * `bus_slot_angle` (see [Initial voltages](#initial-voltages)) is not part of the topology milestone and is added
-    together with the start values (M6).
+  * `std::vector<SlotPattern> bus_slot_pattern` (see [Initial voltages](#initial-voltages)) is not part of the
+    topology milestone; it was added together with the start values in M6 (decision D25). It is filled exactly when
+    `bus_phase_mask` is, and read through `slot_pattern(bus)`, which returns `three_phase` when the flag is false.
 * **Incidence per branch.** A virtual `Edge::phase_incidence()` returns a `BranchPhaseIncidence`: the non-earth
   terminals at the from and to side, plus the coupling. `per_phase` couples slot k on one side to slot k on the other
   (line-like, both sides equal). `winding` couples all terminals of a side through a winding (transformer-like). It
@@ -179,8 +180,8 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 |------|--------|
 | Y-bus (`<core>/math_solver/y_bus.hpp`, `update_admittance_entries`) | Asymmetric only. **Mask, then identity:** every entry $(i, j)$ becomes $M_i Y_{ij} M_j$, and on the diagonal $(p, p)$ is *overwritten* with 1 for each absent `p`. Adding 1.0 would only be correct if every contribution were exactly zero on absent slots, which sequence-based shunts (mutual terms) and legacy links (1e6 on the diagonal) break. With masking, each absent row is exactly $e_p$ whatever the component data. The incremental update path reuses the same function. Branch and shunt flows are masked by the phases of the bus they flow into. Masking is by assignment, never by multiplication, so a NaN in an absent slot is discarded too. The identity rows are part of `YBus::admittance()` (decision D8). |
 | Newton-Raphson (`newton_raphson_pf_solver.hpp`) | New `apply_absent_phase_constraints()`, called after `apply_pv_constraints()`. For each absent slot it zeroes the P and Q rows in all entries of the bus row, sets $H(p,p) = L(p,p) = 1$ and sets the mismatch to 0. The update keeps $V_p = 0$ and never divides by it. A PV bus (voltage regulator) on a bus without all phases raises `ReducedPhaseNotSupported`. |
-| Newton-Raphson starts | The flat, average-source and linear starts mask the initial voltage of absent slots to exactly 0. The linear start also masks the load admittance per bus. Slot angles (`bus_slot_angle`) come with the split-phase work (M6). |
-| Iterative current (`iterative_current_pf_solver.hpp`) | Mask the initial voltage and, after the load and source loop, the right-hand side (which holds `conj(s/0)` = NaN on absent slots). The prefactorised matrix already has the identity rows. `linear_current` is covered as well. |
+| Newton-Raphson starts | The flat, average-source and linear starts mask the initial voltage of absent slots to exactly 0. The linear start also masks the load admittance per bus. Since M6 the flat and average-source starts first apply the slot patterns (`bus_slot_pattern`, decision D25), so that slot b of a split-phase bus starts opposite to slot a. |
+| Iterative current (`iterative_current_pf_solver.hpp`) | Apply the slot patterns (decision D25) to the average-source start, then mask the initial voltage and, after the load and source loop, the right-hand side (which holds `conj(s/0)` = NaN on absent slots). The prefactorised matrix already has the identity rows. `linear_current` is covered as well. |
 | Linear power flow (`common_solver_functions.hpp`, `add_linear_loads`) | The load admittance $-\overline{s}$ is masked per bus. Otherwise it would be added to the identity on absent slots and give $(1 - \overline{s_p}) U_p = 0$, which is singular for $s_p = 1$. |
 | Results (`common_solver_functions.hpp`) | The load/gen `s` and `i` (`conj(s/u)`) are set to 0 on absent slots. Bus injection is exactly 0 there because $U_p = 0$. |
 | Short circuit (`short_circuit_solver.hpp`) | The Y-bus identity carries through `copy_y_bus`. Fault substitution only touches fault phases. In a reduced-phase model the solver checks that the fault phases are present at the faulted bus and raises `InvalidShortCircuitPhases` otherwise, so a three-phase fault, or a fault on an absent phase, at a reduced bus is rejected instead of silently giving zero fault current. The ID-based check in input preparation follows in M8. |
@@ -412,6 +413,52 @@ Taken in M6, for the centre-tapped (split-phase) secondary of `single_phase_tran
     and the default phases (bc for the two-phase faults), raise `InvalidShortCircuitPhases`.
   * **480 V loads** wait for the delta loads of M7.
 
+Taken in M6 for the start values of split-phase buses:
+
+* **D25. Slot patterns for the start values** (decided by Michael, 2026-10-16). `Vector(T)` rotates the slots by
+  0°/−120°/+120° and each bus has one scalar `phase_shift`, so a three-phase start puts slot b of a split-phase bus
+  60° off ($a^2 U_a$ instead of $-U_a$).
+  * **Type.** `enum class SlotPattern : std::uint8_t { three_phase = 0, split_phase = 1 }` in
+    `<core>/calculation_parameters.hpp`. M7 reuses it for $U_{\Delta,nom}$: $\sqrt3$ for `three_phase`, 2 for
+    `split_phase`.
+  * **Incidence.** `BranchPhaseIncidence` gets `to_pattern` (default `three_phase`); only a
+    `single_phase_transformer` with a centre-tapped to side reports `split_phase`. `all_phases()` is unchanged.
+  * **Topology.** A step of `Topology::propagate_phases()` after the mask fixed point and its validation, so it only
+    runs when `branch_phase_incidence` is non-empty. A worklist is seeded at the to node of every centre-tapped
+    winding whose to side is connected and spreads a flag over the phase graph along the `per_phase` and `link` arcs
+    only, never through a winding. The flag only grows, so the result does not depend on the visit order. A bus is
+    `split_phase` iff it is flagged **and** has no slot c. A bus with slot c (for example an abc bus that is also
+    fed three-phase) is neither flagged nor passes the flag on: otherwise the flag would leak back through the
+    three-phase network into unrelated single-phase laterals (a refinement found by the topology tests during the
+    implementation). The result is `MathModelTopology::bus_slot_pattern` (size `n_bus` iff `has_reduced_phase`,
+    otherwise empty), read through `slot_pattern(bus)`.
+  * **Solvers.** `detail::apply_slot_patterns<sym>(topo, u)` (`common_solver_functions.hpp`) sets
+    $U_b = -U_a$ at every split-phase bus; slot a already carries the reference angle plus the phase shift of the
+    bus, and slot c is left to the absent-slot mask that follows. It does nothing for a symmetric calculation or
+    without `has_reduced_phase`. It is called in the Newton-Raphson flat and average-source starts and in the
+    iterative-current start (always the average-source start). The Newton-Raphson linear start and the linear
+    method solve the network directly and need nothing.
+  * **Starts only.** The pattern changes start values, never the converged results, and the output angles stay
+    physical. The one exception by construction is `linear_current`, which is a single iterative-current iteration
+    and evaluates its loads at the start voltage: at a split-phase bus with `const_pq` or `const_i` loads it now uses
+    the 180° start. Networks without a centre-tapped winding are unchanged.
+  * **Phase shift.** $\varphi(\text{ab\_center\_tapped}) = 0$, so `phase_shift` $= -\varphi(\text{from}) +
+    \text{clock}\cdot\pi/6$: 0 for `a` → ct and $-\pi/6$ for `ab` → ct (slot a at +30°, slot b at −150°).
+  * **Limitation.** A transformer *fed from* a split-phase bus (for example `ab` → x or `b` → x off a 240-0-240 V
+    node) gets the scalar phase shift of decision D16, which assumes the 120° pattern, so the start of its far side
+    is 30° (`ab`) or 60° (`b`) off. This affects only the Newton-Raphson flat and average-source starts and the
+    iterative-current start, and is rare: only loads and service lines normally hang off a split-phase bus. The
+    default (linear) start of Newton-Raphson is not affected.
+  * **Proof.** The native API test `API Model - centre-tapped single phase transformer` runs a loss-free `a` → ct
+    network with `max_iterations = 1` and only a `const_pq` load without power (a network with only
+    constant-impedance loads, or none, switches to the linear method). With the pattern, the flat and
+    average-source starts are the exact solution and Newton-Raphson and iterative current converge in one
+    iteration; without it each raises `IterationDiverge` (checked once by disabling the call). With unbalanced loads
+    and without the pattern, Newton-Raphson from the flat and average-source starts even converged to a spurious
+    solution (5 kV on a 240 V leg), which the same test also catches.
+  * **Performance.** Gated as above: on a three-phase network the topology step does not run, `bus_slot_pattern`
+    stays empty and the solver helper returns at once.
+
 ## Component models (phase domain)
 
 ### Per-unit convention for reduced-phase nodes
@@ -594,7 +641,7 @@ measured to the earthed centre tap; slot c is absent. In normal operation $U_b \
   `kron_eliminate`, and the blocks are scaled to per unit as before; slot c is exactly 0 by assignment.
 * **Phase shift.** $\varphi(\text{ab\_center\_tapped}) = 0$: the reference slot a is the positive terminal of half
   1. So `phase_shift` $= -\varphi(\text{from}) + \text{clock}\cdot\pi/6$: 0 for `a` → ct and $-\pi/6$ for `ab` → ct.
-  The start values of slot b (180° from slot a, not 120°) come with the slot patterns of M6b.
+  The start values of slot b (180° from slot a, not 120°) come from the slot patterns of decision D25.
 * **Status, magnetising, low susceptance, loading and taps** follow decisions D23 and D24: from side open gives the
   balancer $\frac{1}{2z_b}\begin{bmatrix}1&-1\\-1&1\end{bmatrix}$; the magnetising admittance is
   $\mathrm{diag}(y_m/2, y_m/4, y_m/4)$; a centre-tapped side has no low susceptance; each half is rated $s_n/2$;
@@ -623,13 +670,16 @@ measured to the earthed centre tap; slot c is absent. In normal operation $U_b \
 
 ### Initial voltages
 
-The `Vector(T)` rotation of 0°/−120°/+120° plus a scalar `phase_shift` is wrong for split-phase buses. Fix it with
-the `bus_slot_angle` field:
+The `Vector(T)` rotation of 0°/−120°/+120° plus a scalar `phase_shift` is wrong for split-phase buses. It is fixed
+with the `bus_slot_pattern` field (decision D25; the design called it `bus_slot_angle`):
 
-* Each branch's incidence also reports the slot pattern on the far side. For a centre-tapped secondary that is
-  `{0, π, ·}`; for a SWER secondary it is `{0, ·, ·}`.
-* The patterns are copied along with the masks, in the separate pass after the DFS.
-* The flat and average-source starts use `bus_slot_angle` only when `has_reduced_phase` is true.
+* Each branch's incidence also reports the slot pattern of its to side (`to_pattern`): `split_phase` for a
+  centre-tapped secondary, whose legs a and b are 180° apart, and `three_phase` for everything else. A SWER
+  secondary needs no pattern: its only slot is a.
+* The patterns spread from the centre-tapped windings along lines and links through buses without slot c, in the
+  separate pass after the DFS, and are written together with the masks.
+* The flat and average-source starts, and the iterative-current start, apply them only when `has_reduced_phase`
+  is true.
 
 ### Sources
 
@@ -697,7 +747,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M3 (implemented) | `asym_line.phases` | `code_generation/data/attribute_classes/input.json`, `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `<core>/component/asym_line.hpp`, `<core>/component/line_utils.hpp`; regenerate code | Unit tests per phase set; validation cases against OpenDSS (`test.dss`): `tests/data/power_flow/asym-line/{single-phase-a,two-phase-ab,two-phase-bc-neutral-opendss-kron,swer-a,reduced-phase-feeder,reduced-phase-feeder-linear}` and `tests/data/short_circuit/{asym-line-reduced-phase,asym-line-swer-a}`, all generated by `tests/data/generators/reduced_phase_opendss_cases.py` (compared with PGM by `reduced_phase_compare_pgm.py` in the same folder). In most cases the generator gives OpenDSS the neutral-reduced matrix computed with numpy (cross-checked against an OpenDSS `LineCode` with `Kron=yes`); in `two-phase-bc-neutral-opendss-kron` OpenDSS does the neutral Kron reduction itself from the full matrices including the neutral, so that reference is independent of PGM's closed-form Kron. Expected-error cases `power_flow/asym-line/reduced-phase-symmetric-not-supported` and `state_estimation/reduced-phase-not-supported` | M / medium |
 | M4 (implemented) | Symmetric-calculation guards | `<core>/main_model_impl.hpp`, `<core>/common/exception.hpp`, `src/power_grid_model/_core/error_handling.py`, `errors.py` | Native API tests (`tests/native_api_tests/test_api_model.cpp`); Python error-mapping and end-to-end tests; the expected-error validation cases of M3 | S / low |
 | M5 (implemented) | `single_phase_transformer` (two windings, earthing, phase shift) | New `<core>/component/single_phase_transformer.hpp`; `<core>/all_components.hpp`; `<core>/main_core/main_model_type.hpp`; `input.json` and `dataset_definitions.json` (input, update, output and short-circuit output as a branch); enum `WindingConnection1P` | `tests/cpp_unit_tests/component/test_single_phase_transformer.cpp` (compare with hand-computed $C^T Y C$ for every connection pair; earthing impedance, low susceptance, clock, status, taps, `kron_eliminate`); `tests/cpp_unit_tests/test_topology.cpp`; native API tests (`tests/native_api_tests/test_api_model.cpp`); Python error-mapping tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS, generated by `tests/data/generators/reduced_phase_opendss_cases.py`: power flow `tests/data/power_flow/single-phase-transformer/{swer-chain,phase-to-phase,phase-to-phase-linear}` (22 kV a-b → 12.7 kV SWER → 240 V, and phase-to-phase windings with clock 6), short circuit `tests/data/short_circuit/single-phase-transformer-swer` (SWER and 240 V faults, earth-electrode current, three-phase fault with M4 routing), and the expected-error case `power_flow/single-phase-transformer/missing-phase-for-winding` (see [the component](#new-component-single_phase_transformer)) | L / **high** |
-| M6 | Centre-tapped split-phase secondary | Same component; `kron_eliminate` in `line_utils.hpp` (added in M5); slot angles | OpenDSS centre-tap transformer (`phases=1 windings=3`, `bus2=X.1.0`, `bus3=X.0.2`) with unbalanced 240/480 V loads | M / medium-high |
+| M6 | Centre-tapped split-phase secondary | Same component; `kron_eliminate` in `line_utils.hpp` (added in M5); slot patterns (D25) | OpenDSS centre-tap transformer (`phases=1 windings=3`, `bus2=X.1.0`, `bus3=X.0.2`) with unbalanced 240/480 V loads | M / medium-high |
 | M7 | Delta loads | `input.json` (`connection`), `<core>/component/load_gen.hpp`, `MathModelTopology`, `add_loads` in the Newton-Raphson, iterative current and linear solvers, `common_solver_functions.hpp` | Finite-difference check of the Newton-Raphson Jacobian; OpenDSS `Load conn=delta` and two-phase `bus.1.2` loads | M / medium |
 | M8 | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp`, `<core>/component/fault.hpp` | `tests/data/short_circuit/swer-*` (phase-earth with `r_f` and earthing resistance) against OpenDSS fault study | S / low |
 | M9 | Python validation and documentation | `src/power_grid_model/validation/_validation.py` (required values, `validate_asym_line`, new `validate_single_phase_transformer`, load `connection`, sensor branch lists), `docs/user_manual/components.md`, `docs/user_manual/calculations.md`, `docs/algorithms/sc-algorithms.md`, example notebook | `tests/unit/validation/*` | M / low |
@@ -721,7 +771,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
   `ieee14` and `matpower-case300`, to confirm there is no regression.
 * **Main risks:**
   * Newton-Raphson convergence for delta and split-phase cases with a poor initial guess. Mitigated by the linear
-    start and slot angles.
+    start and the slot patterns of decision D25.
   * Singularity from ungrounded secondaries. Mitigated by the low-susceptance fallback.
   * How faithfully the OpenDSS references model the centre-tap impedance split.
 

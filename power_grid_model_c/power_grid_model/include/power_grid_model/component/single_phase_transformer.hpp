@@ -126,8 +126,12 @@ class SinglePhaseTransformer : public Branch {
     // phase shift is theta_from - theta_to: the angle of the to winding voltage minus that of the from winding
     // voltage, plus pi for reversed polarity (clock 6)
     double phase_shift() const final { return to_.angle - from_.angle + clock_ * deg_30; }
+    // a centre-tapped to winding gives its node the split-phase slot pattern (legs a and b 180 degrees apart)
     BranchPhaseIncidence phase_incidence() const final {
-        return {.from = from_.slots, .to = to_.slots, .coupling = PhaseCoupling::winding};
+        return {.from = from_.slots,
+                .to = to_.slots,
+                .coupling = PhaseCoupling::winding,
+                .to_pattern = to_.center_tapped() ? SlotPattern::split_phase : SlotPattern::three_phase};
     }
 
     // hides Edge::get_output: the loading is the larger apparent power of the two sides, each from the complex sum of

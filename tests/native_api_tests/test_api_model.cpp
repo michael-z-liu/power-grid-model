@@ -1309,4 +1309,182 @@ TEST_CASE("API Model - single phase transformer") {
     }
 }
 
+namespace {
+// node 1 (abc, 22 kV, source) -- single_phase_transformer a -> ab_center_tapped (12.7 kV / 240-0-240 V, solidly
+// earthed centre tap, no magnetising) -- node 2 (split phase, u_rated 240 sqrt3); extra_components holds further
+// components of node 2, each preceded by a comma
+std::string split_phase_model_json(std::string_view extra_components) {
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 22000},
+      {"id": 2, "u_rated": 415.69219381653056}
+    ],
+    "source": [
+      {"id": 3, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e9}
+    ],
+    "single_phase_transformer": [
+      {"id": 4, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "u1": 12701.705922171768, "u2": 480,
+       "sn": 25000, "uk": 0.04, "pk": 400, "i0": 0, "p0": 0, "from_connection": 1, "to_connection": 7}
+    ])json"s +
+           std::string{extra_components} + R"json(
+  }
+})json"s;
+}
+
+constexpr std::string_view split_phase_unbalanced_loads = R"json(,
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [6000, 2000, 0], "q_specified": [2000, 500, 0]},
+      {"id": 6, "node": 2, "status": 1, "type": 2, "p_specified": [1000, 0, 0], "q_specified": [0, 0, 0]}
+    ])json";
+
+// FaultType and FaultPhase values
+constexpr int fault_type_three_phase = 0;
+constexpr int fault_type_single_phase_to_ground = 1;
+constexpr int fault_type_two_phase = 2;
+constexpr int fault_phase_abc = 0;
+constexpr int fault_phase_b = 2;
+constexpr int fault_phase_ab = 4;
+
+// a load without power: the solution stays that of the unloaded network, but the iterative methods are used (with
+// only constant-impedance loads, or none, the calculation switches to the linear method)
+constexpr std::string_view split_phase_zero_load = R"json(,
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [0, 0, 0], "q_specified": [0, 0, 0]}
+    ])json";
+
+std::string split_phase_fault(int fault_type, int fault_phase) {
+    return R"json(,
+    "fault": [
+      {"id": 7, "status": 1, "fault_type": )json"s +
+           std::to_string(fault_type) + R"json(, "fault_phase": )json"s + std::to_string(fault_phase) +
+           R"json(, "fault_object": 2}
+    ])json"s;
+}
+} // namespace
+
+TEST_CASE("API Model - centre-tapped single phase transformer") {
+    using namespace std::string_literals;
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+    options.set_symmetric(0);
+
+    Buffer node_output{PGM_def_asym_output_node, 2};
+    node_output.set_nan();
+    DatasetMutable asym_output{"asym_output", false, 1};
+    asym_output.add_buffer("node", 2, 2, nullptr, node_output);
+
+    SUBCASE("The start values of the iterative methods carry the split-phase pattern") {
+        // without load and losses the solution is U_1 at the source voltage and U_2 = (1, -1, 0) p.u., which is the
+        // flat and the average-source start when slot b starts opposite to slot a; a start at the 120 degree pattern is
+        // 60 degrees off at slot b and does not converge in one iteration
+        auto const owning_input_dataset = load_dataset(split_phase_model_json(split_phase_zero_load));
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_max_iter(1);
+        auto const check_one_iteration = [&model, &options, &node_output, &asym_output](Idx method,
+                                                                                        Idx initialization) {
+            CAPTURE(method);
+            CAPTURE(initialization);
+            options.set_calculation_method(method);
+            options.set_calculation_initialization(initialization);
+            node_output.set_nan();
+            REQUIRE_NOTHROW(model.calculate(options, asym_output));
+            std::array<std::array<double, 3>, 2> u_pu{};
+            std::array<std::array<double, 3>, 2> u_angle{};
+            node_output.get_value(PGM_def_asym_output_node_u_pu, u_pu.data(), -1);
+            node_output.get_value(PGM_def_asym_output_node_u_angle, u_angle.data(), -1);
+            CHECK(u_pu[1][0] == doctest::Approx(1.0));
+            CHECK(u_pu[1][1] == doctest::Approx(1.0));
+            CHECK(u_pu[1][2] == 0.0);
+            CHECK(u_angle[1][0] == doctest::Approx(0.0).epsilon(1e-9));
+            CHECK(std::abs(u_angle[1][1]) == doctest::Approx(std::numbers::pi));
+        };
+        SUBCASE("Newton-Raphson with a flat start") {
+            check_one_iteration(PGM_newton_raphson, PGM_calculation_initialization_flat);
+        }
+        SUBCASE("Newton-Raphson with an average-source start") {
+            check_one_iteration(PGM_newton_raphson, PGM_calculation_initialization_average_source);
+        }
+        SUBCASE("Iterative current") {
+            check_one_iteration(PGM_iterative_current, PGM_calculation_initialization_default);
+        }
+    }
+
+    SUBCASE("Unbalanced loads") {
+        auto const owning_input_dataset = load_dataset(split_phase_model_json(split_phase_unbalanced_loads));
+        Model model{50.0, owning_input_dataset.dataset};
+        Buffer transformer_output{PGM_def_asym_output_single_phase_transformer, 1};
+        transformer_output.set_nan();
+        asym_output.add_buffer("single_phase_transformer", 1, 1, nullptr, transformer_output);
+        for (auto const [method, initialization] :
+             {std::pair{PGM_newton_raphson, PGM_calculation_initialization_default},
+              std::pair{PGM_newton_raphson, PGM_calculation_initialization_flat},
+              std::pair{PGM_newton_raphson, PGM_calculation_initialization_average_source},
+              std::pair{PGM_iterative_current, PGM_calculation_initialization_default}}) {
+            CAPTURE(static_cast<int>(method));
+            CAPTURE(static_cast<int>(initialization));
+            options.set_calculation_method(method);
+            options.set_calculation_initialization(initialization);
+            node_output.set_nan();
+            model.calculate(options, asym_output);
+            std::array<std::array<double, 3>, 2> u{};
+            std::array<std::array<double, 3>, 2> u_angle{};
+            node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+            node_output.get_value(PGM_def_asym_output_node_u_angle, u_angle.data(), -1);
+            CHECK(u[1][0] > 0.0);
+            CHECK(u[1][1] > 0.0);
+            CHECK(u[1][0] < u[1][1]); // leg a is loaded more
+            CHECK(u[1][2] == 0.0);
+            // the legs stay close to opposite
+            double const leg_angle = std::remainder(u_angle[1][1] - u_angle[1][0], 2.0 * std::numbers::pi);
+            CHECK(std::abs(std::abs(leg_angle) - std::numbers::pi) < 0.05);
+
+            std::array<double, 1> loading{};
+            transformer_output.get_value(PGM_def_asym_output_single_phase_transformer_loading, loading.data(), -1);
+            CHECK(loading[0] > 0.0);
+        }
+    }
+
+    SUBCASE("Short circuits at the split-phase node") {
+        options.set_calculation_type(PGM_short_circuit);
+        options.set_calculation_method(PGM_iec60909);
+        Buffer fault_output{PGM_def_sc_output_fault, 1};
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("fault", 1, 1, nullptr, fault_output);
+        auto const fault_current = [&options, &fault_output, &sc_output](int fault_type, int fault_phase) {
+            auto const owning_input_dataset =
+                load_dataset(split_phase_model_json(split_phase_fault(fault_type, fault_phase)));
+            Model model{50.0, owning_input_dataset.dataset};
+            fault_output.set_nan();
+            model.calculate(options, sc_output);
+            std::array<std::array<double, 3>, 1> i_f{};
+            fault_output.get_value(PGM_def_sc_output_fault_i_f, i_f.data(), -1);
+            return i_f[0];
+        };
+
+        SUBCASE("Two-phase ab") {
+            auto const i_f = fault_current(fault_type_two_phase, fault_phase_ab);
+            CHECK(i_f[0] > 0.0);
+            CHECK(i_f[1] == doctest::Approx(i_f[0]));
+            CHECK(i_f[2] == 0.0);
+        }
+        SUBCASE("Single-phase-to-ground b") {
+            auto const i_f = fault_current(fault_type_single_phase_to_ground, fault_phase_b);
+            CHECK(i_f[0] == 0.0);
+            CHECK(i_f[1] > 0.0);
+            CHECK(i_f[2] == 0.0);
+        }
+        SUBCASE("Three-phase is not possible") {
+            check_throws_with([&fault_current]() { fault_current(fault_type_three_phase, fault_phase_abc); },
+                              PGM_regular_error,
+                              "The short circuit phases (abc) are not all present at the faulted node"s);
+        }
+    }
+}
+
 } // namespace power_grid_model_cpp

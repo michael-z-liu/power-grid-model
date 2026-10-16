@@ -316,7 +316,7 @@ class Topology {
 
     // derive the phases that are present at each bus of each math model
     // only does something if at least one branch is not abc -> abc, per phase
-    // otherwise has_reduced_phase stays false and bus_phase_mask stays empty for all math models
+    // otherwise has_reduced_phase stays false and bus_phase_mask and bus_slot_pattern stay empty for all math models
     void propagate_phases() {
         if (comp_conn_.branch_phase_incidence.empty()) {
             return;
@@ -328,7 +328,7 @@ class Topology {
         seed_and_propagate(phase_graph, node_phase);
         // validate after the fixed point, so that the outcome does not depend on the visit order
         check_branch_phases(node_phase);
-        assign_bus_phase_masks(node_phase);
+        assign_bus_phase_masks(node_phase, split_phase_nodes(phase_graph, node_phase));
     }
 
     // "{type} with ID {id}" if the IDs are registered, "{type} #{idx}" otherwise
@@ -412,6 +412,42 @@ class Topology {
         }
     }
 
+    // nodes with the split-phase slot pattern of a centre-tapped winding: seeded at the to node of every
+    // centre-tapped winding whose to side is connected, then spread along the per_phase and link arcs only, never
+    // through a winding; a node with phase c is three-phase and neither takes nor passes on the pattern, so it does
+    // not leak through a three-phase node into other laterals; the flag only grows, so the result does not depend on
+    // the visit order
+    std::vector<bool> split_phase_nodes(PhaseGraph const& phase_graph, std::vector<PhaseMask> const& node_phase) const {
+        std::vector<bool> split(narrow_cast<size_t>(comp_topo_.n_node_total()), false);
+        std::vector<GraphIdx> worklist;
+        auto const can_split = [&node_phase, &split](GraphIdx node) {
+            return !split[node] && !node_phase[node].has(2);
+        };
+        for (auto const& [branch_node_idx, branch_connected, incidence] :
+             std::views::zip(by_const_ref(comp_topo_.branch_node_idx), comp_conn_.branch_connected,
+                             comp_conn_.branch_phase_incidence)) {
+            auto const to_node = narrow_cast<GraphIdx>(branch_node_idx[1]);
+            if (incidence.to_pattern == SlotPattern::split_phase && branch_connected[1] != 0 && can_split(to_node)) {
+                split[to_node] = true;
+                worklist.push_back(to_node);
+            }
+        }
+
+        while (!worklist.empty()) {
+            GraphIdx const u = worklist.back();
+            worklist.pop_back();
+            auto [arc_it, arc_end] = boost::out_edges(u, phase_graph);
+            for (; arc_it != arc_end; ++arc_it) {
+                GraphIdx const v = boost::target(*arc_it, phase_graph);
+                if (phase_graph[*arc_it].coupling != PhaseCoupling::winding && can_split(v)) {
+                    split[v] = true;
+                    worklist.push_back(v);
+                }
+            }
+        }
+        return split;
+    }
+
     // validate the phases of each branch side that is connected to a node in a math model; with terminals T and
     // node phases N at that side:
     //   per_phase: every conductor must be present at its nodes, T without N must be empty (DanglingConductor)
@@ -485,8 +521,8 @@ class Topology {
         }
     }
 
-    // only math models with at least one reduced-phase bus get a mask vector
-    void assign_bus_phase_masks(std::vector<PhaseMask> const& node_phase) {
+    // only math models with at least one reduced-phase bus get a mask vector and a slot pattern vector
+    void assign_bus_phase_masks(std::vector<PhaseMask> const& node_phase, std::vector<bool> const& split_phase) {
         for (auto const& [node, phase] : std::views::zip(comp_coup_.node, node_phase)) {
             if (node.group != disconnected && !phase.all()) {
                 math_topology_[node.group].has_reduced_phase = true;
@@ -495,11 +531,16 @@ class Topology {
         for (auto& math_topo : math_topology_) {
             if (math_topo.has_reduced_phase) {
                 math_topo.bus_phase_mask.assign(narrow_cast<size_t>(math_topo.n_bus()), phase_mask_none);
+                math_topo.bus_slot_pattern.assign(narrow_cast<size_t>(math_topo.n_bus()), SlotPattern::three_phase);
             }
         }
-        for (auto const& [node, phase] : std::views::zip(comp_coup_.node, node_phase)) {
+        for (auto const& [node, phase, split] : std::views::zip(comp_coup_.node, node_phase, split_phase)) {
             if (node.group != disconnected && math_topology_[node.group].has_reduced_phase) {
-                math_topology_[node.group].bus_phase_mask[node.pos] = phase;
+                MathModelTopology& math_topo = math_topology_[node.group];
+                math_topo.bus_phase_mask[node.pos] = phase;
+                if (split) {
+                    math_topo.bus_slot_pattern[node.pos] = SlotPattern::split_phase;
+                }
             }
         }
     }

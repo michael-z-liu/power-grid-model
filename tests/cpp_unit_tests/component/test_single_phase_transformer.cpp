@@ -1153,8 +1153,10 @@ TEST_CASE("Test single phase transformer - centre-tapped secondary, every primar
     for (auto const& from : connection_cases()) {
         CAPTURE(phase_letters(from.mask));
         SinglePhaseTransformer const transformer = make_ct_transformer(ct_input(from.connection));
-        CHECK(transformer.phase_incidence() ==
-              BranchPhaseIncidence{.from = from.mask, .to = phase_mask_ab, .coupling = PhaseCoupling::winding});
+        CHECK(transformer.phase_incidence() == BranchPhaseIncidence{.from = from.mask,
+                                                                    .to = phase_mask_ab,
+                                                                    .coupling = PhaseCoupling::winding,
+                                                                    .to_pattern = SlotPattern::split_phase});
         // the reference slot a is the positive terminal of half 1, at angle 0
         CHECK(same_angle(transformer.phase_shift(), -from.angle()));
         // the expected param has the low susceptance on a phase-to-phase from side only, never on the earthed

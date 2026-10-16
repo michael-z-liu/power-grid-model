@@ -314,7 +314,8 @@ $$
 `single_phase_transformer` is a [branch](#branch) with one winding on each side, for example a SWER isolating
 transformer (`ab` → `a`), a SWER distribution transformer (`a` → `a`) or a single-phase transformer on two phases of
 a three-phase network (`bc` → `a`). Each winding is connected between two phases of its node, or between one phase
-and earth.
+and earth. The to-side winding can also be centre-tapped, for a 240-0-240 V split-phase supply (see
+[Centre-tapped (split-phase) secondary](#centre-tapped-split-phase-secondary)).
 
 ```{warning}
 The single-phase transformer is an experimental feature. A calculation on a model with a `single_phase_transformer`
@@ -333,8 +334,10 @@ it yet: it does not check its attributes, and it may report nodes that are only 
 | `pk`               | `double`                                                                    | watt (W)         | short circuit (copper) loss                                                         |                 &#10004;                 | &#10060; |                   `>= 0`                   |
 | `i0`               | `double`                                                                    | -                | relative no-load (magnetizing) current                                              |                 &#10004;                 | &#10060; |           `>= p0 / sn` and `< 1`           |
 | `p0`               | `double`                                                                    | watt (W)         | no-load (iron / magnetizing) loss                                                   |                 &#10004;                 | &#10060; |                   `>= 0`                   |
+| `uk_half`          | `double`                                                                    | -                | relative short circuit voltage between the from-side winding and one half of a centre-tapped to-side winding, on `sn / 2` | &#10060; default from `uk` and `pk` | &#10060; | only for `ab_center_tapped`; `> uk / 2` and `>= pk_half / (sn / 2)` |
+| `pk_half`          | `double`                                                                    | watt (W)         | short circuit (copper) loss between the from-side winding and one half of a centre-tapped to-side winding, on `sn / 2` | &#10060; default `0.375 pk` | &#10060; | only for `ab_center_tapped`; `>= pk / 4` and `<= pk / 2` |
 | `from_connection`  | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the from-side winding                                                     |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`          |
-| `to_connection`    | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the to-side winding                                                       |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`          |
+| `to_connection`    | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the to-side winding                                                       |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`, `ab_center_tapped` |
 | `clock`            | `int8_t`                                                                    | -                | relative polarity: `6` reverses the to-side winding                                 |           &#10060; default `0`           | &#10060; |       `0` or `6` (modulo 12)               |
 | `tap_side`         | {py:class}`BranchSide <power_grid_model.enum.BranchSide>`                   | -                | side of tap changer                                                                 |       &#10060; default `from_side`       | &#10060; |                                            |
 | `tap_pos`          | `int8_t`                                                                    | -                | current position of tap changer                                                     |        &#10060; default `tap_nom`        | &#10004; |                                            |
@@ -348,8 +351,8 @@ it yet: it does not check its attributes, and it may report nodes that are only 
 | `pk_max`           | `double`                                                                    | watt (W)         | short circuit (copper) loss at maximum tap                                          |      &#10060; default same as `pk`       | &#10060; |                   `>= 0`                   |
 | `r_grounding_from` | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal of a phase-to-earth from-side winding and earth |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
 | `x_grounding_from` | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal of a phase-to-earth from-side winding and earth  |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
-| `r_grounding_to`   | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal of a phase-to-earth to-side winding and earth   |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
-| `x_grounding_to`   | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal of a phase-to-earth to-side winding and earth    |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `r_grounding_to`   | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal (or the centre tap) of the to-side winding and earth |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`, `ab_center_tapped` |
+| `x_grounding_to`   | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal (or the centre tap) of the to-side winding and earth  |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`, `ab_center_tapped` |
 
 * **Connections.** `a`, `b` and `c` are phase-to-earth windings; `ab`, `ac` and `bc` are phase-to-phase windings,
   whose first phase is the positive terminal (`ab` is $U_a - U_b$). An unknown or missing connection raises
@@ -388,7 +391,9 @@ it yet: it does not check its attributes, and it may report nodes that are only 
 
 The output is the standard [branch output](#branch). The `loading` is the larger of the apparent powers of the two
 sides divided by `sn`, where the apparent power of a side is the absolute value of the complex sum of its per-phase
-powers: $\max(|\sum_p \underline{S}_{\text{from},p}|, |\sum_p \underline{S}_{\text{to},p}|) / s_n$.
+powers: $\max(|\sum_p \underline{S}_{\text{from},p}|, |\sum_p \underline{S}_{\text{to},p}|) / s_n$. A
+centre-tapped side counts each half separately, see
+[Centre-tapped (split-phase) secondary](#centre-tapped-split-phase-secondary).
 
 #### Electric Model
 
@@ -405,6 +410,53 @@ It is mapped onto the phases of the two nodes by the terminals of the windings, 
 and eliminated, and the result is converted to per unit with the phase-to-earth base voltage $u_{\text{rated}} /
 \sqrt3$ of each node. With one side disconnected, the connected winding sees the open-end shunt of the $\pi$ model.
 See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
+
+#### Centre-tapped (split-phase) secondary
+
+A `to_connection` of `ab_center_tapped` makes the to-side winding a centre-tapped winding, for example the
+240-0-240 V secondary of a split-phase distribution transformer: half 1 runs from phase `a` to the centre tap and
+half 2 from the centre tap to phase `b`. The two legs are the phases `a` and `b` of the to node, each measured to
+the earthed centre tap, so $U_b \approx -U_a$; the node has no phase `c`. A centre-tapped winding is only allowed on
+the to side; on the from side it raises `InvalidPhaseConnection`. The from-side winding can be any of `a`, `b`, `c`,
+`ab`, `ac` and `bc`.
+
+* **Voltages and ratings.** `u2` is the full winding, end to end: 480 V for a 240-0-240 V winding; each half is
+  `u2 / 2`. `uk`, `pk` and `sn` are the nameplate values of the full winding (the from-side winding against both
+  halves in series, at `sn`). Each leg is 240 V to the centre tap, so the split-phase node has a `u_rated` of
+  $240\sqrt3 = 415.69$ V; the nominal winding voltage implied by the node is $2 u_{\text{rated}} / \sqrt3$.
+* **Half-winding impedance.** `uk_half` and `pk_half` are the short-circuit test between the from-side winding and
+  *one* half, with the other half open, on the rating `sn / 2` of a half and the half voltage `u2 / 2`. In per unit on
+  `sn` and the half voltage this is a resistance of $4 p_{k,\text{half}} / s_n$ and an impedance magnitude of
+  $2 u_{k,\text{half}}$. Each is optional: not provided, it follows the split of Kersting, $0.5R + j0.8X$ for the
+  from-side winding and $R + j0.4X$ for each half (with $R + jX$ from `uk` and `pk`), which gives `pk_half` $=
+  0.375\,p_k$ and `uk_half` $= \tfrac12 |1.5R + j1.2X|$ with $R = p_k / s_n$. `uk_half` must be larger than `uk / 2`
+  (at `uk / 2` the impedance of each half branch is zero and the model is singular), and `pk_half` must be
+  between `pk / 4` and `pk / 2`; this is not checked yet. On a winding that is not centre-tapped, `uk_half` and
+  `pk_half` must be left empty (`InvalidPhaseConnection`).
+* **Earthing.** The centre tap is solidly earthed, or earthed through `r_grounding_to` + j `x_grounding_to`. A node
+  has no neutral conductor, so a wye `asym_load` on phase `a` or `b` of the split-phase node is connected between its
+  leg and true earth. With an earthing impedance, the whole out-of-balance load current therefore returns through
+  it. That is right for earth faults, but pessimistic for loads with a neutral conductor that is earthed at the
+  customer (MEN). 240 V loads are `asym_load` on phase `a` or `b`; 480 V loads between `a` and `b` are not
+  supported yet.
+* **Loading.** Each half is rated `sn / 2`, so the to side counts twice the apparent power of its more loaded leg:
+  $\max(|\sum_p \underline{S}_{\text{from},p}|,\ 2|\underline{S}_{\text{to},a}|,\ 2|\underline{S}_{\text{to},b}|) / s_n$.
+  A balanced full load gives 1.0 on both sides, and so does all load on one leg at `sn / 2`.
+* **Phase shift and polarity.** The reference of a centre-tapped winding is leg `a`, so an `a` → `ab_center_tapped`
+  transformer has no phase shift and an `ab` → `ab_center_tapped` transformer gives the split-phase node an angle of
+  about +30° on leg `a` and −150° on leg `b`. `clock` 6 reverses both halves.
+* **Status.** With the from side open, the two halves stay coupled to each other through the core: the
+  transformer acts as a balancer between the legs. With the to side open, the from side sees the open-end
+  magnetizing admittance, as for the other connections.
+* **Short circuits at the split-phase node.** `single_phase_to_ground` on `a` or `b` (leg to earth, which is the
+  centre tap when it is solidly earthed), `two_phase` on `ab` (480 V) and `two_phase_to_ground` on `ab` are valid.
+  `three_phase`, and the default phases of the two-phase faults (`bc`), raise `InvalidShortCircuitPhaseOrType`.
+* **Start values.** The iterative power flow methods start leg `b` of a split-phase node, and of the nodes without
+  phase `c` that are connected to it by lines or links, opposite to leg `a`. A transformer that is fed *from* a split-phase node
+  (for example an `ab` or `b` from-side winding on a 240-0-240 V node) still gets a start that assumes 120° between
+  the phases, which is 30° or 60° off on its far side. This only affects the flat and average-source initialization
+  of Newton-Raphson and the iterative current method, never the results; if such a calculation does not converge,
+  use Newton-Raphson with its default (linear) initialization.
 
 ### Generic Branch
 

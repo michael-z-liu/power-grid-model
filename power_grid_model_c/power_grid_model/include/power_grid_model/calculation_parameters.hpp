@@ -262,11 +262,18 @@ constexpr std::string_view phase_letters(PhaseMask mask) {
 //         connection that carries whatever phases its nodes have, so its phases are never dangling
 enum class PhaseCoupling : IntS { per_phase = 0, winding = 1, link = 2 };
 
+// angle pattern of the phase slots of a bus, only used for the start values of the iterative power flow
+//   three_phase: the slots are 120 degrees apart (0, -120, +120)
+//   split_phase: slots a and b are the two legs of a centre-tapped winding, 180 degrees apart (0, 180); no slot c
+enum class SlotPattern : std::uint8_t { three_phase = 0, split_phase = 1 };
+
 // non-earth terminals of a branch at each side and how they couple
 struct BranchPhaseIncidence {
     PhaseMask from{phase_mask_abc};
     PhaseMask to{phase_mask_abc};
     PhaseCoupling coupling{PhaseCoupling::per_phase}; // per_phase and link require from == to
+    // slot pattern the branch imposes on its to node; split_phase only for a centre-tapped to winding
+    SlotPattern to_pattern{SlotPattern::three_phase};
 
     constexpr bool all_phases() const { return from.all() && to.all(); }
     friend constexpr bool operator==(BranchPhaseIncidence const& lhs, BranchPhaseIncidence const& rhs) = default;
@@ -284,6 +291,9 @@ struct MathModelTopology {
     std::vector<double> phase_shift;
     // phases present at each bus; size n_bus() if has_reduced_phase, otherwise empty (all buses abc)
     std::vector<PhaseMask> bus_phase_mask;
+    // slot pattern of each bus, for the start values; size n_bus() if has_reduced_phase, otherwise empty (all
+    // buses three_phase)
+    std::vector<SlotPattern> bus_slot_pattern;
     std::vector<BranchIdx> branch_bus_idx;
     std::vector<BranchIdx> fill_in;
     DenseGroupedIdxVector sources_per_bus;
@@ -308,6 +318,12 @@ struct MathModelTopology {
         assert(bus >= 0 && bus < n_bus());
         assert(!has_reduced_phase || std::ssize(bus_phase_mask) == n_bus());
         return has_reduced_phase ? bus_phase_mask[static_cast<std::size_t>(bus)] : phase_mask_abc;
+    }
+
+    SlotPattern slot_pattern(Idx bus) const {
+        assert(bus >= 0 && bus < n_bus());
+        assert(!has_reduced_phase || std::ssize(bus_slot_pattern) == n_bus());
+        return has_reduced_phase ? bus_slot_pattern[static_cast<std::size_t>(bus)] : SlotPattern::three_phase;
     }
 
     Idx n_branch() const { return static_cast<Idx>(branch_bus_idx.size()); }
