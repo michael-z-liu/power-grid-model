@@ -25,6 +25,8 @@ from power_grid_model.enum import (
     AngleMeasurementType,
     BranchSide,
     CalculationType,
+    LoadGenConnection,
+    LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
     WindingConnection1P,
@@ -33,6 +35,7 @@ from power_grid_model.errors import (
     InvalidPhaseConnection,
     InvalidTransformerClock,
     MissingCaseForEnumError,
+    UnsupportedLoadGenTypeForVoltageRegulator,
 )
 from power_grid_model.validation import (
     ValidationWarning,
@@ -45,6 +48,7 @@ from power_grid_model.validation.errors import (
     InvalidEnumValueError,
     InvalidIdError,
     InvalidValueError,
+    InvalidVoltageRegulationError,
     MissingValueError,
     MultiFieldValidationError,
     NotApplicableValueError,
@@ -714,3 +718,130 @@ def test_single_phase_transformer_tap_regulator():
         )
         in errors
     )
+
+
+# Load and generator connection
+LOAD_GEN_ID = 5
+REGULATOR_ID = 6
+ASYM_LOAD_GEN_TYPES = [CT.asym_load, CT.asym_gen]
+SYM_LOAD_GEN_TYPES = [CT.sym_load, CT.sym_gen]
+LOAD_GEN_TYPES = ASYM_LOAD_GEN_TYPES + SYM_LOAD_GEN_TYPES
+NA_INT_S = np.iinfo(np.int8).min
+INVALID_CONNECTIONS = [2, 5]
+
+
+def _load_gen(component: CT, connection: int, load_gen_type: LoadGenType = LoadGenType.const_power) -> np.ndarray:
+    load_gen = initialize_array(DatasetType.input, component, 1)
+    load_gen[AT.id] = LOAD_GEN_ID
+    load_gen[AT.node] = 2
+    load_gen[AT.status] = 1
+    load_gen[AT.type] = load_gen_type
+    load_gen[AT.connection] = connection
+    if component in (CT.sym_load, CT.sym_gen):
+        load_gen[AT.p_specified] = 1e3
+        load_gen[AT.q_specified] = 1e2
+    else:
+        load_gen[AT.p_specified] = [[1e3, 1e3, 1e3]]
+        load_gen[AT.q_specified] = [[1e2, 1e2, 1e2]]
+    return load_gen
+
+
+def _load_gen_input(load_gen: np.ndarray, component: CT, regulated: bool = False) -> dict[CT, np.ndarray]:
+    node = initialize_array(DatasetType.input, CT.node, 2)
+    node[AT.id] = [1, 2]
+    node[AT.u_rated] = 10e3
+    line = initialize_array(DatasetType.input, CT.line, 1)
+    line[AT.id] = 3
+    line[AT.from_node] = 1
+    line[AT.to_node] = 2
+    line[AT.from_status] = 1
+    line[AT.to_status] = 1
+    line[AT.r1] = 0.1
+    line[AT.x1] = 0.1
+    line[AT.c1] = 1e-8
+    line[AT.tan1] = 0.0
+    line[AT.r0] = 0.3
+    line[AT.x0] = 0.3
+    line[AT.c0] = 1e-8
+    line[AT.tan0] = 0.0
+    source = initialize_array(DatasetType.input, CT.source, 1)
+    source[AT.id] = 4
+    source[AT.node] = 1
+    source[AT.status] = 1
+    source[AT.u_ref] = 1.0
+    data = {CT.node: node, CT.line: line, CT.source: source, component: load_gen}
+    if regulated:
+        regulator = initialize_array(DatasetType.input, CT.voltage_regulator, 1)
+        regulator[AT.id] = REGULATOR_ID
+        regulator[AT.regulated_object] = LOAD_GEN_ID
+        regulator[AT.status] = 1
+        regulator[AT.u_ref] = 1.0
+        data[CT.voltage_regulator] = regulator
+    return data
+
+
+def _validate_load_gen(component: CT, connection: int, **kwargs):
+    load_gen = _load_gen(component, connection, **kwargs)
+    return validate_input_data(_load_gen_input(load_gen, component), symmetric=False)
+
+
+def _regulation_error() -> InvalidVoltageRegulationError:
+    return InvalidVoltageRegulationError(CT.voltage_regulator, AT.regulated_object, [REGULATOR_ID])
+
+
+@pytest.mark.parametrize("connection", [LoadGenConnection.wye, LoadGenConnection.delta, NA_INT_S])
+@pytest.mark.parametrize("component", ASYM_LOAD_GEN_TYPES)
+def test_asym_load_gen_valid_connection(component: CT, connection: int):
+    assert _validate_load_gen(component, connection) is None
+
+
+@pytest.mark.parametrize("connection", INVALID_CONNECTIONS)
+@pytest.mark.parametrize("component", LOAD_GEN_TYPES)
+def test_load_gen_invalid_connection(component: CT, connection: int):
+    assert _validate_load_gen(component, connection) == [
+        InvalidEnumValueError(component, AT.connection, [LOAD_GEN_ID], LoadGenConnection)
+    ]
+
+
+@pytest.mark.parametrize("component", SYM_LOAD_GEN_TYPES)
+def test_sym_load_gen_wye_connection(component: CT):
+    assert _validate_load_gen(component, LoadGenConnection.wye) is None
+
+
+@pytest.mark.parametrize("component", SYM_LOAD_GEN_TYPES)
+def test_sym_load_gen_delta_connection(component: CT):
+    load_gen = _load_gen(component, LoadGenConnection.delta)
+    input_data = _load_gen_input(load_gen, component)
+    assert validate_input_data(input_data, symmetric=False) == [
+        InvalidValueError(component, AT.connection, [LOAD_GEN_ID], [LoadGenConnection.wye])
+    ]
+    with pytest.raises(InvalidPhaseConnection):
+        PowerGridModel(input_data)
+
+
+@pytest.mark.parametrize("load_gen_type", [LoadGenType.const_power, LoadGenType.const_impedance])
+@pytest.mark.parametrize("component", ASYM_LOAD_GEN_TYPES)
+def test_voltage_regulator_on_delta_asym_load_gen(component: CT, load_gen_type: LoadGenType):
+    load_gen = _load_gen(component, LoadGenConnection.delta, load_gen_type)
+    input_data = _load_gen_input(load_gen, component, regulated=True)
+    errors = validate_input_data(input_data, CalculationType.power_flow, symmetric=False)
+    # exactly one error for the regulator, also if the load_gen is not const_power either
+    assert errors == [_regulation_error()]
+
+
+@pytest.mark.parametrize("component", ASYM_LOAD_GEN_TYPES)
+def test_voltage_regulator_on_delta_asym_load_gen_mirror(component: CT):
+    load_gen = _load_gen(component, LoadGenConnection.delta)
+    input_data = _load_gen_input(load_gen, component, regulated=True)
+    model = PowerGridModel(input_data)
+    with pytest.raises(UnsupportedLoadGenTypeForVoltageRegulator):
+        model._calculate_power_flow(symmetric=False, experimental_features="enabled")  # noqa: SLF001
+
+
+@pytest.mark.parametrize("component", ASYM_LOAD_GEN_TYPES)
+def test_voltage_regulator_on_wye_asym_load_gen(component: CT):
+    load_gen = _load_gen(component, LoadGenConnection.wye)
+    input_data = _load_gen_input(load_gen, component, regulated=True)
+    assert validate_input_data(input_data, CalculationType.power_flow, symmetric=False) is None
+    model = PowerGridModel(input_data)
+    model._calculate_power_flow(symmetric=False, experimental_features="enabled")  # noqa: SLF001

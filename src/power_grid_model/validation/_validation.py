@@ -38,6 +38,7 @@ from power_grid_model.enum import (
     CalculationType,
     FaultPhase,
     FaultType,
+    LoadGenConnection,
     LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
@@ -1459,6 +1460,10 @@ def validate_source(data: SingleDataset) -> list[ValidationError]:
 def validate_generic_load_gen(data: SingleDataset, component: CT) -> list[ValidationError]:
     errors = validate_appliance(data, component)
     errors += _all_valid_enum_values(data, component, AT.type, LoadGenType)
+    errors += _all_valid_enum_values(data, component, AT.connection, LoadGenConnection)
+    if component in (CT.sym_load, CT.sym_gen):
+        # A symmetric load or generator is always wye connected
+        errors += _all_supported_enum_values(data, component, AT.connection, LoadGenConnection, [LoadGenConnection.wye])
     return errors
 
 
@@ -1539,7 +1544,10 @@ def validate_same_u_ref_per_node_voltage_regulator(
 
 
 def validate_compatible_load_gen_type(data: SingleDataset) -> list[ValidationError]:
-    """Ensure that the regulated object of a voltage regulator is of type const_power."""
+    """Ensure that the regulated object of a voltage regulator is of type const_power.
+
+    A delta connected asym_load or asym_gen cannot be regulated either.
+    """
     errors: list[ValidationError] = []
     if CT.voltage_regulator in data:
         vr_data = data[CT.voltage_regulator]
@@ -1555,7 +1563,11 @@ def validate_compatible_load_gen_type(data: SingleDataset) -> list[ValidationErr
                         for idx, comp_id in enumerate(component_data[AT.id]):
                             if comp_id == appliance_id:
                                 comp_type = component_data[AT.type][idx]
-                                if comp_type != LoadGenType.const_power:
+                                is_delta_asym = (
+                                    component_type in (CT.asym_load, CT.asym_gen)
+                                    and component_data[AT.connection][idx] == LoadGenConnection.delta
+                                )
+                                if comp_type != LoadGenType.const_power or is_delta_asym:
                                     errors.append(
                                         InvalidVoltageRegulationError(
                                             CT.voltage_regulator,
