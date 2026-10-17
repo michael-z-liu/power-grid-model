@@ -8,11 +8,14 @@
 #include <power_grid_model/calculation_parameters.hpp>
 #include <power_grid_model/common/common.hpp>
 #include <power_grid_model/common/component_list.hpp>
+#include <power_grid_model/common/enum.hpp>
+#include <power_grid_model/component/appliance.hpp>
 #include <power_grid_model/component/base.hpp>
 #include <power_grid_model/component/branch.hpp>
 #include <power_grid_model/component/edge.hpp>
 #include <power_grid_model/component/line.hpp>
 #include <power_grid_model/component/link.hpp>
+#include <power_grid_model/component/load_gen.hpp>
 #include <power_grid_model/component/node.hpp>
 #include <power_grid_model/container.hpp>
 #include <power_grid_model/main_core/container_queries.hpp>
@@ -50,7 +53,29 @@ using FullPhaseContainer = Container<ExtraRetrievableTypes<Base, Node, Edge, Bra
 using MixedPhaseContainer =
     Container<ExtraRetrievableTypes<Base, Node, Edge, Branch>, Line, Link, Node, SinglePhaseTestBranch>;
 
+using LoadGenContainer =
+    Container<ExtraRetrievableTypes<Base, Node, Appliance, GenericLoadGen>, Node, SymLoad, AsymLoad, AsymGenerator>;
+
 constexpr double dummy_value = 1.0;
+
+// a sym_load, an asym_load and an asym_gen at one node; the asym_gen gets the given connection
+LoadGenContainer make_load_gens(LoadGenConnection gen_connection) {
+    LoadGenContainer components;
+    emplace_component<Node>(components, 1, NodeInput{.id = 1, .u_rated = 10e3});
+    emplace_component<SymLoad>(components, 2,
+                               SymLoadGenInput{.id = 2, .node = 1, .status = 1, .type = LoadGenType::const_pq}, 10e3);
+    emplace_component<AsymLoad>(
+        components, 3,
+        AsymLoadGenInput{
+            .id = 3, .node = 1, .status = 1, .type = LoadGenType::const_i, .connection = LoadGenConnection::wye},
+        10e3);
+    emplace_component<AsymGenerator>(
+        components, 4,
+        AsymLoadGenInput{.id = 4, .node = 1, .status = 0, .type = LoadGenType::const_y, .connection = gen_connection},
+        10e3);
+    components.set_construction_complete();
+    return components;
+}
 
 template <class Container> void add_nodes_and_line(Container& components) {
     emplace_component<Node>(components, 1, NodeInput{.id = 1, .u_rated = 10e3});
@@ -154,6 +179,35 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
                 CHECK(conn.branch_connected[idx] == BranchConnected{1, 1});
                 CHECK(conn.branch_phase_incidence[idx] == BranchPhaseIncidence{});
             }
+        }
+    }
+}
+
+TEST_CASE("Test main core topology - load_gen connection registration") {
+    ComponentTopology comp_topo;
+
+    SUBCASE("All load_gens wye: the connection vector stays empty") {
+        auto const components = make_load_gens(LoadGenConnection::wye);
+        detail::register_topology_components<GenericLoadGen>(components, comp_topo, false);
+        CHECK(comp_topo.load_gen_type.size() == 3);
+        CHECK(comp_topo.load_gen_connection.empty());
+    }
+
+    SUBCASE("Previously filled connection vector is cleared when all load_gens are wye") {
+        auto const components = make_load_gens(LoadGenConnection::wye);
+        comp_topo.load_gen_connection.assign(5, LoadGenConnection::delta);
+        detail::register_topology_components<GenericLoadGen>(components, comp_topo, false);
+        CHECK(comp_topo.load_gen_connection.empty());
+    }
+
+    SUBCASE("One delta load_gen fills the connection vector, status ignored") {
+        auto const components = make_load_gens(LoadGenConnection::delta);
+        detail::register_topology_components<GenericLoadGen>(components, comp_topo, false);
+        REQUIRE(comp_topo.load_gen_connection.size() == 3);
+        for (ID const id : {2, 3, 4}) {
+            CAPTURE(id);
+            auto const idx = static_cast<size_t>(get_component_sequence_idx<GenericLoadGen>(components, id));
+            CHECK(comp_topo.load_gen_connection[idx] == (id == 4 ? LoadGenConnection::delta : LoadGenConnection::wye));
         }
     }
 }

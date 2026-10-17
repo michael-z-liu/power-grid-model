@@ -493,6 +493,8 @@ TEST_CASE("Test topology") {
             CHECK(math.phase_shift == math_ref.phase_shift);
             check_equal(math.load_gens_per_bus, math_ref.load_gens_per_bus);
             CHECK(math.load_gen_type == math_ref.load_gen_type);
+            CHECK(math.load_gen_connection == math_ref.load_gen_connection);
+            CHECK_FALSE(math.has_delta_load_gen());
             check_equal(math.shunts_per_bus, math_ref.shunts_per_bus);
             check_equal(math.voltage_sensors_per_bus, math_ref.voltage_sensors_per_bus);
             check_equal(math.power_sensors_per_bus, math_ref.power_sensors_per_bus);
@@ -503,6 +505,35 @@ TEST_CASE("Test topology") {
             check_equal(math.power_sensors_per_branch_to, math_ref.power_sensors_per_branch_to);
             CHECK(math.fill_in == math_ref.fill_in);
         }
+    }
+
+    SUBCASE("Test delta load_gen connection") {
+        using enum LoadGenConnection;
+        // load_gen 0 -> math model 0 position 0, 1 -> disconnected, 2 -> math model 1 position 0, 3 -> math model 0
+        // position 1
+        SUBCASE("A connected delta load_gen fills the vector of its math model only") {
+            comp_topo.load_gen_connection = std::vector<LoadGenConnection>{wye, delta, wye, delta};
+            math_topology_ref[0].load_gen_connection = {wye, delta};
+        }
+        SUBCASE("A disconnected delta load_gen is skipped") {
+            comp_topo.load_gen_connection = std::vector<LoadGenConnection>{wye, delta, wye, wye};
+        }
+
+        Topology topo{comp_topo, comp_conn};
+        auto const [math_topology, topo_comp_coup_ptr] = topo.build_topology();
+        REQUIRE(math_topology.size() == math_topology_ref.size());
+        for (size_t i = 0; i < math_topology.size(); i++) {
+            CAPTURE(i);
+            auto const& math = *math_topology[i];
+            CHECK(math.load_gen_type == math_topology_ref[i].load_gen_type);
+            CHECK(math.load_gen_connection == math_topology_ref[i].load_gen_connection);
+            for (Idx load_gen = 0; load_gen != math.n_load_gen(); ++load_gen) {
+                CAPTURE(load_gen);
+                CHECK(math.is_delta_load_gen(load_gen) == (i == 0 && load_gen == 1 && math.has_delta_load_gen()));
+            }
+        }
+        CHECK_FALSE(math_topology[1]->has_delta_load_gen());
+        CHECK_FALSE(math_topology[2]->has_delta_load_gen());
     }
 }
 

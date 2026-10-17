@@ -614,6 +614,8 @@ struct ComponentTopology {
     IdxVector source_node_idx;
     IdxVector load_gen_node_idx;
     std::vector<LoadGenType> load_gen_type;
+    // connection of each load_gen; size n_load_gen if at least one load_gen is delta, otherwise empty (all wye)
+    std::vector<LoadGenConnection> load_gen_connection;
     IdxVector voltage_sensor_node_idx;
     IdxVector power_sensor_object_idx; // the index is relative to branch, source, shunt or load_gen
     std::vector<MeasuredTerminalType> power_sensor_terminal_type;
@@ -634,6 +636,7 @@ struct ReducedComponentTopology {
     MaybeOwningConstVector<Idx> source_node_idx;
     MaybeOwningConstVector<Idx> load_gen_node_idx;
     MaybeOwningConstVector<LoadGenType> load_gen_type;
+    MaybeOwningConstVector<LoadGenConnection> load_gen_connection; // empty if all load_gens are wye
     MaybeOwningConstVector<Idx> voltage_sensor_node_idx;
     MaybeOwningConstVector<Idx> power_sensor_object_idx; // the index is relative to branch, source, shunt or load_gen
     MaybeOwningConstVector<MeasuredTerminalType> power_sensor_terminal_type;
@@ -655,6 +658,7 @@ struct ReducedComponentTopology {
             .source_node_idx = std::span{comp_topo.source_node_idx},
             .load_gen_node_idx = std::span{comp_topo.load_gen_node_idx},
             .load_gen_type = std::span{comp_topo.load_gen_type},
+            .load_gen_connection = std::span{comp_topo.load_gen_connection},
             .voltage_sensor_node_idx = std::span{comp_topo.voltage_sensor_node_idx},
             .power_sensor_object_idx = std::span{comp_topo.power_sensor_object_idx},
             .power_sensor_terminal_type = std::span{comp_topo.power_sensor_terminal_type},

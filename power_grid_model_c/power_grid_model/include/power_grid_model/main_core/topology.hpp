@@ -127,6 +127,17 @@ constexpr void register_topology_components(ComponentContainer const& components
 
     apply_registration<Component>(components, comp_topo.load_gen_type,
                                   [](GenericLoadGen const& load_gen) { return load_gen.type(); });
+
+    // the connection vector is only filled if at least one load_gen is delta; empty means that all are wye
+    if (std::ranges::any_of(components.template citer<Component>(), [](GenericLoadGen const& load_gen) {
+            return load_gen.connection() == LoadGenConnection::delta;
+        })) {
+        apply_registration<Component>(components, comp_topo.load_gen_connection,
+                                      [](GenericLoadGen const& load_gen) { return load_gen.connection(); });
+    } else {
+        // fast path: nothing allocated
+        comp_topo.load_gen_connection.clear();
+    }
 }
 
 // TODO(mgovers): cleanup v2: remove use_legacy_topology path

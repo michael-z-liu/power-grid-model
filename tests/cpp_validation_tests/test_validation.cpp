@@ -177,7 +177,8 @@ class Subcase {
                         "enabled. Found at node with id (-?\\d+)"}},
             {"ExperimentalFeature", std::regex{" is an experimental feature"}}, // multiple different flavors
             {"ReducedPhaseNotSupported",
-             std::regex{" is not supported in a network with one- or two-phase nodes"}}, // multiple different flavors
+             std::regex{" is not supported in a network with (one- or two-phase nodes|delta-connected loads or "
+                        "generators)"}}, // multiple different flavors
             {"DanglingConductor",
              std::regex{"Conductors of .+ on phases \\([^)]*\\) are not present at any of its connected nodes"}},
             {"InvalidPhaseConnection", std::regex{"Invalid phase connection for "}}, // multiple different flavors

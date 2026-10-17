@@ -340,7 +340,7 @@ template <symmetry_tag sym_type>
 struct get_attributes_list<LoadGenInput<sym_type>> {
     using sym = sym_type;
 
-    static constexpr std::array<MetaAttribute, 6> value{
+    static constexpr std::array<MetaAttribute, 7> value{
             // all attributes including base class
             
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::id>(offsetof(LoadGenInput<sym>, id), "id"),
@@ -349,6 +349,7 @@ struct get_attributes_list<LoadGenInput<sym_type>> {
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::type>(offsetof(LoadGenInput<sym>, type), "type"),
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::p_specified>(offsetof(LoadGenInput<sym>, p_specified), "p_specified"),
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::q_specified>(offsetof(LoadGenInput<sym>, q_specified), "q_specified"),
+            meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::connection>(offsetof(LoadGenInput<sym>, connection), "connection"),
     };
 };
 

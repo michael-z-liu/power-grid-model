@@ -110,12 +110,18 @@ class InvalidPhaseConnection : public PowerGridError {
 
 class LoadGenOnAbsentPhase : public PowerGridError {
   public:
-    LoadGenOnAbsentPhase(ID id, std::string_view absent_phases, std::string_view node_phases)
-        : PowerGridError{std::format("Load or generator {} has a non-zero specified power on phases ({}) that are not "
-                                     "present at its node (node phases: {}). Use an asym_load or asym_gen with zero "
-                                     "power on the absent phases; a sym_load or sym_gen puts power on all three "
-                                     "phases.\n",
-                                     id, absent_phases, node_phases)} {}
+    // the wye message is the default; a delta load_gen gets a tail about its phase-to-phase entries
+    LoadGenOnAbsentPhase(ID id, std::string_view absent_phases, std::string_view node_phases,
+                         LoadGenConnection connection = LoadGenConnection::wye)
+        : PowerGridError{std::format(
+              "Load or generator {} has a non-zero specified power on phases ({}) that are not present at its node "
+              "(node phases: {}). {}\n",
+              id, absent_phases, node_phases,
+              connection == LoadGenConnection::delta
+                  ? "A delta (phase-to-phase) entry needs both of its phases: ab needs a and b, bc needs b and c, ca "
+                    "needs c and a."
+                  : "Use an asym_load or asym_gen with zero power on the absent phases; a sym_load or sym_gen puts "
+                    "power on all three phases.")} {}
 };
 
 class ShuntAtReducedPhaseNode : public PowerGridError {

@@ -170,7 +170,8 @@ inline bool has_reduced_phase_math_model(main_model_state_c auto const& state) {
 
 // a load or generator may not specify power on a phase that is not present at its node; the check runs on the
 // asymmetric injection that the calculation uses, so a sym_load or sym_gen with non-zero power on a node without all
-// phases is rejected; nan and 0 both mean no power, a component with status off has no injection
+// phases is rejected; nan and 0 both mean no power, a component with status off has no injection; a delta entry
+// (ab, bc, ca) needs both of its phases
 inline void check_load_gen_power_on_absent_phases(main_model_state_c auto const& state,
                                                   std::vector<PowerFlowInput<asymmetric_t>> const& pf_input) {
     constexpr std::array single_phases{phase_mask_a, phase_mask_b, phase_mask_c};
@@ -188,15 +189,18 @@ inline void check_load_gen_power_on_absent_phases(main_model_state_c auto const&
             continue;
         }
         ComplexValue<asymmetric_t> const& s_injection = pf_input[math_idx.group].s_injection[math_idx.pos];
+        bool const delta = topo.is_delta_load_gen(math_idx.pos);
         PhaseMask loaded = phase_mask_none;
         for (Idx phase = 0; phase != 3; ++phase) {
             if (is_specified(s_injection(phase).real()) || is_specified(s_injection(phase).imag())) {
-                loaded = loaded | single_phases[static_cast<size_t>(phase)];
+                auto const entry = static_cast<size_t>(phase);
+                loaded = loaded | (delta ? delta_branches[entry].phases : single_phases[entry]);
             }
         }
         if (PhaseMask const absent_loaded = loaded.without(phases); !absent_loaded.none()) {
             throw LoadGenOnAbsentPhase{get_component_by_sequence<GenericLoadGen>(state.components, i).id(),
-                                       phase_letters(absent_loaded), phase_letters(phases)};
+                                       phase_letters(absent_loaded), phase_letters(phases),
+                                       delta ? LoadGenConnection::delta : LoadGenConnection::wye};
         }
     }
 }

@@ -10,6 +10,7 @@
 #include <power_grid_model/calculation_parameters.hpp>
 #include <power_grid_model/common/common.hpp>
 #include <power_grid_model/common/enum.hpp>
+#include <power_grid_model/common/exception.hpp>
 #include <power_grid_model/common/three_phase_tensor.hpp>
 
 #include <doctest/doctest.h>
@@ -18,6 +19,7 @@
 #include <complex>
 #include <concepts>
 #include <cstddef>
+#include <string>
 
 TYPE_TO_STRING_AS("SymGenerator", power_grid_model::SymGenerator);
 TYPE_TO_STRING_AS("AsymGenerator", power_grid_model::AsymGenerator);
@@ -342,6 +344,61 @@ TEST_CASE_TEMPLATE("Test load generator", LoadGeneratorType, SymLoad, AsymLoad, 
             CHECK(inv.status == expected.status);
             check_nan_preserving_equality(inv.p_specified, expected.p_specified);
             check_nan_preserving_equality(inv.q_specified, expected.q_specified);
+        }
+    }
+}
+
+TEST_CASE_TEMPLATE("Test load generator connection", LoadGeneratorType, SymLoad, AsymLoad, SymGenerator,
+                   AsymGenerator) {
+    using InputType = LoadGeneratorType::InputType;
+    using RealValueType = decltype(InputType::p_specified);
+    constexpr bool is_sym = is_symmetric_v<typename LoadGeneratorType::loadgen_symmetry>;
+
+    InputType input{.id = 7,
+                    .node = 2,
+                    .status = 1,
+                    .type = LoadGenType::const_pq,
+                    .p_specified = RealValueType{1e6},
+                    .q_specified = RealValueType{0.5e6}};
+
+    SUBCASE("Not provided means wye") {
+        CHECK(is_nan(input.connection));
+        LoadGeneratorType const load_gen{input, 10e3};
+        CHECK(load_gen.connection() == LoadGenConnection::wye);
+    }
+    SUBCASE("Wye") {
+        input.connection = LoadGenConnection::wye;
+        LoadGeneratorType const load_gen{input, 10e3};
+        CHECK(load_gen.connection() == LoadGenConnection::wye);
+    }
+    SUBCASE("Delta") {
+        input.connection = LoadGenConnection::delta;
+        if constexpr (is_sym) {
+            std::string const expected = std::string{"Invalid phase connection for "} + LoadGeneratorType::name +
+                                         " 7 with phases (delta): a delta connection is only supported for asym_load "
+                                         "and asym_gen\n";
+            CHECK_THROWS_WITH_AS((LoadGeneratorType{input, 10e3}), expected.c_str(), InvalidPhaseConnection);
+        } else {
+            LoadGeneratorType const load_gen{input, 10e3};
+            CHECK(load_gen.connection() == LoadGenConnection::delta);
+
+            // the entries ab, bc, ca are passed through unchanged; the solvers interpret them
+            input.connection = LoadGenConnection::wye;
+            LoadGeneratorType const wye_load_gen{input, 10e3};
+            auto const s_delta = load_gen.template calc_param<asymmetric_t>();
+            auto const s_wye = wye_load_gen.template calc_param<asymmetric_t>();
+            for (Idx phase = 0; phase != 3; ++phase) {
+                CAPTURE(phase);
+                CHECK(s_delta(phase) == s_wye(phase));
+            }
+            CHECK(load_gen.template calc_param<symmetric_t>() == wye_load_gen.template calc_param<symmetric_t>());
+        }
+    }
+    SUBCASE("Invalid value") {
+        for (IntS const value : {IntS{2}, IntS{0x7F}}) {
+            CAPTURE(value);
+            input.connection = static_cast<LoadGenConnection>(value);
+            CHECK_THROWS_AS((LoadGeneratorType{input, 10e3}), MissingCaseForEnumError);
         }
     }
 }

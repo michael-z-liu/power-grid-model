@@ -138,6 +138,20 @@ TEST_CASE("Exceptions") {
                               "at its node (node phases: a)."));
         CHECK(msg.find("sym_load or sym_gen puts power on all three phases") != std::string::npos);
         CHECK(msg.find("balanced") == std::string::npos);
+        // the wye message is unchanged, also when the wye connection is passed explicitly
+        CHECK(msg == "Load or generator 12 has a non-zero specified power on phases (bc) that are not present at its "
+                     "node (node phases: a). Use an asym_load or asym_gen with zero power on the absent phases; a "
+                     "sym_load or sym_gen puts power on all three phases.\n");
+        CHECK(std::string{LoadGenOnAbsentPhase{ID{12}, "bc", "a", LoadGenConnection::wye}.what()} == msg);
+    }
+    SUBCASE("LoadGenOnAbsentPhase with a delta load_gen") {
+        auto const msg = std::string{LoadGenOnAbsentPhase{ID{13}, "c", "ab", LoadGenConnection::delta}.what()};
+        CHECK(msg == "Load or generator 13 has a non-zero specified power on phases (c) that are not present at its "
+                     "node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and "
+                     "b, bc needs b and c, ca needs c and a.\n");
+        // the prefix is shared with the wye flavour, so the error mappings still match
+        CHECK(msg.starts_with("Load or generator 13 has a non-zero specified power on phases"));
+        CHECK(msg.find("sym_load") == std::string::npos);
     }
     SUBCASE("ShuntAtReducedPhaseNode") {
         CHECK(std::string{ShuntAtReducedPhaseNode{ID{500}}.what()} ==

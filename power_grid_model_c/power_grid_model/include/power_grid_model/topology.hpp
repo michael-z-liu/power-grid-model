@@ -831,6 +831,20 @@ class Topology {
             }
             math_topology_[idx_math.group].load_gen_type[idx_math.pos] = load_gen_type;
         }
+        // set load gen connection: only a math model with a connected delta load_gen gets the (all wye) vector
+        if (!comp_topo_.load_gen_connection.empty()) {
+            for (auto const& [idx_math, connection] :
+                 std::views::zip(by_const_ref(comp_coup_.load_gen), by_const_ref(comp_topo_.load_gen_connection))) {
+                if (idx_math.group == disconnected || connection != LoadGenConnection::delta) {
+                    continue;
+                }
+                MathModelTopology& topo = math_topology_[idx_math.group];
+                if (topo.load_gen_connection.empty()) {
+                    topo.load_gen_connection.resize(topo.n_load_gen(), LoadGenConnection::wye);
+                }
+                topo.load_gen_connection[idx_math.pos] = LoadGenConnection::delta;
+            }
+        }
 
         // source
         couple_object_components<&MathModelTopology::n_bus>(

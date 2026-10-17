@@ -205,6 +205,7 @@ inline ReducedComponentTopology construct_reduced_topology(ComponentTopology con
         .source_node_idx = remap_nodes(comp_topo.source_node_idx),
         .load_gen_node_idx = remap_nodes(comp_topo.load_gen_node_idx),
         .load_gen_type = std::span{comp_topo.load_gen_type},
+        .load_gen_connection = std::span{comp_topo.load_gen_connection},
         .voltage_sensor_node_idx = remap_nodes(comp_topo.voltage_sensor_node_idx),
         .power_sensor_object_idx = std::span{comp_topo.power_sensor_object_idx},
         .power_sensor_terminal_type = std::span{comp_topo.power_sensor_terminal_type},

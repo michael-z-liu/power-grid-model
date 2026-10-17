@@ -107,6 +107,7 @@ class AttributeType(StrEnum, metaclass=_MetaEnum):
     clock = "clock"
     clock_12 = "clock_12"
     clock_13 = "clock_13"
+    connection = "connection"
     control_side = "control_side"
     energized = "energized"
     fault_object = "fault_object"

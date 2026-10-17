@@ -398,6 +398,11 @@
           "data_type": "RealValue<sym>",
           "names": ["p_specified", "q_specified"],
           "description": "specified active/reactive power"
+        },
+        {
+          "data_type": "LoadGenConnection",
+          "names": "connection",
+          "description": "wye (phase-to-earth) or delta (phase-to-phase); default wye"
         }
       ]
     },

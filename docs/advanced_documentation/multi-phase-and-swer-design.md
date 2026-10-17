@@ -183,7 +183,10 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 | Newton-Raphson starts | The flat, average-source and linear starts mask the initial voltage of absent slots to exactly 0. The linear start also masks the load admittance per bus. Since M6 the flat and average-source starts first apply the slot patterns (`bus_slot_pattern`, decision D25), so that slot b of a split-phase bus starts opposite to slot a. |
 | Iterative current (`iterative_current_pf_solver.hpp`) | Apply the slot patterns (decision D25) to the average-source start, then mask the initial voltage and, after the load and source loop, the right-hand side (which holds `conj(s/0)` = NaN on absent slots). The prefactorised matrix already has the identity rows. `linear_current` is covered as well. |
 | Linear power flow (`common_solver_functions.hpp`, `add_linear_loads`) | The load admittance $-\overline{s}$ is masked per bus. Otherwise it would be added to the identity on absent slots and give $(1 - \overline{s_p}) U_p = 0$, which is singular for $s_p = 1$. |
-| Results (`common_solver_functions.hpp`) | The load/gen `s` and `i` (`conj(s/u)`) are set to 0 on absent slots. Bus injection is exactly 0 there because $U_p = 0$. |
+| Newton-Raphson, delta loads (M7) | `add_loads` dispatches a delta load_gen (`topo.is_delta_load_gen`) to `add_delta_load`, which adds the branch powers and the full Jacobian (angle and magnitude terms, phases coupled within the bus's diagonal block). The linear start adds the delta constant admittance. See "Phase-to-phase loads" below. |
+| Iterative current, delta loads (M7) | The right-hand side gets $D^T I_\Delta(U)$ instead of the wye current; the matrix is unchanged. |
+| Linear power flow, delta loads (M7) | `add_linear_loads` adds the delta constant admittance $-D^T \mathrm{diag}(\overline{S_k}/U_{\Delta,nom}^2) D$ to the bus's diagonal block. |
+| Results (`common_solver_functions.hpp`) | The load/gen `s` and `i` (`conj(s/u)`) are set to 0 on absent slots. Bus injection is exactly 0 there because $U_p = 0$. For a delta load_gen (M7), `calculate_load_gen_result` gives the phase current $D^T I_\Delta$ and $s = U \circ \overline{I}$ (decision D30). |
 | Short circuit (`short_circuit_solver.hpp`) | The Y-bus identity carries through `copy_y_bus`. Fault substitution only touches fault phases. In a reduced-phase model the solver checks that the fault phases are present at the faulted bus and raises `InvalidShortCircuitPhases` otherwise, so a three-phase fault, or a fault on an absent phase, at a reduced bus is rejected instead of silently giving zero fault current. The ID-based check in input preparation follows in M8. |
 | State estimation (`math_solver.hpp`) | Not supported at first: `MathSolver::run_state_estimation` raises `ReducedPhaseNotSupported` when `has_reduced_phase`, for both symmetries and all methods. The observability check works per bus, not per phase, and pivot perturbation would hide modelling errors. |
 | Symmetric calculations (`math_solver.hpp`) | The positive-sequence Y-bus cannot represent absent phases. `MathSolver<symmetric_t>` raises `ReducedPhaseNotSupported` for power flow and short circuit on a reduced-phase model. This is a permanent backstop behind the model-level guard of M4. |
@@ -459,6 +462,69 @@ Taken in M6 for the start values of split-phase buses:
   * **Performance.** Gated as above: on a three-phase network the topology step does not run, `bus_slot_pattern`
     stays empty and the solver helper returns at once.
 
+Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Michael's blanket approval,
+2026-10-16):
+
+* **D26. Enum and default.** `enum class LoadGenConnection : IntS { wye = 0, delta = 1 }` (C++ and Python),
+  input-only. Not provided (`na`) means `wye`; any other value raises `MissingCaseForEnumError`, as for D10 and D12.
+  * **Deviation from the design text:** the attribute also appears on `sym_load` and `sym_gen`. `LoadGenInput` is a
+    single template input class, so the code generator emits one attribute list for the symmetric and asymmetric
+    instantiations, and a separate asymmetric-only class would clash with the generated alias `AsymLoadGenInput`.
+    `sym_load` and `sym_gen` accept `wye` and `na`; `delta` raises `InvalidPhaseConnection` with the ID ("a delta
+    connection is only supported for asym_load and asym_gen"). The later delta `sym_load` reuses the attribute.
+* **D27. Meaning of the entries.** For a delta load_gen, `p_specified`/`q_specified` are the **ab, bc, ca** values.
+  Entry k is the branch from the first to the second letter: $U_{ab} = U_a - U_b$, $U_{bc} = U_b - U_c$,
+  $U_{ca} = U_c - U_a$. A single phase-to-phase load is a delta load with one non-zero entry; a load between a and
+  c uses the ca entry, also at an `ac` node. The orientation does not affect the power (flipping $U_k$ also flips
+  $I_k$). Signs follow the existing load and generator reference directions.
+* **D28. Absent phases (D3) for delta.** An entry is "specified" by the same exact test as for wye (not NaN and not
+  0), and a specified entry needs **both** of its phases at the node: abc allows ab, bc and ca; ab (three-phase
+  pattern or split-phase) allows ab; bc allows bc; ac allows ca; a, b or c allow none. Otherwise
+  `LoadGenOnAbsentPhase` is raised, with the existing prefix (so the existing error mappings still match) and the
+  tail "A delta (phase-to-phase) entry needs both of its phases: ab needs a and b, bc needs b and c, ca needs c and
+  a." The wye message is unchanged. The check runs in the same place and under the same conditions as for wye, and
+  the batch cache run still swallows it. As a defensive layer in the solvers, an entry is *active* iff it is not
+  exactly 0 (NaN counts as active, as for wye) and both of its phases are present; inactive entries contribute
+  exactly nothing.
+* **D29. Voltage dependence and per unit.** The power base is the usual $S_{b,1p} = 10^6/3$ VA, so a delta entry
+  is $S_k = \pm(p_k + jq_k)/S_{b,1p}$ through the existing `set_power`; the voltage base is the phase-to-earth base
+  $u_{rated}/\sqrt3$ of the node, so $U_{\Delta,k} = (U_p - U_q)/U_b$. The nominal branch voltage comes from the
+  slot pattern of D25: $U_{\Delta,nom} = \sqrt3$ (u_rated) for `three_phase` and $2$ ($2u_{rated}/\sqrt3$, 480 V
+  on a 240-0-240 V node) for `split_phase`. The branch power is
+  $S_k(U) = S_k (|U_{\Delta,k}|/U_{\Delta,nom})^n$ with $n = 0, 1, 2$ for `const_pq`, `const_i`, `const_y`. So
+  `p_specified[k]` is the power at rated voltage across that branch (a `const_y` entry of 10 kW at a 400 V node is
+  16 Ω). This matches the OpenDSS `kV` of a delta load, which is the branch voltage. Wye is the special case
+  $D = I$, $U_{nom} = 1$.
+* **D30. Output: per-phase node quantities.** `i` is the conductor current $|I_p|$ with $I = D^T I_\Delta$, and
+  $s_p = U_p \overline{I_p}$ gives `p`, `q`, `s` and `pf` per phase. This fits `ApplianceOutput` unchanged, keeps
+  the per-phase node power balance, keeps `calculate_source_result` and the voltage-regulator distribution (which
+  sum `load_gen.i` or `.s` per phase) correct, and equals the OpenDSS terminal values (`CktElement.Powers`);
+  $\sum_p p_p = \sum_k \mathrm{Re}\,S_k(U)$. The surprise is documented: at balanced voltages a resistive ab
+  load P gives $p_a = p_b = P/2$, $q_a = -P/(2\sqrt3)$, $q_b = +P/(2\sqrt3)$ and 0 on c; at a split-phase node
+  ($U_b = -U_a$) it gives $s_a = s_b = S/2$. Branch-level output (p_ab, ...) would need new solver output fields
+  and can be added later.
+* **D31. Short circuit.** Loads are ignored in short circuits (`get_null_sc_output`, and the short-circuit solver
+  has no load_gen code), so delta loads need no short-circuit change. A model whose only special feature is delta
+  loads may still use the **symmetric** short circuit (all faults three-phase). The experimental gate still applies.
+* **D32. Where delta is allowed: at all nodes, abc included.** `ComponentTopology::load_gen_connection` and
+  `MathModelTopology::load_gen_connection` are **empty unless a delta load_gen exists** (per math model, and only
+  for a connected delta load_gen). The solvers test `topo.is_delta_load_gen(i)`, which is false when the vector is
+  empty, and the wye arithmetic is untouched, so wye-only networks keep the bit-identical fast path.
+* **D33. Calculation gates.**
+  * **(a) Experimental** until M9: any delta load_gen in the input (status and connectivity ignored, like M4)
+    raises `ExperimentalFeature` ("A delta-connected load or generator is an experimental feature"). This check
+    comes after the reduced-phase gate, whose message wins.
+  * **(b) State estimation** raises `ReducedPhaseNotSupported` for both symmetries and all methods: state
+    estimation is "Later", and the measured-values load/gen distribution has no delta model.
+  * **(c) Symmetric power flow** raises `ReducedPhaseNotSupported` (open question 2 stays out of scope). The
+    symmetric short circuit is allowed (D31).
+  * **(d) One exception class.** Both use `ReducedPhaseNotSupported` (D6) with a second message flavour
+    (`ReducedPhaseNotSupported::Cause::delta_load_gens`): "{feature} is not supported in a network with
+    delta-connected loads or generators." The C++ validation regex accepts both flavours (the Python mapping
+    follows with the Python enum).
+  * **(e) Voltage regulators.** A `voltage_regulator` on a delta load_gen raises the existing
+    `UnsupportedLoadGenTypeForVoltageRegulator`. A non-regulated delta load at a PV bus is allowed.
+
 ## Component models (phase domain)
 
 ### Per-unit convention for reduced-phase nodes
@@ -693,22 +759,58 @@ and short circuit `tests/data/short_circuit/single-phase-transformer-split-phase
 
 ### Phase-to-phase loads: `connection` on `asym_load` / `asym_gen`
 
-* **New attribute.** `connection`, of a new enum `LoadGenConnection {wye = 0, delta = 1}` (input-only, default
-  `wye`). For a delta connection the three `p_specified`/`q_specified` entries are the ab, bc and ca values. A
-  single phase-to-phase load is a delta load with one non-zero entry.
-* **Model.** With $D = \begin{bmatrix}1&-1&0\\0&1&-1\\-1&0&1\end{bmatrix}$ and $U_\Delta = D U$:
+Implemented in M7 (decisions D26 to D33).
+
+* **Attribute.** `connection`, of the enum `LoadGenConnection {wye = 0, delta = 1}` (input-only, default `wye`;
+  D26). For a delta connection the three `p_specified`/`q_specified` entries are the ab, bc and ca values (D27).
+  A single phase-to-phase load is a delta load with one non-zero entry. The attribute is also present on
+  `sym_load`/`sym_gen`, where `delta` is rejected.
+* **Model.** With $D = \begin{bmatrix}1&-1&0\\0&1&-1\\-1&0&1\end{bmatrix}$, $U_\Delta = D U$ and, per active
+  entry $k = (p, q)$ (ab = (a, b), bc = (b, c), ca = (c, a)):
 
   $$
-  I_\Delta = \overline{S_\Delta / U_\Delta}, \qquad I_{abc} = D^{T} I_\Delta
+  S_k(U) = S_k \left(\frac{|U_{\Delta,k}|}{U_{\Delta,nom}}\right)^n, \qquad
+  I_{\Delta,k} = \overline{S_k(U) / U_{\Delta,k}}, \qquad I_{abc} = D^{T} I_\Delta, \qquad s = U \circ \overline{I}
   $$
 
-* **Constant current and impedance.** These scale with $|U_\Delta| / U_{\Delta,nom}$. $U_{\Delta,nom}$ comes from
-  the bus slot pattern: $\sqrt3$ for a 120° pattern and $2$ for a 180° split-phase pattern.
-* **Newton-Raphson.** The load power now depends on the angles and magnitudes of the *other* phases at the same
-  bus. The derivatives go into off-diagonal entries of the bus's own 3×3 H/N/M/L blocks, so the sparsity pattern
-  does not change. The solver header's assumption that $\partial PQ_{sp} / \partial\theta = 0$ no longer holds and
-  must be updated.
-* **Wiring.** Add `load_gen_connection` to `MathModelTopology`, next to `load_gen_type`.
+  with $n = 0, 1, 2$ for `const_pq`, `const_i`, `const_y` and $U_{\Delta,nom}$ from the bus slot pattern
+  (`slot_pattern(bus)`, D25): $\sqrt3$ for `three_phase` and $2$ for `split_phase` (D29). Equivalently, with
+  $\alpha_p = U_p/U_{\Delta,k}$ and $\alpha_q = -U_q/U_{\Delta,k}$ ($\alpha_p + \alpha_q = 1$), entry k adds
+  $g_r = S_k(U)\,\alpha_r$ to the phase powers of p and q, so $\sum_r g_r = S_k(U)$ (conservation).
+* **Newton-Raphson.** The load power depends on the angles and magnitudes of the *other* phases at the same bus.
+  With $\beta = S_k(U)\alpha_p\alpha_q$ and $\sigma = \begin{bmatrix}1&-1\\-1&1\end{bmatrix}$ over
+  $r, s \in \{p, q\}$:
+
+  $$
+  \frac{\partial g_r}{\partial \theta_s} = j\sigma_{rs}\beta - n\,g_r\,\mathrm{Im}\,\alpha_s, \qquad
+  V_s\frac{\partial g_r}{\partial V_s} = \sigma_{rs}\beta + n\,g_r\,\mathrm{Re}\,\alpha_s
+  $$
+
+  These go, with the solver convention $J = \partial PQ_{cal} - \partial PQ_{sp}$, into the H/N/M/L entries of the
+  bus's own 3×3 diagonal block (`add_delta_load` in `newton_raphson_pf_solver.hpp`), so the sparsity pattern does not
+  change. The rows satisfy two invariants that the tests use: $\sum_s \partial/\partial\theta_s = 0$ (rotation) and
+  $\sum_s V_s \partial g_r/\partial V_s = n g_r$ (Euler homogeneity). The solver header documents the wye rule
+  ($\partial PQ_{sp}/\partial\theta = 0$) and the delta terms.
+* **Iterative current.** The right-hand side gets $D^T I_\Delta(U)$; the prefactorised matrix is unchanged.
+* **Linear power flow and the Newton-Raphson linear start.** Constant admittance at nominal voltage:
+  $Y_{add} = -D^T \mathrm{diag}(\overline{S_k}/U_{\Delta,nom}^2) D$, i.e. per active entry
+  $y_k = -\overline{S_k}/U_{\Delta,nom}^2$ is added to $(p,p)$ and $(q,q)$ and subtracted from $(p,q)$ and $(q,p)$.
+  Wye is the case $D = I$, $U_{nom} = 1$.
+* **Results.** `calculate_load_gen_result` gives $i = D^T I_\Delta$ and $s = U \circ \overline{i}$ per phase (D30).
+* **Exact zeros.** Inactive entries (exactly 0, or touching an absent phase) are skipped before any division, so
+  $U_{\Delta,k} = 0$ on absent slots never produces NaN, and the absent slot rows and columns of the current,
+  power, Jacobian and admittance are exactly +0. The existing absent-phase masks stay as the second layer. An active
+  entry between two present phases at equal voltage would divide by 0; this is not physical in a power flow and
+  surfaces as `IterationDiverge` or NaN.
+* **Math (`<core>/math_solver/delta_load_gen.hpp`).** The pure functions `nominal_voltage`, `voltage_exponent`,
+  `is_active`, `branch_power`, `phase_current`, `phase_power`, `power_and_jacobian` and `linear_admittance`,
+  checked against closed forms (balanced three-phase and split-phase) and against central finite differences of
+  `phase_power`.
+* **Wiring.** `GenericLoadGen::connection()`; `ComponentTopology::load_gen_connection` (registered in
+  `<core>/main_core/topology.hpp` only if a load_gen is delta, otherwise cleared), passed through
+  `ReducedComponentTopology` and the supernode reduction, and coupled in `Topology::couple_all_appliance` into
+  `MathModelTopology::load_gen_connection`, which a math model only gets (all `wye`, then `delta` by position) when
+  one of its connected load_gens is delta (D32).
 * **Alternative rejected.** A separate `delta_load` component would duplicate the load, sensor and output
   machinery.
 
@@ -736,8 +838,15 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 
 * **Flag.** `has_reduced_phase_components` is set at model construction when any branch reports a phase incidence
   other than abc → abc (`Branch::phase_incidence()`). That covers an `asym_line` with `phases != abc` (M3) and, once
-  it exists, a `single_phase_transformer` (M5), without a per-type list. Delta loads (M7) would need an extra term.
-  `phases` is input-only, so the flag never changes after construction.
+  it exists, a `single_phase_transformer` (M5), without a per-type list. `phases` is input-only, so the flag never
+  changes after construction.
+* **Delta loads (M7).** A second flag, `has_delta_load_gens`, is set at construction when the component topology
+  has a `load_gen_connection` vector, i.e. when any `asym_load` or `asym_gen` is delta (status and connectivity
+  ignored; `connection` is input-only). The reduced-phase checks run first, so their message wins; then a model with
+  delta load_gens raises `ReducedPhaseNotSupported` with the delta flavour for state estimation (both symmetries)
+  and for symmetric power flow. The short-circuit symmetry selection is unchanged: loads are ignored in short
+  circuits, so the symmetric short circuit stays valid (decision D31). The experimental gate checks the flag after
+  the reduced-phase gate (decision D33).
 * **Disconnected components count.** The flag looks at the input, not at the derived topology, so a reduced-phase
   line that is switched off (or a whole de-energised reduced-phase feeder) still marks the model. This is
   deterministic and independent of status updates in a batch.
@@ -750,7 +859,8 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 * **Batch.** The check runs in `calculate()`, so it also runs in the batch cache run and is reported as one regular
   error, not as a batch error per scenario.
 * **Backstops.** `MathSolver<symmetric_t>` (M2) and `AsymLine::sym_calc_param()` (M3) throw as well; they cannot be
-  reached while the model-level check is in place.
+  reached while the model-level check is in place. For delta load_gens (M7), `MathSolver` rejects state estimation
+  and symmetric power flow when the math model has a `load_gen_connection` vector.
 
 ## Short-circuit specifics
 
@@ -794,7 +904,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M6 (implemented) | Centre-tapped split-phase secondary | `<core>/component/single_phase_transformer.hpp` (`ab_center_tapped`, `uk_half`/`pk_half`), `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `input.json`; slot patterns (D25) in `<core>/calculation_parameters.hpp`, `<core>/topology.hpp`, `common_solver_functions.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp` | `tests/cpp_unit_tests/component/test_single_phase_transformer.cpp` (closed-form 3x3 primitive for every primary, Kersting defaults, overrides, equivalence with an `ab` secondary, electrode, clock 6, magnetising, status, taps, loading, invalid input); `tests/cpp_unit_tests/test_topology.cpp` and `math_solver/test_math_solver_pf_reduced_phase.cpp` (slot patterns); native API test with `max_iterations = 1` (`tests/native_api_tests/test_api_model.cpp`); Python tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS (`phases=1 windings=3`, checked by YPrim), generated by `tests/data/generators/reduced_phase_opendss_cases.py`: power flow `tests/data/power_flow/single-phase-transformer/{split-phase,split-phase-flat-start,split-phase-linear}` (unbalanced 240 V loads, solid and electrode-earthed centre taps, clock 6) and short circuit `tests/data/short_circuit/single-phase-transformer-split-phase` (leg-to-earth, leg-to-leg and two-phase-to-ground faults, fault return through the centre-tap electrode); 480 V loads follow with M7 (see [the component](#new-component-single_phase_transformer)) | M / medium-high |
 | M7 | Delta loads | `input.json` (`connection`), `<core>/component/load_gen.hpp`, `MathModelTopology`, `add_loads` in the Newton-Raphson, iterative current and linear solvers, `common_solver_functions.hpp` | Finite-difference check of the Newton-Raphson Jacobian; OpenDSS `Load conn=delta` and two-phase `bus.1.2` loads | M / medium |
 | M8 | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp`, `<core>/component/fault.hpp` | `tests/data/short_circuit/swer-*` (phase-earth with `r_f` and earthing resistance) against OpenDSS fault study | S / low |
-| M9 | Python validation and documentation | `src/power_grid_model/validation/_validation.py` (required values, `validate_asym_line`, new `validate_single_phase_transformer`, load `connection`, sensor branch lists), `docs/user_manual/components.md`, `docs/user_manual/calculations.md`, `docs/algorithms/sc-algorithms.md`, example notebook | `tests/unit/validation/*` | M / low |
+| M9 | Python validation and documentation | `src/power_grid_model/validation/_validation.py` (required values, `validate_asym_line`, new `validate_single_phase_transformer`, load `connection`: `wye`/`delta`/not provided, `delta` only on `asym_load` and `asym_gen`, delta entries only on the phase pairs present at the node (D28), no voltage regulator on a delta load_gen, sensor branch lists), `docs/user_manual/components.md`, `docs/user_manual/calculations.md`, `docs/algorithms/sc-algorithms.md`, example notebook | `tests/unit/validation/*` | M / low |
 | Later | State estimation with masks; tap regulator on `single_phase_transformer`; sources on reduced-phase nodes; delta `sym_load`; *c* per fault location | — | — | — |
 
 ### Cross-cutting concerns

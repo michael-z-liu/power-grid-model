@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <exception> // NOLINT(misc-include-cleaner)
 #include <map>
@@ -1483,6 +1484,281 @@ TEST_CASE("API Model - centre-tapped single phase transformer") {
             check_throws_with([&fault_current]() { fault_current(fault_type_three_phase, fault_phase_abc); },
                               PGM_regular_error,
                               "The short circuit phases (abc) are not all present at the faulted node"s);
+        }
+    }
+}
+
+namespace {
+// LoadGenType values
+constexpr int load_gen_type_const_pq = 0;
+constexpr int load_gen_type_const_y = 1;
+
+// node 1 (abc, 400 V, source with the default sk), optionally node 4 (400 V), with the given components, each preceded
+// by a comma
+std::string delta_load_model_json(std::string_view components, bool with_node_4 = false) {
+    using namespace std::string_literals;
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 400})json"s +
+           (with_node_4 ? R"json(,
+      {"id": 4, "u_rated": 400})json"s
+                        : ""s) +
+           R"json(
+    ],
+    "source": [
+      {"id": 2, "node": 1, "status": 1, "u_ref": 1.0}
+    ])json"s +
+           std::string{components} + R"json(
+  }
+})json"s;
+}
+
+// an asym_load with the given connection (1 = delta), type and specified active power at the given node, no reactive
+// power
+std::string delta_asym_load(int node, int type, std::array<double, 3> const& p_specified) {
+    using namespace std::string_literals;
+    return R"json(,
+    "asym_load": [
+      {"id": 3, "node": )json"s +
+           std::to_string(node) + R"json(, "status": 1, "type": )json"s + std::to_string(type) +
+           R"json(, "p_specified": [)json"s + std::to_string(p_specified[0]) + ", "s + std::to_string(p_specified[1]) +
+           ", "s + std::to_string(p_specified[2]) + R"json(], "q_specified": [0, 0, 0], "connection": 1}
+    ])json"s;
+}
+
+struct LoadGenPhaseResult {
+    std::array<double, 3> p{};
+    std::array<double, 3> q{};
+    std::array<double, 3> i{};
+};
+
+LoadGenPhaseResult get_asym_load_result(Buffer const& load_output) {
+    LoadGenPhaseResult result;
+    load_output.get_value(PGM_def_asym_output_asym_load_p, result.p.data(), -1);
+    load_output.get_value(PGM_def_asym_output_asym_load_q, result.q.data(), -1);
+    load_output.get_value(PGM_def_asym_output_asym_load_i, result.i.data(), -1);
+    return result;
+}
+} // namespace
+
+TEST_CASE("API Model - delta load") {
+    using namespace std::string_literals;
+
+    // 40 kW between a and b at a 400 V node: 100 A in both conductors; at balanced voltages each phase takes half of
+    // the power, with -P/(2 sqrt3) and +P/(2 sqrt3) reactive power on a and b
+    constexpr double p_delta = 40e3;
+    auto const const_pq_load = delta_load_model_json(delta_asym_load(1, load_gen_type_const_pq, {p_delta, 0.0, 0.0}));
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+    options.set_symmetric(0);
+
+    Buffer load_output{PGM_def_asym_output_asym_load, 1};
+    load_output.set_nan();
+    DatasetMutable asym_output{"asym_output", false, 1};
+    asym_output.add_buffer("asym_load", 1, 1, nullptr, load_output);
+
+    SUBCASE("Experimental features are required") {
+        auto const owning_input_dataset = load_dataset(const_pq_load);
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_experimental_features(PGM_experimental_features_disabled);
+        check_throws_with([&model, &asym_output](auto const& opt) { model.calculate(opt, asym_output); },
+                          PGM_regular_error, "A delta-connected load or generator is an experimental feature"s,
+                          options);
+    }
+
+    SUBCASE("Asymmetric power flow") {
+        for (auto const [method, type] :
+             {std::pair{PGM_newton_raphson, load_gen_type_const_pq},
+              std::pair{PGM_iterative_current, load_gen_type_const_pq}, std::pair{PGM_linear, load_gen_type_const_y}}) {
+            CAPTURE(static_cast<int>(method));
+            CAPTURE(type);
+            auto const owning_input_dataset =
+                load_dataset(delta_load_model_json(delta_asym_load(1, type, {p_delta, 0.0, 0.0})));
+            Model model{50.0, owning_input_dataset.dataset};
+            options.set_calculation_method(method);
+            load_output.set_nan();
+            model.calculate(options, asym_output);
+            auto const [p, q, i] = get_asym_load_result(load_output);
+
+            double const q_ab = p_delta / (2.0 * std::numbers::sqrt3);
+            CHECK(p[0] == doctest::Approx(p_delta / 2.0).epsilon(1e-4));
+            CHECK(p[1] == doctest::Approx(p_delta / 2.0).epsilon(1e-4));
+            CHECK(q[0] == doctest::Approx(-q_ab).epsilon(1e-4));
+            CHECK(q[1] == doctest::Approx(q_ab).epsilon(1e-4));
+            CHECK(i[0] == doctest::Approx(100.0).epsilon(1e-4));
+            CHECK(i[1] == doctest::Approx(100.0).epsilon(1e-4));
+            // the c conductor carries nothing
+            CHECK(p[2] == 0.0);
+            CHECK(q[2] == 0.0);
+            CHECK(i[2] == 0.0);
+            if (type == load_gen_type_const_pq) {
+                // the branch power is exactly the specified power
+                CHECK(p[0] + p[1] == doctest::Approx(p_delta).epsilon(1e-9));
+                CHECK(q[0] + q[1] == doctest::Approx(0.0).epsilon(1e-9).scale(p_delta));
+            }
+        }
+    }
+
+    SUBCASE("Symmetric power flow is not supported") {
+        auto const owning_input_dataset = load_dataset(const_pq_load);
+        Model model{50.0, owning_input_dataset.dataset};
+        Buffer sym_load_output{PGM_def_sym_output_asym_load, 1};
+        DatasetMutable sym_output{"sym_output", false, 1};
+        sym_output.add_buffer("asym_load", 1, 1, nullptr, sym_load_output);
+        options.set_symmetric(1);
+        check_throws_with(
+            [&model, &sym_output](auto const& opt) { model.calculate(opt, sym_output); }, PGM_regular_error,
+            "Symmetric power flow is not supported in a network with delta-connected loads or generators"s, options);
+    }
+
+    SUBCASE("State estimation is not supported") {
+        auto const owning_input_dataset = load_dataset(const_pq_load);
+        Model model{50.0, owning_input_dataset.dataset};
+        Buffer sym_load_output{PGM_def_sym_output_asym_load, 1};
+        DatasetMutable sym_output{"sym_output", false, 1};
+        sym_output.add_buffer("asym_load", 1, 1, nullptr, sym_load_output);
+        options.set_calculation_type(PGM_state_estimation);
+        for (Idx const symmetric : {0, 1}) {
+            options.set_symmetric(symmetric);
+            auto& output = symmetric == 0 ? asym_output : sym_output;
+            check_throws_with(
+                [&model, &output](auto const& opt) { model.calculate(opt, output); }, PGM_regular_error,
+                "State estimation is not supported in a network with delta-connected loads or generators"s, options);
+        }
+    }
+
+    SUBCASE("A three-phase fault is calculated symmetrically and the load is ignored") {
+        auto const owning_input_dataset = load_dataset(
+            delta_load_model_json(delta_asym_load(1, load_gen_type_const_pq, {p_delta, 0.0, 0.0}) + R"json(,
+    "fault": [
+      {"id": 9, "status": 1, "fault_type": 0, "fault_phase": 0, "fault_object": 1}
+    ])json"s));
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_calculation_type(PGM_short_circuit);
+        options.set_calculation_method(PGM_iec60909);
+        Buffer fault_output{PGM_def_sc_output_fault, 1};
+        fault_output.set_nan();
+        Buffer sc_load_output{PGM_def_sc_output_asym_load, 1};
+        sc_load_output.set_nan();
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("fault", 1, 1, nullptr, fault_output);
+        sc_output.add_buffer("asym_load", 1, 1, nullptr, sc_load_output);
+        REQUIRE_NOTHROW(model.calculate(options, sc_output));
+        std::array<double, 3> i_f{};
+        std::array<double, 3> i_load{};
+        fault_output.get_value(PGM_def_sc_output_fault_i_f, i_f.data(), -1);
+        sc_load_output.get_value(PGM_def_sc_output_asym_load_i, i_load.data(), -1);
+        CHECK(i_f[0] > 0.0);
+        CHECK(i_f[1] == doctest::Approx(i_f[0]));
+        CHECK(i_f[2] == doctest::Approx(i_f[0]));
+        CHECK(i_load == std::array{0.0, 0.0, 0.0});
+    }
+
+    SUBCASE("A sym_load cannot be delta") {
+        auto const owning_input_dataset = load_dataset(delta_load_model_json(R"json(,
+    "sym_load": [
+      {"id": 6, "node": 1, "status": 1, "type": 0, "p_specified": 1000, "q_specified": 0, "connection": 1}
+    ])json"));
+        check_throws_with([&owning_input_dataset]() { Model{50.0, owning_input_dataset.dataset}; }, PGM_regular_error,
+                          "Invalid phase connection for sym_load 6 with phases (delta): a delta connection is only "
+                          "supported for asym_load and asym_gen"s);
+    }
+
+    SUBCASE("A delta generator cannot be voltage regulated") {
+        auto const owning_input_dataset = load_dataset(delta_load_model_json(R"json(,
+    "asym_gen": [
+      {"id": 6, "node": 1, "status": 1, "type": 0, "p_specified": [1000, 0, 0], "q_specified": [0, 0, 0],
+       "connection": 1}
+    ],
+    "voltage_regulator": [
+      {"id": 7, "regulated_object": 6, "status": 1, "u_ref": 1.0}
+    ])json"));
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_calculation_method(PGM_newton_raphson);
+        Buffer gen_output{PGM_def_asym_output_asym_gen, 1};
+        DatasetMutable gen_dataset{"asym_output", false, 1};
+        gen_dataset.add_buffer("asym_gen", 1, 1, nullptr, gen_output);
+        check_throws_with([&model, &gen_dataset](auto const& opt) { model.calculate(opt, gen_dataset); },
+                          PGM_regular_error, "Unsupported load_gen type for voltage regulators 7."s, options);
+    }
+
+    SUBCASE("A 480 V delta load at a split-phase node") {
+        // the network is antisymmetric (U_b = -U_a), so both legs take half of the power; the nominal branch voltage
+        // of the delta entry is 2 u_rated / sqrt3 = 480 V
+        constexpr double p_split = 4e3;
+        Buffer node_output{PGM_def_asym_output_node, 2};
+        asym_output.add_buffer("node", 2, 2, nullptr, node_output);
+        for (auto const [method, type] : {std::pair{PGM_newton_raphson, load_gen_type_const_pq},
+                                          std::pair{PGM_newton_raphson, load_gen_type_const_y},
+                                          std::pair{PGM_iterative_current, load_gen_type_const_y}}) {
+            CAPTURE(static_cast<int>(method));
+            CAPTURE(type);
+            auto const load = R"json(,
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": )json"s +
+                              std::to_string(type) + R"json(, "p_specified": [4000, 0, 0], "q_specified": [0, 0, 0],
+       "connection": 1}
+    ])json"s;
+            auto const owning_input_dataset = load_dataset(split_phase_model_json(load));
+            Model model{50.0, owning_input_dataset.dataset};
+            options.set_calculation_method(method);
+            load_output.set_nan();
+            node_output.set_nan();
+            model.calculate(options, asym_output);
+            auto const [p, q, i] = get_asym_load_result(load_output);
+            std::array<std::array<double, 3>, 2> u{};
+            std::array<std::array<double, 3>, 2> u_angle{};
+            node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+            node_output.get_value(PGM_def_asym_output_node_u_angle, u_angle.data(), -1);
+
+            CHECK(p[0] == doctest::Approx(p[1]).epsilon(1e-9));
+            CHECK(q[0] == doctest::Approx(q[1]).epsilon(1e-9).scale(p_split));
+            CHECK(i[0] == doctest::Approx(i[1]).epsilon(1e-9));
+            CHECK(p[2] == 0.0);
+            CHECK(i[2] == 0.0);
+            double const u_ab = std::abs(std::polar(u[1][0], u_angle[1][0]) - std::polar(u[1][1], u_angle[1][1]));
+            CHECK(u_ab == doctest::Approx(480.0).epsilon(0.05));
+            double const expected = type == load_gen_type_const_y ? p_split * (u_ab / 480.0) * (u_ab / 480.0) : p_split;
+            CHECK(p[0] + p[1] == doctest::Approx(expected).epsilon(1e-9));
+        }
+    }
+
+    SUBCASE("A delta entry needs both of its phases") {
+        // node 4 behind an ab line
+        auto const ab_line_load = [](std::array<double, 3> const& p_specified) {
+            return delta_load_model_json(R"json(,
+    "asym_line": [
+      {"id": 5, "from_node": 1, "to_node": 4, "from_status": 1, "to_status": 1, "phases": 4,
+       "r_aa": 0.05, "x_aa": 0.04, "r_ba": 0.01, "x_ba": 0.02, "r_bb": 0.05, "x_bb": 0.04,
+       "c_aa": 1e-9, "c_ba": 0, "c_bb": 1e-9}
+    ])json"s + delta_asym_load(4, load_gen_type_const_pq, p_specified),
+                                         true);
+        };
+        options.set_calculation_method(PGM_newton_raphson);
+        SUBCASE("An ab entry") {
+            auto const owning_input_dataset = load_dataset(ab_line_load({1000.0, 0.0, 0.0}));
+            Model model{50.0, owning_input_dataset.dataset};
+            model.calculate(options, asym_output);
+            auto const [p, q, i] = get_asym_load_result(load_output);
+            CHECK(p[0] + p[1] == doctest::Approx(1000.0).epsilon(1e-9));
+            CHECK(i[0] == doctest::Approx(i[1]).epsilon(1e-9));
+            CHECK(p[2] == 0.0);
+            CHECK(i[2] == 0.0);
+        }
+        SUBCASE("A bc entry") {
+            auto const owning_input_dataset = load_dataset(ab_line_load({0.0, 1000.0, 0.0}));
+            Model model{50.0, owning_input_dataset.dataset};
+            check_throws_with([&model, &asym_output](auto const& opt) { model.calculate(opt, asym_output); },
+                              PGM_regular_error,
+                              "Load or generator 3 has a non-zero specified power on phases (c) that are not present "
+                              "at its node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases"s,
+                              options);
         }
     }
 }
