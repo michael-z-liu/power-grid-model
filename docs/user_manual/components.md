@@ -450,7 +450,8 @@ the to side; on the from side it raises `InvalidPhaseConnection`. The from-side 
   magnetizing admittance, as for the other connections.
 * **Short circuits at the split-phase node.** `single_phase_to_ground` on `a` or `b` (leg to earth, which is the
   centre tap when it is solidly earthed), `two_phase` on `ab` (480 V) and `two_phase_to_ground` on `ab` are valid.
-  `three_phase`, and the default phases of the two-phase faults (`bc`), raise `InvalidShortCircuitPhaseOrType`.
+  `three_phase`, and the default phases of the two-phase faults (`bc`), raise `InvalidShortCircuitPhaseOrType`,
+  naming the fault.
 * **Start values.** The iterative power flow methods start leg `b` of a split-phase node, and of the nodes without
   phase `c` that are connected to it by lines or links, opposite to leg `a`. A transformer that is fed *from* a split-phase node
   (for example an `ab` or `b` from-side winding on a 240-0-240 V node) still gets a start that assumes 120° between
@@ -640,6 +641,8 @@ includes the earth return.
   (`ReducedPhaseNotSupported`). A short circuit is always calculated asymmetrically.
 * Loads and generators may not have power on a phase that is not present at their node, and shunts are not
   supported at a node without all phases.
+* A fault may only involve phases present at its node (see "Faults at nodes without all phases" under
+  [Fault](#fault)).
 * The output of an absent phase is 0.
 
 See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
@@ -1454,6 +1457,37 @@ The supported values of `fault_phase`, as well as its default value, are listed 
 | `FaultType.single_phase_to_ground` | `FaultPhase.a`, `FaultPhase.b`, `FaultPhase.c`    | `FaultPhase.a`             | One phase is grounded with fault impedance, and other phases are open. |
 | `FaultType.two_phase`              | `FaultPhase.bc`, `FaultPhase.ac`, `FaultPhase.ab` | `FaultPhase.bc`            | Two phases are connected with fault impedance.                         |
 | `FaultType.two_phase_to_ground`    | `FaultPhase.bc`, `FaultPhase.ac`, `FaultPhase.ab` | `FaultPhase.bc`            | Two phases are connected with fault impedance then grounded.           |
+
+##### Faults at nodes without all phases
+
+```{warning}
+Nodes without all phases are an experimental feature (see [Asym Line](#asym-line) and
+[Single-Phase Transformer](#single-phase-transformer)).
+```
+
+The phases of a fault must all be present at its node. The phases of a node are derived from the lines and
+transformer windings connected to it. The valid faults are:
+
+| node phases                                | valid faults                                                                                   |
+|--------------------------------------------|------------------------------------------------------------------------------------------------|
+| `a`, `b` or `c` (for example a SWER node)  | `single_phase_to_ground` on that phase (at an `a` node this is also the default)               |
+| two phases, for example `ab`               | `single_phase_to_ground` on either phase; `two_phase` and `two_phase_to_ground` on both phases |
+| split phase (`ab_center_tapped` secondary) | `single_phase_to_ground` on `a` or `b`; `two_phase` and `two_phase_to_ground` on `ab`          |
+| `abc`                                      | all faults; `three_phase` is only valid here                                                   |
+
+* A fault on a phase that is not present at its node raises `InvalidShortCircuitPhaseOrType`, naming the fault, its
+  node and the phases of the node, for example "The short circuit phases (b) of fault 601 are not all present at its
+  node 4 (node phases: a); this short circuit type cannot be applied there".
+* The default phases (`a` for `single_phase_to_ground`, `bc` for `two_phase` and `two_phase_to_ground`) are not
+  adapted to the node. At a node without these phases, set `fault_phase` explicitly; the error message says when the
+  phases are the default of the fault type. For a SWER network fed by a `single_phase_transformer`, a
+  `to_connection` of `a` makes the default single-phase fault valid.
+* A fault with `status` 0 and a fault at an isolated or de-energised node are not checked; their output is 0.
+* In a batch calculation, the check runs for each scenario, so the update data may fix the base input.
+* The rule that all faults in one calculation have the same `fault_type` and `fault_phase` still applies. A fault on
+  a SWER line on phase `a` and a fault on a lateral on phase `b` therefore cannot be in one scenario.
+* The voltage factor $c$ is taken from the `u_rated` of the source node, not from the fault location. For a fault on
+  a 240 V node fed from a 22 kV source, $c$ follows the 22 kV level.
 
 ## Regulator
 

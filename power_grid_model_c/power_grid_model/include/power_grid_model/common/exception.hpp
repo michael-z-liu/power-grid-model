@@ -319,6 +319,16 @@ class InvalidShortCircuitPhases : public PowerGridError {
         : PowerGridError{std::format("The short circuit phases ({}) are not all present at the faulted node (node "
                                      "phases: {}); this short circuit type cannot be applied there\n",
                                      short_circuit_phases, node_phases)} {}
+    // a fault whose phases are not all present at its node (model-level check, M8); default_phases: the phases are the
+    // default of the fault type
+    InvalidShortCircuitPhases(ID fault_id, ID node_id, std::string_view short_circuit_phases,
+                              std::string_view node_phases, bool default_phases)
+        : PowerGridError{std::format("The short circuit phases ({}) of fault {} are not all present at its node {} "
+                                     "(node phases: {}); this short circuit type cannot be applied there{}\n",
+                                     short_circuit_phases, fault_id, node_id, node_phases,
+                                     default_phases ? "; the phases are the default of the fault type, so set "
+                                                      "fault_phase explicitly"
+                                                    : "")} {}
 };
 
 class InvalidShortCircuitPhaseOrType : public PowerGridError {

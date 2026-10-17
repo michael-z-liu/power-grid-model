@@ -580,6 +580,7 @@ TEST_CASE("Short circuit solver with absent phases") {
     }
 
     SUBCASE("Short circuit on an absent phase") {
+        // backstop for direct solver use; through the model the check with the fault ID runs first (M8)
         DenseGroupedIdxVector const fault_buses{from_sparse, {0, 0, 1}};
         auto const fault_on_b =
             create_sc_test_input(single_phase_to_ground, FaultPhase::b, 1.0 / z_fault, vref, fault_buses);
@@ -594,6 +595,19 @@ TEST_CASE("Short circuit solver with absent phases") {
         auto const two_phase_fault = create_sc_test_input(two_phase, FaultPhase::ab, y_fault_solid, vref, fault_buses);
         CHECK_THROWS_AS(solver.run_short_circuit(y_bus, two_phase_fault), InvalidShortCircuitPhases);
     }
+}
+
+TEST_CASE("fault_phase_mask") {
+    CHECK(fault_phase_mask(FaultPhase::abc) == phase_mask_abc);
+    CHECK(fault_phase_mask(FaultPhase::a) == phase_mask_a);
+    CHECK(fault_phase_mask(FaultPhase::b) == phase_mask_b);
+    CHECK(fault_phase_mask(FaultPhase::c) == phase_mask_c);
+    CHECK(fault_phase_mask(FaultPhase::ab) == phase_mask_ab);
+    CHECK(fault_phase_mask(FaultPhase::ac) == phase_mask_ac);
+    CHECK(fault_phase_mask(FaultPhase::bc) == phase_mask_bc);
+    // the phases must be resolved first
+    CHECK_THROWS_AS(fault_phase_mask(FaultPhase::default_value), MissingCaseForEnumError);
+    CHECK_THROWS_AS(fault_phase_mask(FaultPhase::nan), MissingCaseForEnumError);
 }
 
 } // namespace power_grid_model::math_solver

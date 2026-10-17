@@ -6,6 +6,7 @@
 
 #include "common/common.hpp"
 #include "common/enum.hpp"
+#include "common/exception.hpp"
 #include "common/grouped_index_vector.hpp"
 #include "common/maybe_owning_view.hpp"
 #include "common/small_vector.hpp"
@@ -253,6 +254,30 @@ inline void set_absent_phase_identity(three_phase_tensor::Tensor<T>& value, Phas
 constexpr std::string_view phase_letters(PhaseMask mask) {
     constexpr std::array<std::string_view, 8> letters{"-", "a", "b", "ab", "c", "ac", "bc", "abc"};
     return letters[mask.bits()];
+}
+
+// the phases that a short circuit with the given (resolved) fault phases is applied to
+constexpr PhaseMask fault_phase_mask(FaultPhase fault_phase) {
+    using enum FaultPhase;
+
+    switch (fault_phase) {
+    case abc:
+        return phase_mask_abc;
+    case a:
+        return phase_mask_a;
+    case b:
+        return phase_mask_b;
+    case c:
+        return phase_mask_c;
+    case ab:
+        return phase_mask_ab;
+    case ac:
+        return phase_mask_ac;
+    case bc:
+        return phase_mask_bc;
+    default:
+        throw MissingCaseForEnumError{"fault_phase_mask", fault_phase};
+    }
 }
 
 // how the phases of the two terminals of a branch are coupled

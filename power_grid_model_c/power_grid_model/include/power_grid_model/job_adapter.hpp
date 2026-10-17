@@ -111,6 +111,8 @@ template <class MainModel> class JobAdapter : public JobInterface {
             // the load or generator power may be fixed in the update data
         } catch (ShuntAtReducedPhaseNode const&) { // NOLINT(bugprone-empty-catch) // NOSONAR
             // the shunt may be switched off in the update data
+        } catch (InvalidShortCircuitPhases const&) { // NOLINT(bugprone-empty-catch) // NOSONAR
+            // the fault phases, fault object or status may be fixed in the update data
         }
     }
 

@@ -607,6 +607,19 @@ def test_deprecated_invalid_branch3_error():
             ShuntAtReducedPhaseNode,
             id="shunt_at_reduced_phase_node",
         ),
+        pytest.param(
+            "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); this short "
+            "circuit type cannot be applied there\n",
+            InvalidShortCircuitPhaseOrType,
+            id="short_circuit_phases_absent_at_fault_node",
+        ),
+        pytest.param(
+            "The short circuit phases (a) of fault 601 are not all present at its node 4 (node phases: b); this short "
+            "circuit type cannot be applied there; the phases are the default of the fault type, so set fault_phase "
+            "explicitly\n",
+            InvalidShortCircuitPhaseOrType,
+            id="short_circuit_default_phases_absent_at_fault_node",
+        ),
     ],
 )
 def test_interpret_reduced_phase_errors(message: str, expected_type: type[PowerGridError]):
@@ -1208,8 +1221,127 @@ def test_single_phase_transformer_center_tapped_short_circuit():
 
     # the default phases of a two-phase fault are bc, and the split-phase node has no phase c
     input_data[CT.fault][AT.fault_phase] = [FaultPhase.default_value]
-    with pytest.raises(InvalidShortCircuitPhaseOrType, match="not all present at the faulted node"):
+    with pytest.raises(
+        InvalidShortCircuitPhaseOrType,
+        match=r"of fault 600 are not all present at its node 1 .*default of the fault type",
+    ):
         PowerGridModelWithExt(input_data).calculate_short_circuit_with_ext(experimental_features=enabled)
+
+
+def _fault_phase_input(fault_type: FaultType, fault_phase: FaultPhase, node: int, status: int = 1):
+    """node 0 (abc, source) -- line 200 (a) -- node 1 (a); node 0 -- line 201 (b) and line 202 (a) -- node 2 (ab);
+    fault 600 of the given type and phases at the given node"""
+    input_data = _reduced_phase_input(
+        [PhaseConnection.a, PhaseConnection.b, PhaseConnection.a], [(0, 1), (0, 2), (0, 2)], 3
+    )
+    fault_input = initialize_array(DatasetType.input, CT.fault, 1)
+    fault_input[AT.id] = [600]
+    fault_input[AT.status] = [status]
+    fault_input[AT.fault_type] = [fault_type]
+    fault_input[AT.fault_phase] = [fault_phase]
+    fault_input[AT.fault_object] = [node]
+    input_data[CT.fault] = fault_input
+    return input_data
+
+
+@pytest.mark.parametrize(
+    ("fault_type", "fault_phase", "node", "faulted", "valid"),
+    [
+        pytest.param(FaultType.three_phase, FaultPhase.abc, 0, "abc", True, id="three_phase_at_abc"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.c, 0, "c", True, id="spg_c_at_abc"),
+        pytest.param(FaultType.two_phase, FaultPhase.default_value, 0, "bc", True, id="two_phase_default_at_abc"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.a, 1, "a", True, id="spg_a_at_a"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.default_value, 1, "a", True, id="spg_default_at_a"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.b, 1, "b", False, id="spg_b_at_a"),
+        pytest.param(FaultType.three_phase, FaultPhase.abc, 1, "abc", False, id="three_phase_at_a"),
+        pytest.param(FaultType.two_phase, FaultPhase.ab, 1, "ab", False, id="two_phase_ab_at_a"),
+        pytest.param(FaultType.two_phase, FaultPhase.default_value, 1, "bc", False, id="two_phase_default_at_a"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.b, 2, "b", True, id="spg_b_at_ab"),
+        pytest.param(FaultType.two_phase, FaultPhase.ab, 2, "ab", True, id="two_phase_ab_at_ab"),
+        pytest.param(FaultType.two_phase_to_ground, FaultPhase.ab, 2, "ab", True, id="two_phase_to_ground_ab_at_ab"),
+        pytest.param(FaultType.single_phase_to_ground, FaultPhase.c, 2, "c", False, id="spg_c_at_ab"),
+        pytest.param(FaultType.three_phase, FaultPhase.abc, 2, "abc", False, id="three_phase_at_ab"),
+        pytest.param(
+            FaultType.two_phase_to_ground,
+            FaultPhase.default_value,
+            2,
+            "bc",
+            False,
+            id="two_phase_to_ground_default_at_ab",
+        ),
+    ],
+)
+def test_fault_phases_at_reduced_phase_nodes(fault_type, fault_phase, node, faulted, valid):
+    model = PowerGridModelWithExt(_fault_phase_input(fault_type, fault_phase, node))
+    enabled = _ExperimentalFeatures.enabled
+    if not valid:
+        with pytest.raises(InvalidShortCircuitPhaseOrType, match="of fault 600 ") as error:
+            model.calculate_short_circuit_with_ext(experimental_features=enabled)
+        message = str(error.value)
+        assert f"phases ({faulted}) of fault 600 are not all present at its node {node} " in message
+        assert ("the phases are the default of the fault type" in message) == (fault_phase == FaultPhase.default_value)
+        return
+
+    i_f = model.calculate_short_circuit_with_ext(experimental_features=enabled)[CT.fault][AT.i_f][0]
+    for phase, letter in enumerate("abc"):
+        if letter in faulted:
+            assert i_f[phase] > 0.0
+        else:
+            assert i_f[phase] == 0.0
+
+
+def test_fault_phases_status_off_and_isolated():
+    enabled = _ExperimentalFeatures.enabled
+    # a fault with status off is not part of the calculation
+    model = PowerGridModelWithExt(_fault_phase_input(FaultType.single_phase_to_ground, FaultPhase.b, 1, status=0))
+    i_f = model.calculate_short_circuit_with_ext(experimental_features=enabled)[CT.fault][AT.i_f][0]
+    assert i_f.tolist() == [0.0, 0.0, 0.0]
+
+    # a fault at an isolated node has no current
+    input_data = _fault_phase_input(FaultType.single_phase_to_ground, FaultPhase.b, 1)
+    input_data[CT.asym_line][AT.from_status][0] = 0
+    model = PowerGridModelWithExt(input_data)
+    i_f = model.calculate_short_circuit_with_ext(experimental_features=enabled)[CT.fault][AT.i_f][0]
+    assert i_f.tolist() == [0.0, 0.0, 0.0]
+
+
+def test_fault_phases_batch_fixed_in_every_scenario():
+    # the cache run with the base input fails, but every scenario provides a valid fault
+    enabled = _ExperimentalFeatures.enabled
+    model = PowerGridModelWithExt(_fault_phase_input(FaultType.single_phase_to_ground, FaultPhase.b, 1))
+
+    update = initialize_array(DatasetType.update, CT.fault, (2, 1))
+    update[AT.id] = 600
+    update[AT.fault_phase] = [[FaultPhase.a], [FaultPhase.b]]
+    update[AT.fault_object] = [[1], [2]]
+    result = model.calculate_short_circuit_with_ext(update_data={CT.fault: update}, experimental_features=enabled)
+    i_f = result[CT.fault][AT.i_f]
+    assert i_f[0, 0, 0] > 0.0
+    assert i_f[1, 0, 1] > 0.0
+
+    # a single, non-batch calculation on the same model still raises
+    with pytest.raises(InvalidShortCircuitPhaseOrType, match="of fault 600 are not all present at its node 1 "):
+        model.calculate_short_circuit_with_ext(experimental_features=enabled)
+
+
+def test_fault_phases_batch_topology_change():
+    # the base fault b at the ab node 2 is valid; switching off the b line makes node 2 an a node in scenario 1
+    enabled = _ExperimentalFeatures.enabled
+    model = PowerGridModelWithExt(_fault_phase_input(FaultType.single_phase_to_ground, FaultPhase.b, 2))
+
+    update = initialize_array(DatasetType.update, CT.asym_line, (2, 1))
+    update[AT.id] = 201
+    update[AT.from_status] = [[1], [0]]
+    update[AT.to_status] = [[1], [0]]
+    result = model.calculate_short_circuit_with_ext(
+        update_data={CT.asym_line: update}, continue_on_batch_error=True, experimental_features=enabled
+    )
+    assert result[CT.fault][AT.i_f][0, 0, 1] > 0.0
+    assert model.batch_error is not None
+    assert model.batch_error.failed_scenarios.tolist() == [1]
+    assert model.batch_error.errors[0].__class__ is InvalidShortCircuitPhaseOrType
+    assert "fault 600" in model.batch_error.error_messages[0]
+    assert "(node phases: a)" in model.batch_error.error_messages[0]
 
 
 def test_load_gen_connection_exported():

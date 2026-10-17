@@ -329,6 +329,18 @@ TEST_CASE("Exceptions") {
         CHECK(msg == "The short circuit phases (abc) are not all present at the faulted node (node phases: a); this "
                      "short circuit type cannot be applied there\n");
         CHECK(msg.find("short circuit type") != std::string::npos); // mapped like the other constructor in Python
+
+        // model-level check with the fault ID (M8)
+        auto const msg_id = std::string{InvalidShortCircuitPhases{601, 4, "b", "a", false}.what()};
+        CHECK(msg_id == "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); "
+                        "this short circuit type cannot be applied there\n");
+        CHECK(msg_id.find("short circuit type") != std::string::npos);
+        auto const msg_default = std::string{InvalidShortCircuitPhases{601, 4, "b", "a", true}.what()};
+        CHECK(msg_default ==
+              "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); this "
+              "short circuit type cannot be applied there; the phases are the default of the fault type, so set "
+              "fault_phase explicitly\n");
+        CHECK(msg_default.find("short circuit type") != std::string::npos);
     }
     SUBCASE("ReducedPhaseNotSupported") {
         auto const msg = std::string{ReducedPhaseNotSupported{"State estimation"}.what()};

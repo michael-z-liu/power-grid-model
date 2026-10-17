@@ -458,32 +458,9 @@ template <symmetry_tag sym> class ShortCircuitSolver {
         }
     }
 
-    // the phases that a short circuit with the given fault phases is applied to
-    static constexpr PhaseMask fault_phase_mask(FaultPhase fault_phase) {
-        using enum FaultPhase;
-
-        switch (fault_phase) {
-        case abc:
-            return phase_mask_abc;
-        case a:
-            return phase_mask_a;
-        case b:
-            return phase_mask_b;
-        case c:
-            return phase_mask_c;
-        case ab:
-            return phase_mask_ab;
-        case ac:
-            return phase_mask_ac;
-        case bc:
-            return phase_mask_bc;
-        default:
-            throw MissingCaseForEnumError{"fault_phase_mask", fault_phase};
-        }
-    }
-
     // in a math model with one- or two-phase buses, a short circuit must only involve phases present at its bus;
-    // otherwise it would silently result in a zero fault current
+    // otherwise it would silently result in a zero fault current; backstop for direct solver use; the model checks
+    // with the fault ID first (M8)
     static void check_fault_phases_present(MathModelTopology const& topo, ShortCircuitInput const& input) {
         if (!topo.has_reduced_phase) {
             return;

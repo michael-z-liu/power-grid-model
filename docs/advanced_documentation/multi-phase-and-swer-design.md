@@ -187,7 +187,7 @@ sparse LU never see a singular block, and ordinary three-phase grids are unaffec
 | Iterative current, delta loads (M7) | The right-hand side gets $D^T I_\Delta(U)$ instead of the wye current; the matrix is unchanged. |
 | Linear power flow, delta loads (M7) | `add_linear_loads` adds the delta constant admittance $-D^T \mathrm{diag}(\overline{S_k}/U_{\Delta,nom}^2) D$ to the bus's diagonal block. |
 | Results (`common_solver_functions.hpp`) | The load/gen `s` and `i` (`conj(s/u)`) are set to 0 on absent slots. Bus injection is exactly 0 there because $U_p = 0$. For a delta load_gen (M7), `calculate_load_gen_result` gives the phase current $D^T I_\Delta$ and $s = U \circ \overline{I}$ (decision D30). |
-| Short circuit (`short_circuit_solver.hpp`) | The Y-bus identity carries through `copy_y_bus`. Fault substitution only touches fault phases. In a reduced-phase model the solver checks that the fault phases are present at the faulted bus and raises `InvalidShortCircuitPhases` otherwise, so a three-phase fault, or a fault on an absent phase, at a reduced bus is rejected instead of silently giving zero fault current. The ID-based check in input preparation follows in M8. |
+| Short circuit (`short_circuit_solver.hpp`) | The Y-bus identity carries through `copy_y_bus`. Fault substitution only touches fault phases. In a reduced-phase model the solver checks that the fault phases are present at the faulted bus and raises `InvalidShortCircuitPhases` otherwise, so a three-phase fault, or a fault on an absent phase, at a reduced bus is rejected instead of silently giving zero fault current. Since M8 the model-level check with the fault ID (D34) runs first; this is the backstop for direct solver use. |
 | State estimation (`math_solver.hpp`) | Not supported at first: `MathSolver::run_state_estimation` raises `ReducedPhaseNotSupported` when `has_reduced_phase`, for both symmetries and all methods. The observability check works per bus, not per phase, and pivot perturbation would hide modelling errors. |
 | Symmetric calculations (`math_solver.hpp`) | The positive-sequence Y-bus cannot represent absent phases. `MathSolver<symmetric_t>` raises `ReducedPhaseNotSupported` for power flow and short circuit on a reduced-phase model. This is a permanent backstop behind the model-level guard of M4. |
 | Voltage regulators / PV buses | Not supported on reduced-phase buses at first (see Newton-Raphson). |
@@ -529,6 +529,40 @@ Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Mi
     follows with the Python enum).
   * **(e) Voltage regulators.** A `voltage_regulator` on a delta load_gen raises the existing
     `UnsupportedLoadGenTypeForVoltageRegulator`. A non-regulated delta load at a PV bus is allowed.
+
+Taken in M8 for short-circuit phase validity (decided by recommendation under Michael's blanket approval,
+2026-10-16):
+
+* **D34. Model-level check on the fault phases.** `detail::check_fault_phases_present(state)` in
+  `<core>/main_core/calculation_input_preparation.hpp` runs in `prepare_short_circuit_input` when a math model has
+  `has_reduced_phase`, before the shunt check. For every fault with status on whose node is in a math model with
+  `has_reduced_phase`, the resolved fault phases (`get_fault_phase()`, mapped by `fault_phase_mask` in
+  `<core>/calculation_parameters.hpp`) must all be present at the node (`topo.bus_phase`, after topology and phase
+  propagation). A fault with status off (as in D3) and a fault at an isolated or de-energised node are skipped; the
+  latter keeps the null output (i_f = 0), as in three-phase networks. The first failing fault in input order raises.
+  The M2 solver check stays unchanged as an ID-less backstop for direct solver users; through the model it can no
+  longer be reached.
+* **D35. Reuse `InvalidShortCircuitPhases` with a new constructor.**
+  `InvalidShortCircuitPhases(fault_id, node_id, fault_phases, node_phases, default_phases)` gives "The short circuit
+  phases (b) of fault 601 are not all present at its node 4 (node phases: a); this short circuit type cannot be
+  applied there", with the tail "; the phases are the default of the fault type, so set fault_phase explicitly" when
+  `fault_phase` was not given or is `default_value` (`Fault::has_default_phase()`). No new class and no Python
+  change: the message keeps "short circuit type", so the Python mapping and the C++ validation regex still map it
+  to `InvalidShortCircuitPhaseOrType`, as in M2 and M6. The two existing messages are unchanged.
+* **D36. Default phases are not adapted to the node.** `default_value` keeps resolving statically
+  (`single_phase_to_ground` → a, `two_phase` and `two_phase_to_ground` → bc, `three_phase` → abc). The default
+  single-phase fault is valid at an `a` SWER node and raises, with the default tail, at a `b`- or `c`-only node; at
+  a split-phase node the default single-phase fault is valid and the default two-phase faults raise (as M6
+  documents). Not resolving per node, because node phases follow status updates (the faulted phase would change
+  silently between scenarios), because the one-type-and-phase rule compares resolved phases (two default faults at
+  an `a` and a `b` node would fail confusingly), and because rejecting first is forward-compatible. Users should
+  use `to_connection = a` for SWER secondaries so that the default applies.
+* **D37. Batch: the cache run swallows `InvalidShortCircuitPhases`.** `JobAdapter::cache_calculate_impl` catches it,
+  consistent with D3 and D4: `fault_phase`, `fault_object` and `status` can be updated, and topology changes per
+  scenario move the node phases, so the update data may fix the base fault. Each scenario runs the check on its own
+  and fails on its own, with the fault ID. During a calculation the class is only thrown by D34 and the solver
+  backstop (`Fault::check_sanity` throws it at construction and update, which the cache run does not do).
+  `InvalidShortCircuitPhaseOrType` for mixed types in the base input keeps its existing, unswallowed behaviour.
 
 ## Component models (phase domain)
 
@@ -898,24 +932,33 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 
 ## Short-circuit specifics
 
-* **Fault phase validity.**
-  * In `prepare_short_circuit_input` (`<core>/main_core/calculation_input_preparation.hpp`), check that the fault
-    phases are a subset of the node's phase mask. Otherwise throw `InvalidShortCircuitPhases`
-    (`<core>/common/exception.hpp`) with an extended message. Since M2 the short-circuit solver already rejects
-    fault phases that are absent at the faulted bus, with the constructor
-    `InvalidShortCircuitPhases(fault_phases, node_phases)`; M8 adds the check with the fault ID.
-  * Default phases (single-phase faults on a, two-phase faults on bc; `<core>/component/fault.hpp:171-194`)
-    are unchanged. They work on SWER nodes and fail with a clear error on split-phase nodes.
+* **Fault phase validity (M8, D34-D37).**
+  * In `prepare_short_circuit_input` (`<core>/main_core/calculation_input_preparation.hpp`),
+    `detail::check_fault_phases_present` checks, for every fault with status on in a math model with
+    `has_reduced_phase`, that the resolved fault phases are a subset of the node's phase mask. Otherwise it throws
+    `InvalidShortCircuitPhases` (`<core>/common/exception.hpp`) with the fault ID, the node ID and both phase sets,
+    which maps to `InvalidShortCircuitPhaseOrType` in Python. Faults with status off and faults at isolated nodes are
+    skipped (null output). The M2 check in the short-circuit solver, with the constructor
+    `InvalidShortCircuitPhases(fault_phases, node_phases)`, stays as the backstop.
+  * Default phases (single-phase faults on a, two-phase faults on bc; `Fault::get_fault_phase` in
+    `<core>/component/fault.hpp`) are not adapted to the node (D36). They work on `a` SWER nodes and fail with a clear
+    error, which says that the phases are the default, on `b`/`c` nodes and, for the two-phase faults, on
+    split-phase and other nodes without phases b and c.
+  * In a batch, the cache run swallows the error (D37), and every scenario checks its own faults with its own phase
+    masks, so a scenario that fixes the fault succeeds and one that breaks it fails with the fault ID.
 * **Valid cases:**
   * SWER phase-to-earth fault: `single_phase_to_ground` on a.
   * Split-phase leg-to-centre fault: `single_phase_to_ground` on a or b.
   * Split-phase leg-to-leg (480 V) fault: `two_phase` on ab.
+  * Two-phase node: `single_phase_to_ground` on either phase, `two_phase` and `two_phase_to_ground` on both.
+  * `three_phase` only at abc nodes.
 * **One type per calculation.** The rule that all faults in one calculation share type and phase (`check_input_valid`)
   is more restrictive in mixed networks, e.g. a SWER on slot a combined with a fault on phase b elsewhere. Keep it,
-  and document it.
+  and document it (done in M8 in `docs/user_manual/components.md`).
 * **Voltage factor *c*.** `Source::calc_param` picks *c* from the **source node** voltage level. IEC 60909 bases it
   on the nominal voltage at the fault location. This limitation exists today but matters more for long SWER and LV
-  laterals. Document it now; per-fault-location *c* is future work.
+  laterals. Documented in M8 (`docs/user_manual/components.md`); the M8 validation case `swer-c-minimum` pins the
+  source-node *c*. Per-fault-location *c* is future work.
 * **Earth return.** SWER phase-to-earth fault current is limited by:
   * the Carson self-impedance of the line, carried in `r_aa`/`x_aa`;
   * the isolating transformer's earth electrode (`r_grounding_to`);

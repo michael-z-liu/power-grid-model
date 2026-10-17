@@ -22,6 +22,7 @@
 #include <complex>
 #include <cstdint>
 #include <exception> // NOLINT(misc-include-cleaner)
+#include <initializer_list>
 #include <map>
 #include <numbers>
 #include <string>
@@ -1483,7 +1484,192 @@ TEST_CASE("API Model - centre-tapped single phase transformer") {
         SUBCASE("Three-phase is not possible") {
             check_throws_with([&fault_current]() { fault_current(fault_type_three_phase, fault_phase_abc); },
                               PGM_regular_error,
-                              "The short circuit phases (abc) are not all present at the faulted node"s);
+                              "The short circuit phases (abc) of fault 7 are not all present at its node 2 (node "
+                              "phases: ab)"s);
+        }
+    }
+}
+
+namespace {
+constexpr int fault_phase_a = 1;
+constexpr int fault_phase_bc = 6;
+constexpr int fault_phase_not_given = -128; // nan: the default of the fault type
+
+// node 1 (abc, 10 kV, source) -- asym_line 11 (a) -- node 2; node 1 -- asym_line 12 (b) -- node 3; node 4 is not
+// connected to anything (isolated); faults holds the fault components, preceded by a comma
+std::string fault_phase_model_json(std::string_view faults) {
+    using namespace std::string_literals;
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 10000},
+      {"id": 2, "u_rated": 10000},
+      {"id": 3, "u_rated": 10000},
+      {"id": 4, "u_rated": 10000}
+    ],
+    "source": [
+      {"id": 5, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e8}
+    ],
+    "asym_line": [
+      {"id": 11, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "phases": 1,
+       "r_aa": 0.5, "x_aa": 0.4, "c_aa": 1e-8},
+      {"id": 12, "from_node": 1, "to_node": 3, "from_status": 1, "to_status": 1, "phases": 2,
+       "r_bb": 0.5, "x_bb": 0.4, "c_bb": 1e-8}
+    ])json"s +
+           std::string{faults} + R"json(
+  }
+})json"s;
+}
+
+// a fault component entry; fault_phase_not_given leaves fault_phase out; r_f in ohm (0: bolted)
+std::string fault_json(int id, int status, int fault_type, int fault_phase, int fault_object, int r_f = 0) {
+    using namespace std::string_literals;
+    std::string const phase =
+        fault_phase == fault_phase_not_given ? ""s : R"json(, "fault_phase": )json"s + std::to_string(fault_phase);
+    return R"json({"id": )json"s + std::to_string(id) + R"json(, "status": )json"s + std::to_string(status) +
+           R"json(, "fault_type": )json"s + std::to_string(fault_type) + phase + R"json(, "fault_object": )json"s +
+           std::to_string(fault_object) + R"json(, "r_f": )json"s + std::to_string(r_f) + "}"s;
+}
+
+std::string faults_json(std::initializer_list<std::string> faults) {
+    using namespace std::string_literals;
+    std::string result = R"json(,
+    "fault": [
+      )json"s;
+    bool first = true;
+    for (auto const& fault : faults) {
+        if (!first) {
+            result += ",\n      "s;
+        }
+        result += fault;
+        first = false;
+    }
+    return result + "\n    ]"s;
+}
+} // namespace
+
+TEST_CASE("API Model - short circuit fault phases") {
+    using namespace std::string_literals;
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+    options.set_calculation_type(PGM_short_circuit);
+    options.set_calculation_method(PGM_iec60909);
+
+    // the fault currents of all faults, in input order
+    auto const fault_currents = [&options](std::initializer_list<std::string> faults) {
+        auto const owning_input_dataset = load_dataset(fault_phase_model_json(faults_json(faults)));
+        Model model{50.0, owning_input_dataset.dataset};
+        auto const n_faults = static_cast<Idx>(faults.size());
+        Buffer fault_output{PGM_def_sc_output_fault, n_faults};
+        fault_output.set_nan();
+        DatasetMutable sc_output{"sc_output", false, 1};
+        sc_output.add_buffer("fault", n_faults, n_faults, nullptr, fault_output);
+        model.calculate(options, sc_output);
+        std::vector<std::array<double, 3>> i_f(faults.size());
+        fault_output.get_value(PGM_def_sc_output_fault_i_f, i_f.data(), -1);
+        return i_f;
+    };
+    auto const single_fault = [](int fault_type, int fault_phase, int node) {
+        return fault_json(31, 1, fault_type, fault_phase, node);
+    };
+
+    SUBCASE("Faults on present phases") {
+        SUBCASE("Single-phase-to-ground a at the a node") {
+            auto const i_f = fault_currents({single_fault(fault_type_single_phase_to_ground, fault_phase_a, 2)});
+            CHECK(i_f[0][0] > 0.0);
+            CHECK(i_f[0][1] == 0.0);
+            CHECK(i_f[0][2] == 0.0);
+        }
+        SUBCASE("Single-phase-to-ground with the default phase (a) at the a node") {
+            auto const i_f =
+                fault_currents({single_fault(fault_type_single_phase_to_ground, fault_phase_not_given, 2)});
+            CHECK(i_f[0][0] > 0.0);
+            CHECK(i_f[0][1] == 0.0);
+            CHECK(i_f[0][2] == 0.0);
+        }
+        SUBCASE("Single-phase-to-ground b at the b node") {
+            auto const i_f = fault_currents({single_fault(fault_type_single_phase_to_ground, fault_phase_b, 3)});
+            CHECK(i_f[0][0] == 0.0);
+            CHECK(i_f[0][1] > 0.0);
+            CHECK(i_f[0][2] == 0.0);
+        }
+        SUBCASE("Two simultaneous faults at the abc node and the a node") {
+            // the fault at node 1 has a fault resistance; a bolted one would leave no voltage for the fault at node 2
+            auto const i_f =
+                fault_currents({fault_json(31, 1, fault_type_single_phase_to_ground, fault_phase_a, 1, 100),
+                                fault_json(32, 1, fault_type_single_phase_to_ground, fault_phase_a, 2)});
+            CHECK(i_f[0][0] > 0.0);
+            CHECK(i_f[1][0] > 0.0);
+        }
+    }
+
+    SUBCASE("Faults on absent phases name the fault and its node") {
+        SUBCASE("Single-phase-to-ground b at the a node") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_single_phase_to_ground, fault_phase_b, 2)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (b) of fault 31 are not all present at its node 2 (node phases: a); this "
+                "short circuit type cannot be applied there\n"s);
+        }
+        SUBCASE("Three-phase at the a node") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_three_phase, fault_phase_abc, 2)});
+                },
+                PGM_regular_error, "The short circuit phases (abc) of fault 31 are not all present at its node 2"s);
+        }
+        SUBCASE("Two-phase bc at the a node") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_two_phase, fault_phase_bc, 2)});
+                },
+                PGM_regular_error, "The short circuit phases (bc) of fault 31 are not all present at its node 2"s);
+        }
+    }
+
+    SUBCASE("Default phases are not adapted to the node") {
+        SUBCASE("Single-phase-to-ground at the b node") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_single_phase_to_ground, fault_phase_not_given, 3)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (a) of fault 31 are not all present at its node 3 (node phases: b); this "
+                "short circuit type cannot be applied there; the phases are the default of the fault type, so set "
+                "fault_phase explicitly\n"s);
+        }
+        SUBCASE("Two-phase at the b node") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_two_phase, fault_phase_not_given, 3)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (bc) of fault 31 are not all present at its node 3 (node phases: b); this "
+                "short circuit type cannot be applied there; the phases are the default of the fault type"s);
+        }
+    }
+
+    SUBCASE("Skipped faults") {
+        SUBCASE("A fault with status off") {
+            auto const i_f = fault_currents({fault_json(31, 1, fault_type_single_phase_to_ground, fault_phase_a, 1),
+                                             fault_json(32, 0, fault_type_single_phase_to_ground, fault_phase_b, 2)});
+            CHECK(i_f[0][0] > 0.0);
+            CHECK(i_f[1][0] == 0.0);
+            CHECK(i_f[1][1] == 0.0);
+            CHECK(i_f[1][2] == 0.0);
+        }
+        SUBCASE("A fault at an isolated node") {
+            auto const i_f = fault_currents({single_fault(fault_type_three_phase, fault_phase_abc, 4)});
+            CHECK(i_f[0][0] == 0.0);
+            CHECK(i_f[0][1] == 0.0);
+            CHECK(i_f[0][2] == 0.0);
         }
     }
 }

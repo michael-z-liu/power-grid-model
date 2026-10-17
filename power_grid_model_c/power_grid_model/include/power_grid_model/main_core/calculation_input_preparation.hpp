@@ -220,6 +220,32 @@ inline void check_no_shunt_at_reduced_phase_bus(main_model_state_c auto const& s
         }
     }
 }
+
+// a fault may only involve phases that are present at its node; otherwise it would silently give a zero fault current;
+// a fault with status off and a fault at an isolated node are skipped (the short-circuit solver keeps an ID-less check
+// as a backstop)
+inline void check_fault_phases_present(main_model_state_c auto const& state) {
+    for (Fault const& fault : state.components.template citer<Fault>()) {
+        if (!fault.status()) {
+            continue;
+        }
+        Idx2D const math_idx =
+            get_user_node_math_id(state, state.components.template get_seq<Node>(fault.get_fault_object()));
+        if (math_idx.group < 0) { // isolated: same test as the coupling loop in prepare_short_circuit_input
+            continue;
+        }
+        MathModelTopology const& topo = *state.math_topology[math_idx.group];
+        if (!topo.has_reduced_phase) {
+            continue;
+        }
+        PhaseMask const node_phases = topo.bus_phase(math_idx.pos);
+        if (PhaseMask const fault_phases = fault_phase_mask(fault.get_fault_phase());
+            !node_phases.contains(fault_phases)) {
+            throw InvalidShortCircuitPhases{fault.id(), fault.get_fault_object(), phase_letters(fault_phases),
+                                            phase_letters(node_phases), fault.has_default_phase()};
+        }
+    }
+}
 } // namespace detail
 
 template <symmetry_tag sym>
@@ -405,6 +431,7 @@ prepare_short_circuit_input(main_model_state_c auto const& state, ComponentToMat
     }
 
     if (detail::has_reduced_phase_math_model(state)) {
+        detail::check_fault_phases_present(state);
         detail::check_no_shunt_at_reduced_phase_bus(state);
     }
 
