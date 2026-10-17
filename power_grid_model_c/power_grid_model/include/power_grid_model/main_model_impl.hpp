@@ -444,8 +444,8 @@ class MainModelImpl {
     }
 
     void check_no_experimental_features_used(Options const& options, ConstDataset const* batch_dataset) const {
-        // until the Python validation supports them; checked before the calculation, so before the reduced-phase
-        // support checks of calculate()
+        // experimental until the maintainers graduate the feature; checked before the calculation, so before the
+        // reduced-phase support checks of calculate()
         if (has_reduced_phase_components_) {
             throw ExperimentalFeature{"A network with one- or two-phase branches is an experimental feature"};
         }

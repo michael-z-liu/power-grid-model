@@ -8,8 +8,9 @@ SPDX-License-Identifier: MPL-2.0
 
 ```{note}
 This is a design and investigation document. It describes what is needed to support one- and two-phase
-components in power flow and short-circuit calculations. Milestones M0 to M8 are implemented. M3 makes one- and
-two-phase lines reachable from the input data, as an experimental feature (decision D9).
+components in power flow and short-circuit calculations. Milestones M0 to M9 are implemented. One- and two-phase
+components and delta loads stay an experimental feature (decisions D9 and D45). For how to use the feature, see
+[Reduced-phase networks](../user_manual/reduced-phase-networks.md).
 ```
 
 ## Context
@@ -100,11 +101,16 @@ In this document `<core>` means `power_grid_model_c/power_grid_model/include/pow
 * **One fault type per calculation.** All faults in one calculation must share the same type and phase
   (`check_input_valid`, lines 444-467).
 
-### Pre-existing defect found during this investigation
+### Pre-existing defects found during this investigation
 
-`average_of_off_diagonal_of_matrix` (`<core>/common/matrix_utils.hpp:16-18`) adds `matrix(1, 2)` twice and leaves
-out `matrix(0, 2)`. `AsymLine::sym_calc_param` uses it, so symmetric results for any non-transposed `asym_line`
-are slightly wrong. This is fixed in milestone M0.
+* **Symmetric parameters of `asym_line`.** `average_of_off_diagonal_of_matrix`
+  (`<core>/common/matrix_utils.hpp:16-18`) adds `matrix(1, 2)` twice and leaves out `matrix(0, 2)`.
+  `AsymLine::sym_calc_param` uses it, so symmetric results for any non-transposed `asym_line` are slightly wrong.
+  This is fixed in milestone M0.
+* **Sign of the mutual capacitance in the Python validation (decision D40).** The rule
+  `c_ba`, `c_ca`, `c_cb` $\geq 0$ contradicts the model of the core, which uses the c matrix as the nodal (Maxwell)
+  matrix: `c0` and `c1` give an off-diagonal of $(c_0 - c_1)/3 < 0$, and every OpenDSS-validated case has negative
+  mutual capacitances. M9 drops the sign rule, in a commit of its own so that it can be proposed upstream separately.
 
 ### What is generated and what is written by hand
 
@@ -226,7 +232,9 @@ de-energised component (`Node::get_null_output`). In PGM, NaN means "input not p
 
 ### Decisions
 
-Taken in M2:
+#### Taken in M2
+
+Absent phases and the first guards:
 
 * **D1. Winding without terminals at a connected side is an error.** This overturns the M1 rule that allowed it.
   Otherwise the winding would stamp its admittance on absent slots, and a bus with mask `none`, whose loads are
@@ -240,19 +248,24 @@ Taken in M2:
   adds the Python error mapping (`power_grid_model.errors`) for `ReducedPhaseNotSupported`, `DanglingConductor` and
   `MissingPhaseForWinding`.
 
-Taken in M4:
+#### Taken in M4
+
+Routing:
 
 * **D7. Order of M3 and M4.** M4 lands before M3, so that reduced-phase models are never routed to the symmetric
   solver. A model with reduced-phase components always runs the asymmetric short circuit, also when every fault is
   `three_phase` and when there is no fault at all.
 
-Taken in M3 (decided by recommendation; the points marked "decided by Michael" were reviewed on 2026-10-15):
+#### Taken in M3
+
+`asym_line` with `phases`, the Y-bus and the experimental gate. Decided by recommendation; the points marked "decided
+by Michael" were reviewed on 2026-10-15:
 
 * **D8. Identity rows in the Y-bus.** `YBus::admittance()` keeps the identity rows of absent slots; this is
   documented at the accessor. Consumers that need the physical admittance (future state estimation) must mask these
   slots.
-* **D9. Experimental gate** (decided by Michael). Until the Python validation (M9)
-  exists, a calculation on a model with one- or two-phase branches raises `ExperimentalFeature` ("A network with
+* **D9. Experimental gate** (decided by Michael). Until the maintainers graduate the feature (decision D45), a
+  calculation on a model with one- or two-phase branches raises `ExperimentalFeature` ("A network with
   one- or two-phase branches is an experimental feature") unless experimental features are enabled. The gate is
   checked by the C API before the calculation starts, so it runs *before* the M4 guard: with experimental features
   disabled, every calculation type gives `ExperimentalFeature`; with them enabled, the M4 rules apply
@@ -271,7 +284,9 @@ Taken in M3 (decided by recommendation; the points marked "decided by Michael" w
   ID 42", "branch3 with ID 7") when the model registered the IDs, which it does whenever a branch is not abc → abc.
   Hand-built topologies without IDs keep the index ("branch #2").
 
-Taken in M3, for loads and shunts:
+#### Taken in M3, for loads and shunts
+
+Appliances at nodes without all phases:
 
 * **D3. Load/gen power on an absent phase is a model-level error** (`LoadGenOnAbsentPhase`, with the component ID).
   * **Where:** in the asymmetric power-flow input preparation
@@ -297,7 +312,9 @@ Taken in M3, for loads and shunts:
   scenario switches the shunt off (decided by Michael: consistent with loads; revisit if a use case needs
   otherwise).
 
-Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15):
+#### Taken in M5
+
+The `single_phase_transformer` (all decided by Michael, 2026-10-15):
 
 * **D12. `WindingConnection1P` values.** `a = 1, b = 2, c = 3, ab = 4, ac = 5, bc = 6`, the numbers of
   `PhaseConnection`/`FaultPhase` without `abc`. The connection is required: not provided (`na`), 0 and unknown values
@@ -317,13 +334,14 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
   $y_{lo} = -j \cdot 10^{-8} \cdot s_n / S_{b,1p} / u_k$ (the two-terminal analogue of the zero-sequence
   $y_0/3 \cdot \mathbf{1}_{3\times3}$ of `transformer`); the differential mode is untouched. Limitation: the two
   windings of an `a` → `a` transformer cannot share one earth electrode; each side has its own (a shared electrode
-  is "Later").
+  is listed under [Later work](#later-work)).
 * **D15. `u1`/`u2` are winding voltages**, the rated voltages across the connection terminals: for example 22 kV
   for an `ab` primary, 12.7 kV for an `a` SWER secondary and 240 V for an `a` LV winding. Node `u_rated` stays
   $\sqrt3 \times$ the phase-to-earth voltage, so the nominal winding voltage implied by a node is $u_{rated}/\sqrt3$
   for a phase-to-earth and $u_{rated}$ for a phase-to-phase connection. Off-nominal ratios follow automatically and
-  are legitimate, so C++ does not check `u1` against the node voltage; M9 adds a warning-level Python rule
-  ($|u/U_{nom} - 1| > 0.2$) for the classic mistake of `u1 = 22 kV` on an `a` winding at a 22 kV node.
+  are legitimate, so C++ does not check `u1` against the node voltage; M9 implemented a warning-level Python rule
+  ($|u/U_{nom} - 1| > 0.2$) for the classic mistake of `u1 = 22 kV` on an `a` winding at a 22 kV node, as a
+  `ValidationWarning` (D42).
 * **D16. General phase shift.** `phase_shift()` $= \varphi(\text{to}) - \varphi(\text{from}) + \text{clock}\cdot\pi/6$
   (see [Phase shift](#new-component-single_phase_transformer)). Output angles stay physical.
 * **D17. Loading from the complex sum per side:** `loading` $= \max(|\sum_p s_{from,p}|, |\sum_p s_{to,p}|) / s_n$.
@@ -351,11 +369,12 @@ Taken in M5, for `single_phase_transformer` (all decided by Michael, 2026-10-15)
   * Without limits the tap position is not limited and the direction is normal.
 
   `uk_min`/`pk_min` only apply when `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided;
-  otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The tap regulator stays
-  "Later"; a `transformer_tap_regulator` on a `single_phase_transformer` raises `InvalidRegulatedObject`.
+  otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The tap regulator is listed under
+  [Later work](#later-work); a `transformer_tap_regulator` on a `single_phase_transformer` raises `InvalidRegulatedObject`.
 
-Taken in M6, for the centre-tapped (split-phase) secondary of `single_phase_transformer` (all decided by Michael,
-2026-10-16):
+#### Taken in M6
+
+The centre-tapped (split-phase) secondary of `single_phase_transformer` (all decided by Michael, 2026-10-16):
 
 * **D19. One centre-tapped value, to side only.** `WindingConnection1P` gets only `ab_center_tapped = 7`, in C++ and
   Python. The legs map to slots a and b and the split-phase node is always a node of its own, so `ac`/`bc` variants
@@ -374,21 +393,22 @@ Taken in M6, for the centre-tapped (split-phase) secondary of `single_phase_tran
     $\tfrac12|1.5R + j1.2X|$. The two default independently.
   * **On a winding that is not centre-tapped,** a non-empty `uk_half`/`pk_half` raises `InvalidPhaseConnection`
     ("… refers to a centre-tapped winding and must be left empty"), following D11: reject rather than ignore.
-  * **Valid ranges** (M9 Python rules; no C++ check, as `transformer` does not check `uk = 0` either):
+  * **Valid ranges** (implemented in M9 as Python rules, D41; no C++ check, as `transformer` does not check
+    `uk = 0` either):
     `uk_half >= pk_half / (sn/2)`; `uk_half > uk/2` (otherwise the half branch $z_b$ is 0 or negative, and singular
     at equality); `pk/4 <= pk_half <= pk/2` (non-negative branch resistances).
 * **D21. `u2`, `uk`, `pk` and `sn` describe the full winding.** `u2` is the full winding, end to end: 480 V for
   240-0-240 V, consistent with D15 (the voltage across the connection terminals a-b). `uk`, `pk` and `sn` are the
   full-winding nameplate: the primary against both halves in series, at rated `sn`. Each half is $u_2/2$. The
   split-phase node has `u_rated` $= 240\sqrt3 = 415.692$ V, because each leg is 240 V to the earthed centre tap; the
-  nominal winding voltage implied by the node is therefore $2u_{rated}/\sqrt3$. M9 adds this form to the warning
-  rule of D15.
+  nominal winding voltage implied by the node is therefore $2u_{rated}/\sqrt3$. M9 implemented this form in the
+  warning rule of D15 (D42).
 * **D22. Earthing of the centre tap.** Solid by default, or through `r_grounding_to`/`x_grounding_to`, the M5
   fields; not provided means solid. `r/x_grounding_from` follows the M5 rule for the primary. Caveat: PGM has no
   neutral node, so wye loads on the split-phase node are leg-to-*true-earth*. With an electrode, the whole
   out-of-balance load current therefore returns through the electrode. That is right for earth faults (the current
   to true earth returns through the electrode) and pessimistic for loads with a neutral conductor (MEN). Loads to a
-  floating neutral are "Later".
+  floating neutral are listed under [Later work](#later-work).
 * **D23. Loading of a centre-tapped side:** $\max(|\sum_p s_{from,p}|,\ 2|s_{to,a}|,\ 2|s_{to,b}|)/s_n$. Each half
   is rated $s_n/2$: for example 12.5 kVA per leg on a 25 kVA unit is rated current at 120 V. Balanced full load gives
   1.0 on both sides, and all load on one leg at $s_n/2$ gives 1.0, where D17's $|s_a + s_b|$ would say 0.5. The
@@ -416,7 +436,9 @@ Taken in M6, for the centre-tapped (split-phase) secondary of `single_phase_tran
     and the default phases (bc for the two-phase faults), raise `InvalidShortCircuitPhases`.
   * **480 V loads** wait for the delta loads of M7.
 
-Taken in M6 for the start values of split-phase buses:
+#### Taken in M6, for start values
+
+The start values of split-phase buses:
 
 * **D25. Slot patterns for the start values** (decided by Michael, 2026-10-16). `Vector(T)` rotates the slots by
   0°/−120°/+120° and each bus has one scalar `phase_shift`, so a three-phase start puts slot b of a split-phase bus
@@ -462,8 +484,9 @@ Taken in M6 for the start values of split-phase buses:
   * **Performance.** Gated as above: on a three-phase network the topology step does not run, `bus_slot_pattern`
     stays empty and the solver helper returns at once.
 
-Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Michael's blanket approval,
-2026-10-16):
+#### Taken in M7
+
+Delta (phase-to-phase) loads (decided by recommendation under Michael's blanket approval, 2026-10-16):
 
 * **D26. Enum and default.** `enum class LoadGenConnection : IntS { wye = 0, delta = 1 }` (C++ and Python),
   input-only. Not provided (`na`) means `wye`; any other value raises `MissingCaseForEnumError`, as for D10 and D12.
@@ -475,7 +498,7 @@ Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Mi
   * **C API compatibility.** Buffers made with `PGM_create_buffer` are uninitialised, so a caller that sets only the
     attributes it knows leaves `connection` as garbage: a value other than 0 or 1 fails construction with
     `MissingCaseForEnumError`, and a garbage value of exactly 1 would silently make an `asym_load` delta (softened by
-    the experimental gate until M9). C API callers must therefore call `PGM_buffer_set_nan` on input buffers before
+    the experimental gate until the maintainers graduate the feature, D45). C API callers must therefore call `PGM_buffer_set_nan` on input buffers before
     setting attributes, as the C examples now do.
 * **D27. Meaning of the entries.** For a delta load_gen, `p_specified`/`q_specified` are the **ab, bc, ca** values.
   Entry k is the branch from the first to the second letter: $U_{ab} = U_a - U_b$, $U_{bc} = U_b - U_c$,
@@ -516,11 +539,11 @@ Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Mi
   for a connected delta load_gen). The solvers test `topo.is_delta_load_gen(i)`, which is false when the vector is
   empty, and the wye arithmetic is untouched, so wye-only networks keep the bit-identical fast path.
 * **D33. Calculation gates.**
-  * **(a) Experimental** until M9: any delta load_gen in the input (status and connectivity ignored, like M4)
+  * **(a) Experimental** until the maintainers graduate the feature (D45): any delta load_gen in the input (status and connectivity ignored, like M4)
     raises `ExperimentalFeature` ("A delta-connected load or generator is an experimental feature"). This check
     comes after the reduced-phase gate, whose message wins.
   * **(b) State estimation** raises `ReducedPhaseNotSupported` for both symmetries and all methods: state
-    estimation is "Later", and the measured-values load/gen distribution has no delta model.
+    estimation is listed under [Later work](#later-work), and the measured-values load/gen distribution has no delta model.
   * **(c) Symmetric power flow** raises `ReducedPhaseNotSupported` (open question 2 stays out of scope). The
     symmetric short circuit is allowed (D31).
   * **(d) One exception class.** Both use `ReducedPhaseNotSupported` (D6) with a second message flavour
@@ -530,8 +553,9 @@ Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Mi
   * **(e) Voltage regulators.** A `voltage_regulator` on a delta load_gen raises the existing
     `UnsupportedLoadGenTypeForVoltageRegulator`. A non-regulated delta load at a PV bus is allowed.
 
-Taken in M8 for short-circuit phase validity (decided by recommendation under Michael's blanket approval,
-2026-10-16):
+#### Taken in M8
+
+Short-circuit phase validity (decided by recommendation under Michael's blanket approval, 2026-10-16):
 
 * **D34. Model-level check on the fault phases.** `detail::check_fault_phases_present(state)` in
   `<core>/main_core/calculation_input_preparation.hpp` runs in `prepare_short_circuit_input` when a math model has
@@ -569,6 +593,149 @@ Taken in M8 for short-circuit phase validity (decided by recommendation under Mi
   (`InvalidShortCircuitPhaseOrType` for the mixed types) runs first and the cache run swallows the phase error. Each
   scenario then fails on its own with `InvalidShortCircuitPhaseOrType`; with mixed types only, the whole batch still
   fails at once.
+
+#### Taken in M9
+
+Python validation and documentation (decided by recommendation under Michael's blanket approval, 2026-10-17):
+
+* **D38. What Python checks and what stays in C++.**
+  * **Python checks** the rules on the data of each component, plus simple ID lookups (the node `u_rated` behind a
+    winding, the load behind a voltage regulator).
+  * **C++ keeps** every rule that needs the derived node phases or a calculation: D1 (`MissingPhaseForWinding`,
+    `DanglingConductor`), D3 and D28 (`LoadGenOnAbsentPhase`, which includes the delta entries against the node
+    phases), D4 (`ShuntAtReducedPhaseNode`), D34 and D36 (fault phases against the node phases) and the calculation
+    gates (symmetric calculations, state estimation, `ExperimentalFeature`).
+  * **Why.** The node phases come from propagation from the sources through lines, links and windings, which depends
+    on status and has the "all terminals of a winding" rule. Copying it into Python would give two implementations
+    that can drift apart. The C++ errors already name the ID and run once per scenario. The Python framework has no
+    topology checks today (not even `ConflictVoltage` or connectivity), and a partial check would give false
+    confidence. The expected-error cases `delta-on-absent-phase`, `swer-fault-on-absent-phase` and
+    `missing-phase-for-winding` are pinned by a test: they pass the Python validation and still fail in the
+    calculation. A best-effort Python check of the node phases is listed under [Later work](#later-work).
+* **D39. `asym_line.phases` follows D11.**
+  * The present conductors are the phases in `phases`, plus the neutral `n` when `r_nn` or `x_nn` is given. Every
+    matrix entry whose two conductors are both present is required (`MissingValueError` per field), which covers r, x,
+    the c matrix and the neutral entries.
+  * A value on an absent phase, on a missing neutral, or `c0`/`c1` on a one- or two-phase line raises the new
+    `NotApplicableValueError(MultiFieldValidationError)`, with the fields `[phases, <field>]`.
+  * An unknown `phases` value raises `InvalidEnumValueError`, and the row gets no per-phase checks.
+  * The upstream abc rules (the neutral subset, the c-matrix subset, `c0`/`c1`, "not all c missing") now run on rows
+    where `phases` is not provided or is `abc`. The rules "self value > 0" and "mutual r/x >= 0" ignore NaN and run
+    on every row.
+* **D40. Drop the sign rule on the mutual capacitance** (a pre-existing defect, see
+  [above](#pre-existing-defects-found-during-this-investigation)). C++ uses the c matrix as the nodal (Maxwell) matrix,
+  so any sign is valid; positive values, as in the upstream `rmatrix-xmatrix-cmatrix` data, stay valid. Without
+  this, 25 of the 33 reduced-phase cases with a single-phase transformer, `phases` or a load `connection` fail
+  the validation on this rule alone. It is a commit of its own, so that it can be proposed upstream separately, like M0.
+  The self capacitance must still be positive.
+* **D41. `validate_single_phase_transformer`.**
+  * **Required:** the branch fields plus `u1`, `u2`, `sn`, `uk`, `pk`, `i0`, `p0`, `from_connection` and
+    `to_connection`. `clock`, the tap fields, `uk_half`/`pk_half` and the earthing fields are optional (D13, D18, D20,
+    D14).
+  * **Ranges**, as for `transformer`: `u1`, `u2`, `sn` > 0; `0 < uk < 1` and `uk >= pk/sn`; `pk >= 0`;
+    `p0/sn <= i0 < 1`; `p0 >= 0`; `uk_min/max` and `pk_min/max` with the same rules and defaults.
+  * **Connections** must be valid `WindingConnection1P` values, and `ab_center_tapped` on the from side gives
+    `InvalidValueError` (D19).
+  * **Clock** other than 0 or 6 modulo 12 raises the new `SinglePhaseTransformerClockError`; the existing
+    `TransformerClockError` talks about wye windings and does not fit (D13).
+  * **Earthing:** `r/x_grounding_<side>` on a phase-to-phase winding gives `NotApplicableValueError`, and
+    `r_grounding_*` must be $\geq 0$ (D14).
+  * **Half windings:** `uk_half`/`pk_half` on a winding that is not centre-tapped gives `NotApplicableValueError`.
+    On a centre-tapped winding, with the C++ defaults applied to whichever value is not given: `uk_half > uk/2`,
+    `pk/4 <= pk_half <= pk/2` and `uk_half >= pk_half/(sn/2)` (D20).
+  * **Taps (D18):** `tap_side` must be a valid `BranchSide` and `tap_size >= 0`. The direction comes from the limits
+    that are given. `tap_pos` (default `tap_nom`) must lie within the given limits, each in its own direction, and an
+    omitted limit is unbounded; `tap_nom` must lie between the two limits when both are given. `tap_pos` can be
+    updated, so `validate_batch_data` checks it per scenario. This mirrors `transformer`, where C++ silently clamps
+    the value instead.
+* **D42. The u1/u2 rule is a warning, not an error** (D15, D21).
+  * The framework had no warning level. `class ValidationWarning(UserWarning)` is added to
+    `power_grid_model.validation` and raised with `warnings.warn`.
+  * **Trigger:** $|u/U_{nom} - 1| > 0.2$, where $U_{nom}$ is $u_{rated}/\sqrt3$ for `a`, `b`, `c`; $u_{rated}$ for
+    `ab`, `ac`, `bc`; and $2u_{rated}/\sqrt3$ for `ab_center_tapped`.
+  * **Once per call** of `validate_input_data` or `validate_batch_data`, on the input data: `u1`, `u2` and `u_rated`
+    are input-only, so a per-scenario loop would only repeat it.
+  * **Why not an error:** off-nominal ratios are legitimate (D15), so an error would block valid models. The warning
+    does not change the return value or `assert_valid_*`.
+* **D43. Load `connection`.** The value must be a valid `LoadGenConnection` on all four load_gen types
+  (`InvalidEnumValueError`); `delta` on `sym_load`/`sym_gen` gives `InvalidValueError` (D26); a `voltage_regulator` on
+  a delta `asym_load`/`asym_gen` gives `InvalidVoltageRegulationError`, the error the const_power rule already uses
+  (D33e), at most one per regulator.
+* **D44. Sensors can measure a `single_phase_transformer`.** It is added to the branch lists of the power and current
+  sensors (the general list, `branch_from` and `branch_to`). C++ accepts any `Branch`, a power flow ignores sensors,
+  and state estimation raises `ReducedPhaseNotSupported` anyway. A tap regulator on a `single_phase_transformer`
+  already gives `InvalidIdError`, because `validate_regulator` only lists `transformer` and
+  `three_winding_transformer`; a test pins this.
+* **D45. The experimental gate stays (D9, D33a).** Only the wording that tied the gate to M9 changed, to "until the maintainers
+  graduate the feature". The pull request proposes removing it.
+  * Graduating a feature is the decision of the maintainers (`terminology.md`: undefined behaviour, no guarantees).
+  * Real limitations remain: state estimation, symmetric calculations, sources and voltage regulators on
+    reduced-phase buses; the start-value limitation of D25; the iterative-current divergence on a floating common
+    mode; and the topology rules that only C++ checks (D38).
+  * **The public Python API has no experimental switch:** `calculate_*` does not accept `experimental_features`, only
+    the private `_calculate_*` methods do (the tests use them). Removing the gate is the only way to make the
+    feature publicly usable from Python, which is an API decision for upstream.
+  * Removing the gate is cheap: one check in `check_no_experimental_features_used` in
+    `<core>/main_model_impl.hpp`, plus the documentation. The user manual states how to enable it today: the C API
+    option `PGM_set_experimental_features`, or the private `_calculate_power_flow(...,
+    experimental_features="enabled")` in Python, flagged as private and subject to change.
+* **D46. Documentation: a new user-manual page with a worked Python example that runs in a test; no notebook**
+  (Michael's earlier call). `docs/user_manual/reduced-phase-networks.md` replaces the "example notebook" of the M9
+  row, and `tests/unit/test_docs_reduced_phase_example.py` executes its code blocks.
+
+### Decision index
+
+| Decision | Subject | Section |
+|----------|---------|---------|
+| D1 | Winding without terminals at a connected side is an error | [Taken in M2](#taken-in-m2) |
+| D2 | `PhaseCoupling::link` | [Taken in M2](#taken-in-m2) |
+| D3 | Load/gen power on an absent phase is a model-level error | [Taken in M3, for loads and shunts](#taken-in-m3-for-loads-and-shunts) |
+| D4 | Shunt at a node without all phases | [Taken in M3, for loads and shunts](#taken-in-m3-for-loads-and-shunts) |
+| D5 | Absent-phase output is 0 everywhere | [Taken in M2](#taken-in-m2) |
+| D6 | One exception class, `ReducedPhaseNotSupported` | [Taken in M2](#taken-in-m2) |
+| D7 | Order of M3 and M4 | [Taken in M4](#taken-in-m4) |
+| D8 | Identity rows in the Y-bus | [Taken in M3](#taken-in-m3) |
+| D9 | Experimental gate | [Taken in M3](#taken-in-m3) |
+| D10 | `PhaseConnection` numbering | [Taken in M3](#taken-in-m3) |
+| D11 | Validation of `asym_line` input with `phases` | [Taken in M3](#taken-in-m3) |
+| D12 | `WindingConnection1P` values | [Taken in M5](#taken-in-m5) |
+| D13 | Polarity through `clock` | [Taken in M5](#taken-in-m5) |
+| D14 | Earthing and the low-susceptance fallback | [Taken in M5](#taken-in-m5) |
+| D15 | `u1`/`u2` are winding voltages | [Taken in M5](#taken-in-m5) |
+| D16 | General phase shift | [Taken in M5](#taken-in-m5) |
+| D17 | Loading from the complex sum per side | [Taken in M5](#taken-in-m5) |
+| D18 | Working fixed taps | [Taken in M5](#taken-in-m5) |
+| D19 | One centre-tapped value, to side only | [Taken in M6](#taken-in-m6) |
+| D20 | Half-winding impedances `uk_half` and `pk_half` | [Taken in M6](#taken-in-m6) |
+| D21 | `u2`, `uk`, `pk` and `sn` describe the full winding | [Taken in M6](#taken-in-m6) |
+| D22 | Earthing of the centre tap | [Taken in M6](#taken-in-m6) |
+| D23 | Loading of a centre-tapped side | [Taken in M6](#taken-in-m6) |
+| D24 | Taps, clock, status, magnetising and faults of the centre-tapped model | [Taken in M6](#taken-in-m6) |
+| D25 | Slot patterns for the start values | [Taken in M6, for start values](#taken-in-m6-for-start-values) |
+| D26 | `LoadGenConnection` enum and default | [Taken in M7](#taken-in-m7) |
+| D27 | Meaning of the delta entries | [Taken in M7](#taken-in-m7) |
+| D28 | Absent phases for delta loads | [Taken in M7](#taken-in-m7) |
+| D29 | Voltage dependence and per unit of delta loads | [Taken in M7](#taken-in-m7) |
+| D30 | Per-phase output of delta loads | [Taken in M7](#taken-in-m7) |
+| D31 | Short circuit with delta loads | [Taken in M7](#taken-in-m7) |
+| D32 | Where delta is allowed | [Taken in M7](#taken-in-m7) |
+| D33 | Calculation gates for delta loads | [Taken in M7](#taken-in-m7) |
+| D34 | Model-level check of the fault phases | [Taken in M8](#taken-in-m8) |
+| D35 | `InvalidShortCircuitPhases` with a new constructor | [Taken in M8](#taken-in-m8) |
+| D36 | Default fault phases are not adapted to the node | [Taken in M8](#taken-in-m8) |
+| D37 | The batch cache run swallows `InvalidShortCircuitPhases` | [Taken in M8](#taken-in-m8) |
+| D38 | What Python checks and what stays in C++ | [Taken in M9](#taken-in-m9) |
+| D39 | `asym_line.phases` validation | [Taken in M9](#taken-in-m9) |
+| D40 | Sign of the mutual capacitance | [Taken in M9](#taken-in-m9) |
+| D41 | `validate_single_phase_transformer` | [Taken in M9](#taken-in-m9) |
+| D42 | `ValidationWarning` for the `u1`/`u2` rule | [Taken in M9](#taken-in-m9) |
+| D43 | Load `connection` | [Taken in M9](#taken-in-m9) |
+| D44 | Sensors on a `single_phase_transformer` | [Taken in M9](#taken-in-m9) |
+| D45 | The experimental gate stays | [Taken in M9](#taken-in-m9) |
+| D46 | User-manual page, no notebook | [Taken in M9](#taken-in-m9) |
+
+D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
+[Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
 
 ## Component models (phase domain)
 
@@ -1010,18 +1177,27 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M6 (implemented) | Centre-tapped split-phase secondary | `<core>/component/single_phase_transformer.hpp` (`ab_center_tapped`, `uk_half`/`pk_half`), `<core>/common/enum.hpp`, `src/power_grid_model/_core/enum.py`, `input.json`; slot patterns (D25) in `<core>/calculation_parameters.hpp`, `<core>/topology.hpp`, `common_solver_functions.hpp`, `newton_raphson_pf_solver.hpp`, `iterative_current_pf_solver.hpp` | `tests/cpp_unit_tests/component/test_single_phase_transformer.cpp` (closed-form 3x3 primitive for every primary, Kersting defaults, overrides, equivalence with an `ab` secondary, electrode, clock 6, magnetising, status, taps, loading, invalid input); `tests/cpp_unit_tests/test_topology.cpp` and `math_solver/test_math_solver_pf_reduced_phase.cpp` (slot patterns); native API test with `max_iterations = 1` (`tests/native_api_tests/test_api_model.cpp`); Python tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS (`phases=1 windings=3`, checked by YPrim), generated by `tests/data/generators/reduced_phase_opendss_cases.py`: power flow `tests/data/power_flow/single-phase-transformer/{split-phase,split-phase-flat-start,split-phase-linear}` (unbalanced 240 V loads, solid and electrode-earthed centre taps, clock 6) and short circuit `tests/data/short_circuit/single-phase-transformer-split-phase` (leg-to-earth, leg-to-leg and two-phase-to-ground faults, fault return through the centre-tap electrode); 480 V loads follow with M7 (see [the component](#new-component-single_phase_transformer)) | M / medium-high |
 | M7 (implemented) | Delta loads (`connection` on `asym_load`/`asym_gen`) | `input.json` (`connection`), `<core>/common/enum.hpp` and `src/power_grid_model/_core/enum.py` (`LoadGenConnection`), `<core>/component/load_gen.hpp`, `MathModelTopology`/`ComponentTopology` (`load_gen_connection`), new `<core>/math_solver/delta_load_gen.hpp`, `add_loads` in the Newton-Raphson and iterative current solvers, `common_solver_functions.hpp` (linear and results), `main_model_impl.hpp` (gates) | `tests/cpp_unit_tests/math_solver/test_delta_load_gen.cpp` (closed forms, finite-difference check of the Newton-Raphson Jacobian, exact zeros, linear admittance); `math_solver/test_math_solver_pf_reduced_phase.cpp` (KCL for all solvers, bit-identity with all load_gens flagged wye, quadratic convergence, backstops); `component/test_load_gen.cpp`, `test_topology.cpp`, `main_core/test_main_core_topology.cpp`, `common/test_exceptions.cpp`; native API tests (`tests/native_api_tests/test_api_model.cpp`); Python tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS (1-phase `Load conn=delta` on `bus.p.q` and a native 3-phase `conn=delta` load, checked by the branch-voltage base check), generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/power_flow/asym-load-delta/{three-phase,three-phase-linear,two-phase,two-phase-linear,split-phase,split-phase-flat-start,split-phase-linear}` (with `asym_load`/`asym_gen` outputs in the reference) and the expected-error cases `power_flow/asym-load-delta/{symmetric-not-supported,delta-on-absent-phase}` and `state_estimation/asym-load-delta-not-supported` (see [Phase-to-phase loads](#phase-to-phase-loads-connection-on-asym_load--asym_gen)) | M / medium |
 | M8 (implemented) | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp` (`check_fault_phases_present`), `<core>/component/fault.hpp` (`has_default_phase`), `<core>/common/exception.hpp` (`InvalidShortCircuitPhases` with the fault ID), `<core>/calculation_parameters.hpp` (`fault_phase_mask`), `<core>/job_adapter.hpp` (cache-run catch); decisions D34-D37 | `tests/cpp_unit_tests/common/test_exceptions.cpp`, `component/test_fault.cpp`, `math_solver/test_math_solver_sc.cpp` (solver backstop); native API tests (`tests/native_api_tests/test_api_model.cpp`: valid, absent, default and skipped faults); Python tests (`tests/unit/test_error_handling.py`: single and batch, per-scenario topology); validation cases against OpenDSS, generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/short_circuit/{swer-fault-impedance,swer-multiple-faults,swer-c-minimum}` (`x_f` as a `Reactor`, simultaneous faults on three-phase, SWER and 240 V nodes, minimum voltage scaling) and the expected-error case `short_circuit/swer-fault-on-absent-phase`; user docs in `docs/user_manual/components.md` | S / low |
-| M9 | Python validation and documentation | `src/power_grid_model/validation/_validation.py` (required values, `validate_asym_line`, new `validate_single_phase_transformer`, load `connection`: `wye`/`delta`/not provided, `delta` only on `asym_load` and `asym_gen`, delta entries only on the phase pairs present at the node (D28), no voltage regulator on a delta load_gen, sensor branch lists), `docs/user_manual/components.md`, `docs/user_manual/calculations.md`, `docs/algorithms/sc-algorithms.md`, example notebook | `tests/unit/validation/*` | M / low |
-| Later | State estimation with masks; tap regulator on `single_phase_transformer`; sources on reduced-phase nodes; delta `sym_load`; *c* per fault location | — | — | — |
+| M9 (implemented) | Python validation and documentation (decisions D38-D46) | `src/power_grid_model/validation/_validation.py` (required values and ranges of `asym_line` with `phases`, new `validate_single_phase_transformer`, load `connection`: valid enum value, `delta` only on `asym_load` and `asym_gen`, no voltage regulator on a delta load_gen, sensor branch lists, the `ValidationWarning` hooks), `_rules.py`, `errors.py` (`NotApplicableValueError`, `SinglePhaseTransformerClockError`, `ValidationWarning`), `__init__.py`; the new user manual page `docs/user_manual/reduced-phase-networks.md` (a worked example instead of a notebook, D46); `docs/user_manual/{components,calculations,data-validator,model-validation}.md`, `docs/advanced_documentation/c-api.md` and `docs/algorithms/sc-algorithms.md`; the comment of the experimental gate in `<core>/main_model_impl.hpp` | `tests/unit/validation/test_reduced_phase_validation.py` (every rule, with the mirror tests against C++), `test_reduced_phase_cases.py` (all reduced-phase, split-phase and delta validation cases validate cleanly without a warning), `test_rules.py`, `test_errors.py`, `test_input_validation.py`, `test_validation_functions.py`; `tests/unit/test_docs_reduced_phase_example.py` (runs the code of the user manual page) | M / low |
+| Later | See [Later work](#later-work) | — | — | — |
 
 ### Cross-cutting concerns
 
-* **Validation (Python):**
-  * `phases` must be a valid enum value.
-  * Present phases need their r/x/c entries; absent phases must be NaN.
-  * `c0`/`c1` are only allowed with `abc`.
-  * Transformer connections must be compatible, and centre-tapping is allowed on the to side only.
-  * Fault phase versus node phases depends on derived topology. Only C++ can check it fully; Python can do a
-    best-effort check.
+* **Validation (Python):** implemented in M9 (decisions D38 to D46).
+  * Python checks the data of each component and simple ID lookups:
+    * `asym_line`: `phases` must be a valid enum value; every r, x and c entry between two present conductors is
+      required; a value on an absent phase or a missing neutral, and `c0`/`c1` on a one- or two-phase line, are
+      rejected (D39).
+    * `single_phase_transformer`: required values and ranges, valid connections with centre-tapping on the to side
+      only, `clock` 0 or 6, earthing only on a phase-to-earth winding, `uk_half`/`pk_half` only on a centre-tapped
+      winding, and the tap limits (D41).
+    * `connection` of the four load_gen types, `delta` only on `asym_load` and `asym_gen`, and no voltage regulator
+      on a delta load_gen (D43).
+    * Sensors on a `single_phase_transformer` are valid, a tap regulator on it is not (D44).
+  * The warning-level rule of D15 and D21 is a `ValidationWarning` (D42).
+  * Only C++ checks the rules that need the derived node phases: winding terminals, dangling conductors, load and
+    shunt on absent phases, fault phases against node phases, and the calculation gates (D38). A valid result of the
+    Python validation therefore does not guarantee that the calculation succeeds. A best-effort Python check is
+    listed under [Later work](#later-work).
 * **Code generation and C API:** automatic once the JSON definitions are updated (`uv run code_generation/code_gen.py`).
   New exceptions need a regex mapping in `src/power_grid_model/_core/error_handling.py`.
 * **Batch updates:** all new attributes are input-only. Masks are rebuilt only when a topology-changing status
@@ -1035,6 +1211,28 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
   * Singularity from ungrounded secondaries. Mitigated by the low-susceptance fallback.
   * How faithfully the OpenDSS references model the centre-tap impedance split. Resolved in M6 by the YPrim
     check of every centre-tapped transformer.
+
+## Later work
+
+Everything below is outside the implemented milestones. Items that are also open questions were confirmed as out of
+scope by Michael (2026-10-15).
+
+* **State estimation with masks** (open question 5), with per-phase observability rules.
+* **A tap regulator on a `single_phase_transformer`** (D18, D44).
+* **Sources and voltage regulators on reduced-phase nodes** (open question 3).
+* **A delta `sym_load` and symmetric delta calculations** (open question 2, D26, D33).
+* **The voltage factor *c* per fault location** (open question 4).
+* **An output attribute for the derived node phases**, to tell an absent phase from 0 V (see
+  [Absent-phase output](#absent-phase-output)).
+* **Branch-level delta output** (p_ab, p_bc, p_ca), which needs new solver output fields (D30).
+* **A shared earth electrode** for the two windings of an `a` → `a` transformer (D14), and **loads to a floating
+  neutral** (D22).
+* **`ac` and `bc` centre-tapped windings** (D19) and **`uk_half_min/max`** (D24).
+* **Start values behind a split-phase bus**, for a transformer fed from a split-phase node (D25).
+* **The open-end shunt guard of `asym_line`**, which drops the whole open-end shunt when a mutual capacitance is 0
+  (see [`asym_line` with `phases`](#asym_line-with-phases)); changing it changes three-phase results.
+* **A best-effort Python check of the node phases** (D38).
+* **A public Python experimental switch, or graduating the feature** (D45).
 
 ## Open questions
 

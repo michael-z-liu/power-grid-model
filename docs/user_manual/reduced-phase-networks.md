@@ -349,5 +349,5 @@ See [Backwards compatibility](../advanced_documentation/c-api.md#backwards-compa
 * The phases of a node are not part of the output.
 * The voltage factor $c$ of a short circuit follows the source node, not the fault location.
 
-The [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md#milestones) lists the
-decisions behind this feature and the work planned for later.
+The [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md#later-work) lists the
+work planned for later, and also records the decisions behind this feature.
