@@ -1002,10 +1002,19 @@ def validate_single_phase_transformer(data: SingleDataset) -> list[ValidationErr
     # Taps
     errors += _all_valid_enum_values(data, spt, AT.tap_side, BranchSide)
     errors += _all_greater_than_or_equal_to_zero(data, spt, AT.tap_size)
-    for uk_limit, pk_limit in ((AT.uk_min, AT.pk_min), (AT.uk_max, AT.pk_max)):
-        errors += _all_greater_or_equal(data, spt, uk_limit, f"{pk_limit}/{AT.sn}", data[spt][AT.uk])
-        errors += _all_between(data, spt, uk_limit, 0, 1, data[spt][AT.uk])
-        errors += _all_greater_than_or_equal_to_zero(data, spt, pk_limit, data[spt][AT.pk])
+    # The C++ core only uses the uk/pk limits of a side of which the tap limit is provided, so only check those
+    na = _nan_type(spt, AT.tap_min)
+    for tap_limit, uk_limit, pk_limit in (
+        (AT.tap_min, AT.uk_min, AT.pk_min),
+        (AT.tap_max, AT.uk_max, AT.pk_max),
+    ):
+        limited = data[spt][data[spt][tap_limit] != na]
+        if limited.size == 0:
+            continue
+        limited_data = {spt: limited}
+        errors += _all_greater_or_equal(limited_data, spt, uk_limit, f"{pk_limit}/{AT.sn}", limited[AT.uk])
+        errors += _all_between(limited_data, spt, uk_limit, 0, 1, limited[AT.uk])
+        errors += _all_greater_than_or_equal_to_zero(limited_data, spt, pk_limit, limited[AT.pk])
     errors += _validate_single_phase_transformer_taps(data)
 
     errors += _validate_half_windings(data)
@@ -1120,6 +1129,10 @@ def _warn_single_phase_transformer_winding_voltages(data: SingleDataset) -> None
 
     Warns:
         ValidationWarning: at most once per side, listing the ids.
+
+    Note:
+        The warning is attributed (stacklevel 3) to the caller of validate_input_data or validate_batch_data. When it is
+        reached through an assert_valid_* function, that is the assertion function.
     """
     spt = CT.single_phase_transformer
     if spt not in data or CT.node not in data or data[spt].size == 0 or data[CT.node].size == 0:

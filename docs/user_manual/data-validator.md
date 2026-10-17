@@ -42,8 +42,8 @@ Some input is valid, but probably not what was intended.
 For such input, the validation functions emit a `ValidationWarning` through the standard Python `warnings` module.
 A warning does not change the result: the data is still valid, `validate_input_data` and `validate_batch_data` still
 return `None`, and the assertion functions do not raise.
-Each kind of warning is emitted at most once per call (for batch data it is not repeated per scenario), and its message
-names the IDs of the components.
+Each kind of warning is emitted at most once per side per call (for batch data it is not repeated per scenario), and
+its message names the IDs of the components.
 
 For example, a `ValidationWarning` is emitted when `u1` or `u2` of a `single_phase_transformer` differs by more than
 20% from the nominal winding voltage implied by the `u_rated` of its node (see

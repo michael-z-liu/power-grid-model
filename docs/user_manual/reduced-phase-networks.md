@@ -327,10 +327,13 @@ This feature adds attributes to existing components: `phases` to `asym_line`, an
 `PGM_create_buffer` returns uninitialised memory, so a C API caller that only sets the attributes it knows leaves the
 new attributes as garbage:
 
-* a garbage `connection` of exactly 1 (`delta`) silently turns a load or generator into a delta load or generator;
+* a garbage `connection` of exactly 1 (`delta`) makes an `asym_load` or `asym_gen` a delta load or generator, which
+  raises `ExperimentalFeature` in a calculation unless the experimental features are enabled (in which case nothing is
+  reported), and makes a `sym_load` or `sym_gen` fail the construction with `InvalidPhaseConnection`;
 * a garbage `phases` of 1 to 6 makes the line a one- or two-phase line, which usually fails the construction with
   `InvalidPhaseConnection`, because the entries of the absent phases are provided;
-* any other garbage value fails the construction with `MissingCaseForEnumError`.
+* any other garbage `connection` or `phases` value fails the construction with `MissingCaseForEnumError`; a garbage 0
+  is harmless, because it is `wye` for `connection` and `abc` for `phases`.
 
 Call `PGM_buffer_set_nan` on every input buffer before setting its attributes, as the C examples do.
 Not provided (the `na` value that `PGM_buffer_set_nan` sets) means `abc` for `phases` and `wye` for `connection`, so

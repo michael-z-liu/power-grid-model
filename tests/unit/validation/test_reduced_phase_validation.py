@@ -405,7 +405,57 @@ def test_single_phase_transformer_defaults_valid():
 )
 def test_single_phase_transformer_ranges(field: AT, value: float, expected):
     # Python-only rules, as for transformer
-    errors = _validate_spt(_spt(**{field: value}))
+    # the uk/pk limits are only used (and checked) together with their tap limit
+    tap_limits = {AT.tap_min: -1, AT.tap_max: 1} if field in (AT.uk_min, AT.pk_max) else {}
+    errors = _validate_spt(_spt(**{field: value, **tap_limits}))
+    assert errors is not None
+    assert expected in errors
+
+
+@pytest.mark.parametrize(
+    ("limit", "tap_limit", "other_tap_limit", "value", "expected"),
+    [
+        (
+            AT.uk_min,
+            AT.tap_min,
+            AT.tap_max,
+            1.5,
+            NotBetweenError(CT.single_phase_transformer, AT.uk_min, [SPT_ID], (0, 1)),
+        ),
+        (
+            AT.uk_max,
+            AT.tap_max,
+            AT.tap_min,
+            1.5,
+            NotBetweenError(CT.single_phase_transformer, AT.uk_max, [SPT_ID], (0, 1)),
+        ),
+        (
+            AT.pk_min,
+            AT.tap_min,
+            AT.tap_max,
+            -1.0,
+            NotGreaterOrEqualError(CT.single_phase_transformer, AT.pk_min, [SPT_ID], 0),
+        ),
+        (
+            AT.pk_max,
+            AT.tap_max,
+            AT.tap_min,
+            -1.0,
+            NotGreaterOrEqualError(CT.single_phase_transformer, AT.pk_max, [SPT_ID], 0),
+        ),
+    ],
+)
+def test_single_phase_transformer_uk_pk_limit_needs_tap_limit(limit, tap_limit, other_tap_limit, value, expected):
+    # without its tap limit, the C++ core ignores the uk/pk limit, so it is not an error
+    spt = _spt(**{limit: value})
+    assert _validate_spt(spt) is None
+    PowerGridModel(_spt_input(spt))
+    # a provided tap limit of the other side does not enable the check
+    spt = _spt(**{limit: value, other_tap_limit: 1 if other_tap_limit == AT.tap_max else -1})
+    assert _validate_spt(spt) is None
+    PowerGridModel(_spt_input(spt))
+    # with its tap limit, the uk/pk limit is checked
+    errors = _validate_spt(_spt(**{limit: value, tap_limit: 1 if tap_limit == AT.tap_max else -1}))
     assert errors is not None
     assert expected in errors
 

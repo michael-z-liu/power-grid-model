@@ -205,8 +205,9 @@ For example, the [reduced-phase networks](../user_manual/reduced-phase-networks.
 the existing component `asym_line`, and the attribute `connection` to `sym_load`, `sym_gen`, `asym_load` and
 `asym_gen`.
 Code that fills a buffer made with `PGM_create_buffer` without calling `PGM_buffer_set_nan` leaves them as garbage.
-A garbage `connection` of exactly 1 silently turns a load into a delta (phase-to-phase) load, and most other garbage
-values make the construction of the model fail.
+A garbage `connection` of exactly 1 (`delta`) makes an `asym_load` raise `ExperimentalFeature` in a calculation, unless
+the experimental features are enabled, and makes a `sym_load` fail the construction with `InvalidPhaseConnection`.
+A garbage `connection` of 0 is harmless (`wye`), and any other value makes the construction of the model fail.
 With `PGM_buffer_set_nan`, they are not provided, which means `abc` and `wye`, and the behaviour is unchanged.
 See [C API compatibility](../user_manual/reduced-phase-networks.md#c-api-compatibility).
 
