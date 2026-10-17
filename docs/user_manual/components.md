@@ -547,6 +547,11 @@ $$
 This representation holds for all values `r_aa` ... `r_nn`, `x_aa` ... `x_nn` and `c_aa` ... `c_cc`.
 If the neutral values are not provided, the last row and column from the above matrix are omitted.
 
+The capacitance matrix `c_aa` ... `c_cc` is the nodal (Maxwell) capacitance matrix.
+Its diagonal entries are positive and its mutual (off-diagonal) entries are usually negative.
+For example, when the matrix is built from `c0` and `c1`, the mutual entries equal $(c_0 - c_1) / 3$, which is negative for $c_1 > c_0$.
+The mutual capacitances `c_ba`, `c_ca` and `c_cb` may therefore have any sign.
+
 | name   | data type | unit       | description                       | required                     |  update  | valid values |
 |--------|-----------|------------|-----------------------------------|------------------------------|:--------:|:------------:|
 | `phases` | {py:class}`PhaseConnection <power_grid_model.enum.PhaseConnection>` | - | Phases with a conductor | &#10060; default `abc` | &#10060; | `abc`, `a`, `b`, `c`, `ab`, `ac`, `bc` |
@@ -571,10 +576,10 @@ If the neutral values are not provided, the last row and column from the above m
 | `x_nc` | `double`  | ohm (Ω)    | Series serial reactance nc        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nn` | `double`  | ohm (Ω)    | Series serial reactance nn        | &#10024; for a neutral phase | &#10060; |    `> 0`     |
 | `c_aa` | `double`  | farad (F)  | Shunt nodal capacitance matrix aa | &#10024; for a full c matrix | &#10060; |    `> 0`     |
-| `c_ba` | `double`  | farad (F)  | Shunt nodal capacitance matrix ba | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
+| `c_ba` | `double`  | farad (F)  | Shunt nodal capacitance matrix ba | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
 | `c_bb` | `double`  | farad (F)  | Shunt nodal capacitance matrix bb | &#10024; for a full c matrix | &#10060; |    `> 0`     |
-| `c_ca` | `double`  | farad (F)  | Shunt nodal capacitance matrix ca | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
-| `c_cb` | `double`  | farad (F)  | Shunt nodal capacitance matrix cb | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
+| `c_ca` | `double`  | farad (F)  | Shunt nodal capacitance matrix ca | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
+| `c_cb` | `double`  | farad (F)  | Shunt nodal capacitance matrix cb | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
 | `c_cc` | `double`  | farad (F)  | Shunt nodal capacitance matrix cc | &#10024; for a full c matrix | &#10060; |    `> 0`     |
 | `c0`   | `double`  | farad (F)  | zero-sequence shunt capacitance   | &#10024; without a c matrix  | &#10060; |    `> 0`     |
 | `c1`   | `double`  | farad (F)  | Series shunt capacitance          | &#10024; without a c matrix  | &#10060; |    `> 0`     |

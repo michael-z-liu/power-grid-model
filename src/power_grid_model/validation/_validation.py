@@ -709,8 +709,10 @@ def validate_asym_line(data: SingleDataset) -> list[ValidationError]:
     c_fields = [AT.c0, AT.c1]
     for field in self_fields + self_neutral_fields + self_c_matrix_fields + c_fields:
         errors += _all_greater_than_zero(data, CT.asym_line, field)
-    for field in mutual_fields + mutual_neutral_fields + mutual_c_matrix_fields:
+    for field in mutual_fields + mutual_neutral_fields:
         errors += _all_greater_than_or_equal_to_zero(data, CT.asym_line, field)
+    # The mutual capacitances of the nodal (Maxwell) capacitance matrix are usually negative, e.g. (c0 - c1) / 3 when
+    # the matrix is built from c0 and c1, so they may have any sign.
 
     errors += _no_strict_subset_missing(data, optional_r_matrix_fields + optional_x_matrix_fields, CT.asym_line)
     errors += _no_strict_subset_missing(data, required_c_matrix_fields, CT.asym_line)

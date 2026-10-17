@@ -21,7 +21,13 @@ from power_grid_model import (
 )
 from power_grid_model._core.enum import AngleMeasurementType
 from power_grid_model._core.utils import compatibility_convert_row_columnar_dataset
-from power_grid_model.enum import CalculationType, ComponentAttributeFilterOptions, FaultPhase, FaultType
+from power_grid_model.enum import (
+    CalculationType,
+    ComponentAttributeFilterOptions,
+    FaultPhase,
+    FaultType,
+    PhaseConnection,
+)
 from power_grid_model.validation import validate_input_data
 from power_grid_model.validation.assertions import assert_valid_input_data
 from power_grid_model.validation.errors import (
@@ -1137,7 +1143,8 @@ def test_asym_line_input_data(input_data):
     # support a zero self neutral impedance.
     assert NotGreaterThanError(CT.asym_line, AT.r_nn, [55], 0) in validation_errors
     assert NotGreaterThanError(CT.asym_line, AT.x_nn, [55], 0) in validation_errors
-    # Mutual (off-diagonal) impedances/capacitances are allowed to be zero, but not negative.
+    # Mutual (off-diagonal) impedances are allowed to be zero, but not negative. Mutual capacitances may have any
+    # sign: they are entries of the nodal (Maxwell) capacitance matrix, which are usually negative.
     assert NotGreaterOrEqualError(CT.asym_line, AT.r_ba, [55], 0) in validation_errors
     assert NotGreaterOrEqualError(CT.asym_line, AT.r_ca, [55], 0) in validation_errors
     assert NotGreaterOrEqualError(CT.asym_line, AT.r_cb, [55], 0) in validation_errors
@@ -1150,9 +1157,9 @@ def test_asym_line_input_data(input_data):
     assert NotGreaterOrEqualError(CT.asym_line, AT.x_na, [55], 0) in validation_errors
     assert NotGreaterOrEqualError(CT.asym_line, AT.x_nb, [55], 0) in validation_errors
     assert NotGreaterOrEqualError(CT.asym_line, AT.x_nc, [55], 0) in validation_errors
-    assert NotGreaterOrEqualError(CT.asym_line, AT.c_ba, [55], 0) in validation_errors
-    assert NotGreaterOrEqualError(CT.asym_line, AT.c_ca, [55], 0) in validation_errors
-    assert NotGreaterOrEqualError(CT.asym_line, AT.c_cb, [55], 0) in validation_errors
+    assert NotGreaterOrEqualError(CT.asym_line, AT.c_ba, [55], 0) not in validation_errors
+    assert NotGreaterOrEqualError(CT.asym_line, AT.c_ca, [55], 0) not in validation_errors
+    assert NotGreaterOrEqualError(CT.asym_line, AT.c_cb, [55], 0) not in validation_errors
     assert (
         MultiFieldValidationError(
             CT.asym_line,
@@ -1202,6 +1209,42 @@ def test_asym_line_input_data(input_data):
         )
         in validation_errors
     )
+
+
+def test_asym_line_negative_mutual_capacitance():
+    # The c matrix built from c0 and c1 has a negative mutual capacitance (c0 - c1) / 3.
+    c0, c1 = 2e-10, 3e-10
+    c_self, c_mutual = (c0 + 2 * c1) / 3, (c0 - c1) / 3
+    assert c_mutual < 0
+
+    node = initialize_array(DatasetType.input, CT.node, 2)
+    node[AT.id] = [0, 1]
+    node[AT.u_rated] = [10.5e3, 10.5e3]
+
+    asym_line = initialize_array(DatasetType.input, CT.asym_line, 1)
+    asym_line[AT.id] = [2]
+    asym_line[AT.from_node] = [0]
+    asym_line[AT.to_node] = [1]
+    asym_line[AT.from_status] = [1]
+    asym_line[AT.to_status] = [1]
+    asym_line[AT.phases] = [PhaseConnection.abc]
+    for field in (AT.r_aa, AT.r_bb, AT.r_cc, AT.x_aa, AT.x_bb, AT.x_cc):
+        asym_line[field] = 1.0
+    for field in (AT.r_ba, AT.r_ca, AT.r_cb, AT.x_ba, AT.x_ca, AT.x_cb):
+        asym_line[field] = 0.1
+    for field in (AT.c_aa, AT.c_bb, AT.c_cc):
+        asym_line[field] = c_self
+    for field in (AT.c_ba, AT.c_ca, AT.c_cb):
+        asym_line[field] = c_mutual
+
+    errors = validate_input_data({CT.node: node, CT.asym_line: asym_line}, symmetric=False)
+
+    c_fields = {AT.c_aa, AT.c_ba, AT.c_bb, AT.c_ca, AT.c_cb, AT.c_cc, AT.c0, AT.c1}
+    assert not [
+        error
+        for error in errors or []
+        if c_fields & set(error.field if isinstance(error.field, list) else [error.field])
+    ]
 
 
 @pytest.mark.parametrize("component_type", CT)
