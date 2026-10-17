@@ -392,6 +392,21 @@ class WindingConnection1P(IntEnum):
     """
 
 
+class LoadGenConnection(IntEnum):
+    """
+    The connection of an asymmetric load or generator. Optional; the default is wye.
+    """
+
+    wye = 0
+    """
+    Phase-to-earth: p/q_specified are the a, b and c values
+    """
+    delta = 1
+    """
+    Phase-to-phase: p/q_specified are the ab, bc and ca values; only for asym_load and asym_gen
+    """
+
+
 class LoggerType(IntEnum):
     """Logger types for opt-in diagnostic output from calculations.
 

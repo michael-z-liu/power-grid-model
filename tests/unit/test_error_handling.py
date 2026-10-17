@@ -18,6 +18,7 @@ from power_grid_model.enum import (
     CalculationMethod,
     FaultPhase,
     FaultType,
+    LoadGenConnection,
     LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
@@ -52,6 +53,7 @@ from power_grid_model.errors import (
     PowerGridError,
     ReducedPhaseNotSupported,
     ShuntAtReducedPhaseNode,
+    UnsupportedLoadGenTypeForVoltageRegulator,
 )
 
 from .utils import PowerGridModelWithExt
@@ -581,6 +583,23 @@ def test_deprecated_invalid_branch3_error():
             "puts power on all three phases.\n",
             LoadGenOnAbsentPhase,
             id="load_gen_on_absent_phase",
+        ),
+        pytest.param(
+            "Load or generator 12 has a non-zero specified power on phases (ca) that are not present at its node (node "
+            "phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and b, bc needs b and c, "
+            "ca needs c and a.\n",
+            LoadGenOnAbsentPhase,
+            id="load_gen_on_absent_phase_delta",
+        ),
+        pytest.param(
+            "Symmetric power flow is not supported in a network with delta-connected loads or generators.\n",
+            ReducedPhaseNotSupported,
+            id="delta_load_gen_symmetric_power_flow",
+        ),
+        pytest.param(
+            "State estimation is not supported in a network with delta-connected loads or generators.\n",
+            ReducedPhaseNotSupported,
+            id="delta_load_gen_state_estimation",
         ),
         pytest.param(
             "Shunt 500 is connected to a node without all phases. A shunt at a node without all phases is not "
@@ -1191,3 +1210,210 @@ def test_single_phase_transformer_center_tapped_short_circuit():
     input_data[CT.fault][AT.fault_phase] = [FaultPhase.default_value]
     with pytest.raises(InvalidShortCircuitPhaseOrType, match="not all present at the faulted node"):
         PowerGridModelWithExt(input_data).calculate_short_circuit_with_ext(experimental_features=enabled)
+
+
+def test_load_gen_connection_exported():
+    assert [(member.name, member.value) for member in LoadGenConnection] == [("wye", 0), ("delta", 1)]
+
+
+def _delta_input(
+    p,
+    q,
+    *,
+    load_type: CT = CT.asym_load,
+    connection: int | None = LoadGenConnection.delta,
+    load_gen_type: LoadGenType = LoadGenType.const_power,
+    line_phases: PhaseConnection | None = None,
+):
+    """
+    node 0 (abc, 400 V, stiff source) with a load of the given type and connection at node 0, or, if line_phases is
+    given, behind an asym_line 200 with those phases at node 1 (which then has the phases of the line)
+    """
+    n_node = 1 if line_phases is None else 2
+    node_input = initialize_array(DatasetType.input, CT.node, n_node)
+    node_input[AT.id] = list(range(n_node))
+    node_input[AT.u_rated] = 400.0
+
+    source_input = initialize_array(DatasetType.input, CT.source, 1)
+    source_input[AT.id] = [100]
+    source_input[AT.node] = [0]
+    source_input[AT.status] = [1]
+    source_input[AT.u_ref] = [1.0]
+    source_input[AT.sk] = [1e12]
+
+    load_input = initialize_array(DatasetType.input, load_type, 1)
+    load_input[AT.id] = [300]
+    load_input[AT.node] = [n_node - 1]
+    load_input[AT.status] = [1]
+    load_input[AT.type] = [load_gen_type]
+    load_input[AT.p_specified] = [p]
+    load_input[AT.q_specified] = [q]
+    if connection is not None:
+        load_input[AT.connection] = [connection]
+
+    input_data = {CT.node: node_input, CT.source: source_input, load_type: load_input}
+
+    if line_phases is not None:
+        line_input = initialize_array(DatasetType.input, CT.asym_line, 1)
+        line_input[AT.id] = [200]
+        line_input[AT.from_node] = [0]
+        line_input[AT.to_node] = [1]
+        line_input[AT.from_status] = [1]
+        line_input[AT.to_status] = [1]
+        line_input["phases"] = [line_phases]
+        for name in ("aa",) if line_phases == PhaseConnection.a else ("aa", "bb", "ba"):
+            line_input[f"r_{name}"] = [0.5 if name[0] == name[1] else 0.1]
+            line_input[f"x_{name}"] = [0.4 if name[0] == name[1] else 0.1]
+            line_input[f"c_{name}"] = [1e-8 if name[0] == name[1] else 0.0]
+        input_data[CT.asym_line] = line_input
+
+    return input_data
+
+
+@pytest.mark.parametrize("method", [CalculationMethod.newton_raphson, CalculationMethod.iterative_current])
+@pytest.mark.parametrize(
+    "load_gen_type", [LoadGenType.const_power, LoadGenType.const_current, LoadGenType.const_impedance]
+)
+def test_delta_load_closed_form(method, load_gen_type):
+    # a stiff source: the ab branch of the load sees 400 V, so p/q_specified is the power of the branch
+    p = 1e4
+    q = 0.0
+    model = PowerGridModelWithExt(_delta_input([p, 0.0, 0.0], [q, 0.0, 0.0], load_gen_type=load_gen_type))
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False, calculation_method=method, experimental_features=_ExperimentalFeatures.enabled
+    )[CT.asym_load]
+
+    # a resistive ab load is shared over a and b, with opposite reactive power; c is not touched
+    assert result[AT.p][0] == pytest.approx([p / 2, p / 2, 0.0], rel=1e-5, abs=1e-6)
+    assert result[AT.q][0] == pytest.approx([-p / (2 * np.sqrt(3.0)), p / (2 * np.sqrt(3.0)), 0.0], rel=1e-5, abs=1e-6)
+    assert result[AT.i][0] == pytest.approx([p / 400.0, p / 400.0, 0.0], rel=1e-5, abs=1e-6)
+    assert result[AT.p][0][2] == 0.0
+    assert result[AT.q][0][2] == 0.0
+    assert result[AT.i][0][2] == 0.0
+
+
+def test_delta_gen_untouched_phase_is_positive_zero():
+    # an asym_load reports -0 for a zero power, because its output is the negated injection; an asym_gen does not
+    model = PowerGridModelWithExt(_delta_input([-1e4, 0.0, 0.0], [-1e3, 0.0, 0.0], load_type=CT.asym_gen))
+    result = model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+    assert result[CT.asym_gen][AT.p][0].sum() == pytest.approx(-1e4, rel=1e-5)
+    assert result[CT.asym_gen][AT.p][0][2] == 0.0
+    assert not np.signbit(result[CT.asym_gen][AT.p][0][2])
+    assert not np.signbit(result[CT.asym_gen][AT.q][0][2])
+    assert not np.signbit(result[CT.asym_gen][AT.i][0][2])
+
+
+def test_delta_load_total_power():
+    model = PowerGridModelWithExt(_delta_input([3e3, -1e3, 2e3], [1e3, 5e2, -2e3]))
+    result = model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+    # the total power of the three branches is the sum of the phase powers
+    assert result[CT.asym_load][AT.p][0].sum() == pytest.approx(4e3, rel=1e-6)
+    assert result[CT.asym_load][AT.q][0].sum() == pytest.approx(-5e2, rel=1e-5)
+    assert result[CT.source][AT.p][0].sum() == pytest.approx(4e3, rel=1e-3)
+
+
+def test_delta_load_experimental_gate():
+    model = PowerGridModelWithExt(_delta_input([1e4, 0.0, 0.0], [0.0, 0.0, 0.0]))
+    with pytest.raises(ExperimentalFeature, match="delta-connected load or generator"):
+        model.calculate_power_flow(symmetric=False)
+    with pytest.raises(ExperimentalFeature):
+        model.calculate_short_circuit()
+
+
+def test_delta_load_unsupported_calculations():
+    model = PowerGridModelWithExt(_delta_input([1e4, 0.0, 0.0], [0.0, 0.0, 0.0]))
+    enabled = _ExperimentalFeatures.enabled
+
+    with pytest.raises(ReducedPhaseNotSupported, match="delta-connected loads or generators"):
+        model.calculate_power_flow_with_ext(symmetric=True, experimental_features=enabled)
+    for symmetric in (True, False):
+        with pytest.raises(ReducedPhaseNotSupported, match="delta-connected loads or generators"):
+            model.calculate_state_estimation_with_ext(symmetric=symmetric, experimental_features=enabled)
+
+
+def test_delta_load_short_circuit():
+    # the load is ignored in a short circuit calculation
+    model = PowerGridModelWithExt(_delta_input([1e4, 0.0, 0.0], [0.0, 0.0, 0.0]))
+    result = model.calculate_short_circuit_with_ext(experimental_features=_ExperimentalFeatures.enabled)
+    assert result[CT.node][AT.u_pu].shape == (1, 3)
+
+
+@pytest.mark.parametrize("connection", [None, LoadGenConnection.wye])
+def test_wye_connection_is_the_default(connection):
+    p = [1e3, 2e3, 3e3]
+    q = [1e2, 2e2, 3e2]
+    model = PowerGridModelWithExt(_delta_input(p, q, connection=connection))
+    # a wye load needs no experimental features and has the specified power per phase
+    result = model.calculate_power_flow(symmetric=False)
+    assert result[CT.asym_load][AT.p][0] == pytest.approx(p, rel=1e-6)
+    assert result[CT.asym_load][AT.q][0] == pytest.approx(q, rel=1e-6)
+
+
+def test_delta_sym_load_not_supported():
+    with pytest.raises(InvalidPhaseConnection, match="delta"):
+        PowerGridModel(_delta_input(1e4, 0.0, load_type=CT.sym_load))
+    # wye and not provided are fine
+    PowerGridModel(_delta_input(1e4, 0.0, load_type=CT.sym_load, connection=LoadGenConnection.wye))
+    PowerGridModel(_delta_input(1e4, 0.0, load_type=CT.sym_load, connection=None))
+
+
+def test_load_gen_invalid_connection():
+    with pytest.raises(MissingCaseForEnumError):
+        PowerGridModel(_delta_input([1e4, 0.0, 0.0], [0.0, 0.0, 0.0], connection=2))
+
+
+@pytest.mark.parametrize(
+    ("line_phases", "p", "valid"),
+    [
+        pytest.param(PhaseConnection.a, [1e3, 0.0, 0.0], False, id="a_node_ab"),
+        pytest.param(PhaseConnection.a, [0.0, 0.0, 1e3], False, id="a_node_ca"),
+        pytest.param(PhaseConnection.ab, [1e3, 0.0, 0.0], True, id="ab_node_ab"),
+        pytest.param(PhaseConnection.ab, [0.0, 1e3, 0.0], False, id="ab_node_bc"),
+        pytest.param(PhaseConnection.ab, [0.0, 0.0, 1e3], False, id="ab_node_ca"),
+        pytest.param(PhaseConnection.ab, [1e3, 0.0, 0.0], True, id="ab_node_ab_other_entries_zero"),
+        pytest.param(PhaseConnection.ab, [1e3, np.nan, np.nan], True, id="ab_node_other_entries_nan"),
+    ],
+)
+def test_delta_load_on_absent_phase(line_phases, p, valid):
+    model = PowerGridModelWithExt(_delta_input(p, [0.0, 0.0, 0.0], line_phases=line_phases))
+    enabled = _ExperimentalFeatures.enabled
+    if valid:
+        result = model.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
+        assert result[CT.asym_load][AT.p][0][0] > 0.0
+        assert result[CT.asym_load][AT.p][0][2] == 0.0
+    else:
+        with pytest.raises(LoadGenOnAbsentPhase, match=r"Load or generator 300 .*A delta \(phase-to-phase\) entry"):
+            model.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
+
+
+def test_delta_load_batch_update_matches_separate_runs():
+    enabled = _ExperimentalFeatures.enabled
+    model = PowerGridModelWithExt(_delta_input([1e4, 0.0, 0.0], [0.0, 0.0, 0.0], line_phases=PhaseConnection.ab))
+
+    p_scenarios = [[1e4, 0.0, 0.0], [5e3, 0.0, 0.0], [2e3, 0.0, 0.0]]
+    update = initialize_array(DatasetType.update, CT.asym_load, (3, 1))
+    update[AT.id] = 300
+    update[AT.p_specified] = [[p] for p in p_scenarios]
+    batch = model.calculate_power_flow_with_ext(
+        symmetric=False, update_data={CT.asym_load: update}, experimental_features=enabled
+    )
+
+    for k, p in enumerate(p_scenarios):
+        single = PowerGridModelWithExt(_delta_input(p, [0.0, 0.0, 0.0], line_phases=PhaseConnection.ab))
+        expected = single.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
+        for component, attribute in ((CT.asym_load, AT.p), (CT.asym_load, AT.q), (CT.node, AT.u)):
+            assert batch[component][attribute][k] == pytest.approx(expected[component][attribute], rel=1e-8, abs=1e-8)
+        assert batch[CT.asym_load][AT.p][k, 0, 0] > 0.0
+
+
+def test_delta_gen_with_voltage_regulator_not_supported():
+    input_data = _delta_input([-1e4, 0.0, 0.0], [0.0, 0.0, 0.0], load_type=CT.asym_gen)
+    regulator_input = initialize_array(DatasetType.input, CT.voltage_regulator, 1)
+    regulator_input[AT.id] = [400]
+    regulator_input[AT.regulated_object] = [300]
+    regulator_input[AT.status] = [1]
+    regulator_input[AT.u_ref] = [1.0]
+    input_data[CT.voltage_regulator] = regulator_input
+    model = PowerGridModelWithExt(input_data)
+    with pytest.raises(UnsupportedLoadGenTypeForVoltageRegulator):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)

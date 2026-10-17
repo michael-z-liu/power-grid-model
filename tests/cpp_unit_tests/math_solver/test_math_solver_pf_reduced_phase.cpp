@@ -742,6 +742,22 @@ TEST_CASE_TEMPLATE("Test math solver - PF with a delta load", SolverCaseType, Ne
         }
     }
 
+    SUBCASE("Phase slots that no delta entry touches report exactly +0") {
+        // an ab-only load at a three-phase bus: phase c is present but untouched, and u o conj(0) would give -0
+        for (LoadGenType const type : delta_types) {
+            CAPTURE(voltage_power(type));
+            ReducedPhaseCase rpc = three_phase_delta_case();
+            rpc.delta_type = type;
+            rpc.delta_s = Value{DoubleComplex{-0.3, -0.1}, 0.0, 0.0};
+            auto const output = run_delta_case(rpc);
+            auto const& load_gen = output.load_gen.back();
+            CHECK(load_gen.s(2).real() == 0.0);
+            CHECK(load_gen.s(2).imag() == 0.0);
+            CHECK_FALSE(std::signbit(load_gen.s(2).real()));
+            CHECK_FALSE(std::signbit(load_gen.s(2).imag()));
+        }
+    }
+
     SUBCASE("Delta entries on an absent phase are ignored") {
         for (LoadGenType const type : delta_types) {
             CAPTURE(voltage_power(type));

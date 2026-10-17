@@ -106,7 +106,7 @@ _UNSUPPORTED_VOLTAGE_REGULATOR_SOURCE_COMBINATION_ERROR_RE = re.compile(
 )
 _EXPERIMENTAL_FEATURE_RE = re.compile(r" is an experimental feature")  # multiple different flavors
 _REDUCED_PHASE_NOT_SUPPORTED_RE = re.compile(
-    r" is not supported in a network with one- or two-phase nodes"
+    r" is not supported in a network with (one- or two-phase nodes|delta-connected loads or generators)"
 )  # multiple different flavors
 _DANGLING_CONDUCTOR_RE = re.compile(
     r"Conductors of .+ on phases \([^)]*\) are not present at any of its connected nodes"

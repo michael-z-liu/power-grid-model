@@ -915,6 +915,7 @@ However, the reference direction and meaning of `RealValueInput` is different, a
 |---------------|------------------|----------------------------|--------------------------|:----------------------------:|:--------:|
 | `p_specified` | `RealValueInput` | watt (W)                   | specified active power   | &#10024; only for power flow | &#10004; |
 | `q_specified` | `RealValueInput` | volt-ampere-reactive (var) | specified reactive power | &#10024; only for power flow | &#10004; |
+| `connection`  | {py:class}`LoadGenConnection <power_grid_model.enum.LoadGenConnection>` | - | `wye` (phase-to-earth) or `delta` (phase-to-phase); default `wye`; `delta` only for `asym_load` and `asym_gen` | &#10060; | &#10060; |
 
 ##### Electric model
 
@@ -942,6 +943,100 @@ S = S_{\text{specified}}
 $$
 
 where $\bar{u}$ is the calculated node voltage.
+
+##### Delta (phase-to-phase) connection
+
+```{note}
+Delta-connected loads and generators are an experimental feature.
+```
+
+By default, a load/generator is connected phase-to-earth (`connection` is `wye`) and the three entries of `p_specified`
+and `q_specified` of an `asym_load` or `asym_gen` are the powers of phases a, b and c.
+With `connection` set to `delta`, the entries are the powers of the three phase-to-phase branches **ab**, **bc** and
+**ca**.
+Entry $k$ is the branch from its first to its second phase, e.g. the **ab** entry is the branch with
+$U_{ab} = U_a - U_b$.
+A single phase-to-phase load is a delta load with one non-zero entry; a load between phases a and c uses the **ca**
+entry.
+The reference directions of load and generator are as above.
+
+The branch voltages $U_\Delta$ follow from the phase voltages $U$ through the connection matrix $D$, and the phase
+currents $I$ from the branch currents $I_\Delta$ through its transpose:
+
+$$
+U_\Delta = D U =
+\begin{bmatrix} 1 & -1 & 0 \\ 0 & 1 & -1 \\ -1 & 0 & 1 \end{bmatrix}
+\begin{bmatrix} U_a \\ U_b \\ U_c \end{bmatrix}
+\qquad
+I = D^T I_\Delta
+\qquad
+I_{\Delta,k} = \overline{\left( \frac{S_k(U_{\Delta,k})}{U_{\Delta,k}} \right)}
+$$
+
+The branch power depends on the branch voltage in the same ZIP way as for a wye connection, but relative to the nominal
+branch voltage $U_{\Delta,\text{nom}}$ instead of the nominal phase voltage:
+
+$$
+S_k = S_{\text{specified},k} \cdot \left( \frac{|U_{\Delta,k}|}{U_{\Delta,\text{nom}}} \right)^n
+$$
+
+with $n = 0$ for `const_power`, $n = 1$ for `const_current` and $n = 2$ for `const_impedance`.
+Therefore, `p_specified` and `q_specified` are the powers at rated voltage across that branch.
+The nominal branch voltage follows from the node:
+
+* at a node with the three-phase pattern (all three phases, or two of them as `ab`, `bc` or `ac`),
+  $U_{\Delta,\text{nom}}$ is the phase-to-phase voltage, which equals $u_\text{rated}$.
+  At a 400 V node, a `const_impedance` delta entry of 10 kW is a 16 $\Omega$ branch: $400^2 / 10^4 = 16$.
+* at a split-phase node (the two legs of a centre-tapped winding), $U_{\Delta,\text{nom}}$ is the voltage across both
+  legs, $2 \cdot u_\text{rated} / \sqrt{3}$.
+  For a 240-0-240 V winding this is 480 V (with $u_\text{rated} = 240 \sqrt{3}$ V), and a `const_impedance` entry of
+  10 kW is a 23.04 $\Omega$ branch: $480^2 / 10^4 = 23.04$.
+
+##### Output of a delta load/generator
+
+The output of a delta load/generator is expressed per **phase** at its node, in the same layout as for a wye
+connection, and not per branch.
+The phase current is $I = D^T I_\Delta$, `i` is its magnitude, and the phase power is
+$S = U \circ \overline{I}$, which gives `p`, `q`, `s` and `pf` per phase.
+This keeps the power balance at the node per phase, and the sum of the three `p` values is the total active power of the
+three branches.
+Branch-level output is not available.
+
+Note that this makes a single phase-to-phase load appear on both of its phases.
+For example, a resistive `p_specified` of $P$ on the **ab** entry at balanced voltages gives
+$p_a = p_b = P/2$, $q_a = -P/(2\sqrt{3})$ and $q_b = +P/(2\sqrt{3})$, and zero on phase c.
+At a split-phase node, where $U_b = -U_a$, the same load gives equal powers $S_a = S_b = S/2$ on both legs.
+The phases that no entry of the load touches report exactly zero.
+
+##### Delta entries and the phases of a node
+
+An entry of a delta load/generator is *specified* when it is neither `NaN` nor zero, as for a wye connection.
+A specified entry needs **both** of its phases at its node:
+
+| node phases                                 | non-zero entries allowed |
+|---------------------------------------------|--------------------------|
+| `abc`                                       | ab, bc, ca               |
+| `ab` (three-phase pattern or split-phase)   | ab                       |
+| `bc`                                        | bc                       |
+| `ac`                                        | ca                       |
+| `a`, `b` or `c`                             | none                     |
+
+Otherwise, a {py:class}`LoadGenOnAbsentPhase <power_grid_model.errors.LoadGenOnAbsentPhase>` error is raised.
+Entries that are zero do not contribute to the calculation.
+
+##### Limitations of the delta connection
+
+* It is an experimental feature, and needs the experimental features to be enabled in the calculation.
+* `delta` is only supported for `asym_load` and `asym_gen`.
+  A delta `sym_load` or `sym_gen` raises an {py:class}`InvalidPhaseConnection
+  <power_grid_model.errors.InvalidPhaseConnection>` error.
+* Delta loads and generators are only supported in an asymmetric power flow.
+  A symmetric power flow or any state estimation in a network with a delta-connected load/generator raises a
+  {py:class}`ReducedPhaseNotSupported <power_grid_model.errors.ReducedPhaseNotSupported>` error.
+* A `voltage_regulator` cannot regulate a delta-connected load/generator.
+* As for all loads and generators, a short circuit calculation ignores them.
+* The Python validation functions do not yet check the `connection` attribute; this follows with the validation of
+  reduced-phase networks.
 
 ### Shunt
 
