@@ -40,6 +40,8 @@ Steps:
                 If type is constant PQ: I_inj_i += conj(S_inj_j/U_i)
                 If type is constant impedance: I_inj_i += conj((S_inj_j * abs(U_i)^2) / U_i) = conj((S_inj_j) * U_i
                 If type is constant current: I_inj_i += conj(S_inj_j*abs(U_i)/U_i)
+                If the load is delta (phase-to-phase) connected: I_inj_i += D^T I_delta, with the branch currents
+                    I_delta_k = conj(S_k(U) / U_k) of the type-dependent branch powers (see delta_load_gen.hpp)
 
 Nomenclature:
     I_inj : Injected current
@@ -53,6 +55,7 @@ Nomenclature:
 */
 
 #include "common_solver_functions.hpp"
+#include "delta_load_gen.hpp"
 #include "iterative_pf_solver.hpp"
 #include "sparse_lu_solver.hpp"
 #include "y_bus.hpp"
@@ -137,7 +140,7 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
         // loop buses: i
         for (auto const& [bus_number, load_gens, sources] :
              enumerated_zip_sequence(load_gens_per_bus, sources_per_bus)) {
-            add_loads(load_gens, bus_number, input, load_gen_type, u);
+            add_loads(load_gens, bus_number, input, load_gen_type, u, y_bus.math_topology());
             add_sources(sources, bus_number, y_bus, input);
         }
         // a load on an absent phase is ignored; its current conj(s / u) is not finite at u = 0
@@ -174,10 +177,20 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     bool parameters_changed_ = true;
 
     void add_loads(IdxRange const& load_gens, Idx bus_number, PowerFlowInput<sym> const& input,
-                   std::vector<LoadGenType> const& load_gen_type, ComplexValueVector<sym> const& u) {
+                   std::vector<LoadGenType> const& load_gen_type, ComplexValueVector<sym> const& u,
+                   [[maybe_unused]] MathModelTopology const& topo) {
         for (Idx const load_number : load_gens) {
             // load type
             LoadGenType const type = load_gen_type[load_number];
+            if constexpr (!is_symmetric_v<sym>) {
+                if (topo.is_delta_load_gen(load_number)) {
+                    // I_inj_i = D^T conj(S_k(U) / U_k) over the branches k of the delta load
+                    rhs_u_[bus_number] += delta_load_gen::phase_current(
+                        input.s_injection[load_number], type, u[bus_number], topo.bus_phase(bus_number),
+                        delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
+                    continue;
+                }
+            }
             switch (type) {
                 using enum LoadGenType;
 

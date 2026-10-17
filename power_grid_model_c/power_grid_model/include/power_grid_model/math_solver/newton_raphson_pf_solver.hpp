@@ -99,7 +99,7 @@ Jii.L -= diag(-Q_cal_i)
 
 *** calculate PQ_sp, and dPQ_sp/(dtheta, dV)
 
-** for load/generation
+** for wye (phase-to-earth) load/generation, each phase on its own
 PQ_sp =
     PQ_base for constant pq
     PQ_base * V for constant i
@@ -113,6 +113,25 @@ dPQ_sp/dV_i * V =
     PQ_base * 2 * V^2 for constant z (dPQ_sp/dV = PQ_base * 2 * V)
 J.N -= diag(dP_sp/dV .* V)
 J.L -= diag(dQ_sp/dV .* V)
+
+** for delta (phase-to-phase) load/generation, asymmetric only (see delta_load_gen.hpp)
+branch k = (p, q) in {ab, bc, ca}, U_k = U_p - U_q, n = 0 (constant pq), 1 (constant i), 2 (constant z)
+S_k(U) = S_k_base * (|U_k| / U_nom)^n, U_nom = sqrt(3) (three-phase bus) or 2 (split-phase bus)
+alpha_p = U_p / U_k, alpha_q = -U_q / U_k, beta = S_k(U) * alpha_p * alpha_q
+the branch injects g_r = S_k(U) * alpha_r into phase r in {p, q}
+del_pq += [Re(g), Im(g)]
+
+with sigma = [[1, -1], [-1, 1]] over r, s in {p, q}
+dP_sp_r/dtheta_s     = -sigma_rs * Im(beta) - n * Re(g_r) * Im(alpha_s)
+dQ_sp_r/dtheta_s     =  sigma_rs * Re(beta) - n * Im(g_r) * Im(alpha_s)
+dP_sp_r/dV_s * V_s   =  sigma_rs * Re(beta) + n * Re(g_r) * Re(alpha_s)
+dQ_sp_r/dV_s * V_s   =  sigma_rs * Im(beta) + n * Im(g_r) * Re(alpha_s)
+J.H -= dP_sp/dtheta
+J.N -= dP_sp/dV .* V
+J.M -= dQ_sp/dtheta
+J.L -= dQ_sp/dV .* V
+Unlike wye, dPQ_sp/dtheta is not zero and the phases of the bus are coupled. All terms are within the bus, so they
+only add to its diagonal block and the sparsity pattern is unchanged.
 
 ** for source
 A mini two bus equivalent system is built to solve the problem
@@ -146,6 +165,7 @@ J.L -= -dQ_cal_m/dV
 
 #include "block_matrix.hpp"
 #include "common_solver_functions.hpp"
+#include "delta_load_gen.hpp"
 #include "iterative_pf_solver.hpp"
 #include "sparse_lu_solver.hpp"
 #include "y_bus.hpp"
@@ -332,8 +352,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
         for (auto const& [bus_number, load_gens, sources] :
              enumerated_zip_sequence(load_gens_per_bus, sources_per_bus)) {
             Idx const diagonal_position = bus_entry[bus_number];
-            add_linear_initial_guess_loads(load_gens, data_jac_[diagonal_position], input,
-                                           y_bus.math_topology().bus_phase(bus_number));
+            add_linear_initial_guess_loads(load_gens, data_jac_[diagonal_position], input, y_bus.math_topology(),
+                                           bus_number);
             add_linear_initial_guess_sources(sources, data_jac_[diagonal_position], del_x_pq_[bus_number], y_bus,
                                              input);
         }
@@ -586,7 +606,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
                 bus_control_[bus_number].q_limit.recalc_after_limit_violation = false;
             }
             Idx const diagonal_position = bus_entry[bus_number];
-            add_loads(load_gens, bus_number, diagonal_position, input, load_gen_type);
+            add_loads(load_gens, bus_number, diagonal_position, input, load_gen_type, y_bus.math_topology(),
+                      u[bus_number]);
             add_sources(sources, bus_number, diagonal_position, y_bus, input, u);
         }
     }
@@ -803,8 +824,24 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
     }
 
     void add_linear_initial_guess_loads(IdxRange const& load_gens, PFJacBlock<sym>& block,
-                                        PowerFlowInput<sym> const& input, PhaseMask phases) {
+                                        PowerFlowInput<sym> const& input, MathModelTopology const& topo,
+                                        Idx bus_number) {
+        PhaseMask const phases = topo.bus_phase(bus_number);
         for (Idx const load_number : load_gens) {
+            if constexpr (!is_symmetric_v<sym>) {
+                if (topo.is_delta_load_gen(load_number)) {
+                    // a delta load_gen is never regulated; its constant admittance at the nominal branch voltage
+                    // couples the two phases of each branch, mapped like set_linear_block
+                    ComplexTensor<asymmetric_t> const y_load = delta_load_gen::linear_admittance(
+                        input.s_injection[load_number], phases,
+                        delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
+                    block.real_imag() -= imag(y_load);
+                    block.real_real() += real(y_load);
+                    block.imag_imag() += real(y_load);
+                    block.imag_real() += imag(y_load);
+                    continue;
+                }
+            }
             auto const& s_input = input.s_injection[load_number];
 
             bool is_regulated = false;
@@ -862,7 +899,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
     }
 
     void add_loads(IdxRange const& load_gens, Idx bus_number, Idx diagonal_position, PowerFlowInput<sym> const& input,
-                   std::vector<LoadGenType> const& load_gen_type) {
+                   std::vector<LoadGenType> const& load_gen_type, [[maybe_unused]] MathModelTopology const& topo,
+                   [[maybe_unused]] ComplexValue<sym> const& u_bus) {
         using enum LoadGenType;
         for (Idx const load_number : load_gens) {
             RealValue<sym> const& clamped_q = clamped_regulators_per_load_gen_[load_number];
@@ -875,6 +913,12 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             }
 
             LoadGenType const type = load_gen_type[load_number];
+            if constexpr (!is_symmetric_v<sym>) {
+                if (topo.is_delta_load_gen(load_number)) {
+                    add_delta_load(bus_number, load_number, diagonal_position, input, type, topo, u_bus);
+                    continue;
+                }
+            }
             // modify jacobian and del_pq based on type
             switch (type) {
             case const_pq:
@@ -890,6 +934,22 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
                 throw MissingCaseForEnumError("Jacobian and deviation calculation", type);
             }
         }
+    }
+
+    // PQ_sp and -dPQ_sp/(dtheta, dV * V) of a delta load_gen, see the header; it couples the phases of the bus
+    void add_delta_load(Idx bus_number, Idx load_number, Idx diagonal_position, PowerFlowInput<sym> const& input,
+                        LoadGenType type, MathModelTopology const& topo, ComplexValue<sym> const& u_bus)
+        requires(!is_symmetric_v<sym>)
+    {
+        delta_load_gen::PowerAndJacobian const result =
+            delta_load_gen::power_and_jacobian(input.s_injection[load_number], type, u_bus, topo.bus_phase(bus_number),
+                                               delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
+        del_x_pq_[bus_number].p() += real(result.s);
+        del_x_pq_[bus_number].q() += imag(result.s);
+        data_jac_[diagonal_position].h() -= result.dp_dtheta;
+        data_jac_[diagonal_position].n() -= result.dp_dv;
+        data_jac_[diagonal_position].m() -= result.dq_dtheta;
+        data_jac_[diagonal_position].l() -= result.dq_dv;
     }
 
     void add_const_power_load(Idx bus_number, Idx load_number, PowerFlowInput<sym> const& input) {

@@ -27,10 +27,12 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <ranges>
 #include <vector>
@@ -98,6 +100,9 @@ Tensor two_phase_branch(DoubleComplex y_self, DoubleComplex y_mutual) {
 // - the loads of each bus are split into const_pq, const_i and const_y for the iterative solvers, or are one const_y
 //   load for the linear solver
 // - the injections on the absent phases of bus1 are given by absent_injection; they must be ignored
+// - optionally, bus1 has a delta load (entries ab, bc, ca) of delta_type as its last load_gen, const_y for the linear
+//   solver; the wye loads of bus1 close the current balance around it
+// - optionally, the branch is given by its full parameters instead of y_branch (e.g. a centre-tapped winding)
 struct ReducedPhaseCase {
     Tensor y_branch;
     PhaseMask mask1;
@@ -106,6 +111,10 @@ struct ReducedPhaseCase {
     SourceCalcParam source{.y1 = y_ref, .y0 = y_ref};
     std::optional<Tensor> y_shunt{};
     Value absent_injection{};
+    std::optional<Value> delta_s{};
+    LoadGenType delta_type{LoadGenType::const_pq};
+    SlotPattern pattern1{SlotPattern::three_phase};
+    std::optional<BranchCalcParam<asymmetric_t>> branch{};
 };
 
 struct ReducedPhaseGrid {
@@ -128,11 +137,55 @@ Value scaled_injection(Value const& s, Value const& u, PhaseMask phases, int pow
     return result;
 }
 
+// exponent of the voltage dependence of a load type
+int voltage_power(LoadGenType type) {
+    using enum LoadGenType;
+    switch (type) {
+    case const_pq:
+        return 0;
+    case const_i:
+        return 1;
+    case const_y:
+        return 2;
+    default:
+        throw MissingCaseForEnumError{"Test voltage power", type};
+    }
+}
+
+// phase current injection of a delta load, derived here independently of delta_load_gen.hpp: the branch k = (p, q) in
+// ab, bc, ca carries I_k = conj(S_k * (|U_k| / U_nom)^power / U_k) with U_k = U_p - U_q from phase p to phase q;
+// U_nom is the phase-to-phase voltage sqrt(3) (three-phase pattern) or the voltage across both legs 2 (split-phase);
+// an entry that is zero or touches an absent phase is ignored
+Value expected_delta_current(Value const& s_delta, LoadGenType type, Value const& u, PhaseMask phases,
+                             SlotPattern pattern) {
+    constexpr std::array<std::array<Idx, 2>, 3> branch_phases{{{0, 1}, {1, 2}, {2, 0}}};
+    double const u_nom = pattern == SlotPattern::split_phase ? 2.0 : std::numbers::sqrt3;
+    int const power = voltage_power(type);
+    Value result{};
+    for (Idx k = 0; k != 3; ++k) {
+        auto const [p, q] = branch_phases[static_cast<size_t>(k)];
+        if (s_delta(k) == 0.0 || !phases.has(p) || !phases.has(q)) {
+            continue;
+        }
+        DoubleComplex const u_k = u(p) - u(q);
+        DoubleComplex s_k = s_delta(k);
+        for (int order = 0; order != power; ++order) {
+            s_k *= std::abs(u_k) / u_nom;
+        }
+        DoubleComplex const i_k = std::conj(s_k / u_k);
+        result(p) += i_k;
+        result(q) -= i_k;
+    }
+    return result;
+}
+
 ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
     using enum LoadGenType;
     ReducedPhaseGrid grid{};
     Idx const n_load_per_bus = const_y_only ? 1 : 3;
     Idx const n_shunt = rpc.y_shunt.has_value() ? 1 : 0;
+    Idx const n_delta = rpc.delta_s.has_value() ? 1 : 0;
+    LoadGenType const delta_type = const_y_only ? const_y : rpc.delta_type;
 
     // topology
     grid.topo.slack_bus = 0;
@@ -140,26 +193,34 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
     grid.topo.branch_bus_idx = {{0, 1}};
     grid.topo.sources_per_bus = {from_sparse, {0, 1, 1}};
     grid.topo.shunts_per_bus = {from_sparse, {0, 0, n_shunt}};
-    grid.topo.load_gens_per_bus = {from_sparse, {0, n_load_per_bus, 2 * n_load_per_bus}};
+    grid.topo.load_gens_per_bus = {from_sparse, {0, n_load_per_bus, 2 * n_load_per_bus + n_delta}};
     grid.topo.load_gen_type = const_y_only
                                   ? std::vector<LoadGenType>{const_y, const_y}
                                   : std::vector<LoadGenType>{const_pq, const_i, const_y, const_pq, const_i, const_y};
     grid.topo.voltage_regulators_per_load_gen = {from_sparse,
-                                                 IdxVector(static_cast<size_t>(2 * n_load_per_bus + 1), 0)};
+                                                 IdxVector(static_cast<size_t>(2 * n_load_per_bus + n_delta + 1), 0)};
     grid.topo.has_reduced_phase = true;
     grid.topo.bus_phase_mask = {phase_mask_abc, rpc.mask1};
-    grid.topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::three_phase};
+    grid.topo.bus_slot_pattern = {SlotPattern::three_phase, rpc.pattern1};
+    if (rpc.delta_s.has_value()) {
+        grid.topo.load_gen_type.push_back(delta_type);
+        grid.topo.load_gen_connection.assign(grid.topo.load_gen_type.size(), LoadGenConnection::wye);
+        grid.topo.load_gen_connection.back() = LoadGenConnection::delta;
+    }
 
     // parameters
-    grid.param.branch_param = {{rpc.y_branch, -rpc.y_branch, -rpc.y_branch, rpc.y_branch}};
+    grid.param.branch_param = {
+        rpc.branch.value_or(BranchCalcParam<asymmetric_t>{{rpc.y_branch, -rpc.y_branch, -rpc.y_branch, rpc.y_branch}})};
     if (rpc.y_shunt.has_value()) {
         grid.param.shunt_param = {rpc.y_shunt.value()};
     }
     grid.param.source_param = {rpc.source};
 
     // Kirchhoff: currents into each bus from source, shunt and loads equal the currents out into the branch
-    Value const i_f = dot(rpc.y_branch, Value{rpc.u0 - rpc.u1});
-    Value const i_t = -i_f;
+    Value const i_f = rpc.branch.has_value() ? Value{dot(rpc.branch->yff(), rpc.u0) + dot(rpc.branch->yft(), rpc.u1)}
+                                             : Value{dot(rpc.y_branch, Value{rpc.u0 - rpc.u1})};
+    Value const i_t =
+        rpc.branch.has_value() ? Value{dot(rpc.branch->ytf(), rpc.u0) + dot(rpc.branch->ytt(), rpc.u1)} : Value{-i_f};
     Value const i_source = dot(rpc.source.y_ref<asymmetric_t>(), Value{source_voltage() - rpc.u0});
     Value i_shunt{}; // injection of the shunt into bus1, only on the present phases
     if (rpc.y_shunt.has_value()) {
@@ -171,8 +232,11 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
             }
         }
     }
+    Value const i_delta = rpc.delta_s.has_value()
+                              ? expected_delta_current(rpc.delta_s.value(), delta_type, rpc.u1, rpc.mask1, rpc.pattern1)
+                              : Value{};
     Value const i_load0 = i_f - i_source;
-    Value const i_load1 = i_t - i_shunt;
+    Value const i_load1 = i_t - i_shunt - i_delta; // the wye loads of bus1
     Value const s_load0 = rpc.u0 * conj(i_load0);
     Value const s_load1 = rpc.u1 * conj(i_load1); // exactly zero on the absent phases, where u1 is zero
 
@@ -200,6 +264,9 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
     };
     add_bus_loads(s_load0, rpc.u0, phase_mask_abc, Value{});
     add_bus_loads(s_load1, rpc.u1, rpc.mask1, rpc.absent_injection);
+    if (rpc.delta_s.has_value()) {
+        grid.input.s_injection.push_back(rpc.delta_s.value());
+    }
 
     // expected output
     auto& expected = grid.expected;
@@ -218,18 +285,22 @@ ReducedPhaseGrid make_grid(ReducedPhaseCase const& rpc, bool const_y_only) {
         expected.load_gen.push_back(
             {.s = s_load1 / static_cast<double>(n_load_per_bus), .i = i_load1 / static_cast<double>(n_load_per_bus)});
     }
+    if (rpc.delta_s.has_value()) {
+        expected.load_gen.push_back({.s = rpc.u1 * conj(i_delta), .i = i_delta});
+    }
     return grid;
 }
 
 template <typename SolverCaseType>
 SolverOutput<asymmetric_t> run_case(MathModelTopology const& topo, MathModelParam<asymmetric_t> const& param,
-                                    PowerFlowInput<asymmetric_t> input) {
+                                    PowerFlowInput<asymmetric_t> input, double error_tolerance = err_tol,
+                                    Idx iteration_limit = max_iter) {
     using Solver = SolverCaseType::Solver;
     input.initialization = SolverCaseType::initialization;
     YBus<asymmetric_t> const y_bus{topo, param};
     Solver solver{y_bus, topo};
     NoLogger log;
-    return run_power_flow(solver, y_bus, input, err_tol, max_iter, log);
+    return run_power_flow(solver, y_bus, input, error_tolerance, iteration_limit, log);
 }
 
 void check_absent_slots_zero(SolverOutput<asymmetric_t> const& output, MathModelTopology const& topo) {
@@ -290,6 +361,84 @@ ReducedPhaseCase two_phase_case() {
             .mask1 = phase_mask_ab,
             .u0 = {1.02 * std::polar(1.0, -deg), 1.03 * std::polar(1.0, -121.5 * deg), source_voltage()(2)},
             .u1 = {0.95 * std::polar(1.0, -4.0 * deg), 0.96 * std::polar(1.0, -125.0 * deg), 0.0}};
+}
+
+// all three phases at bus1, unbalanced; delta load on ab, bc and ca, the last one a generator
+ReducedPhaseCase three_phase_delta_case() {
+    return {
+        .y_branch = Tensor{DoubleComplex{3.0, -9.0}, DoubleComplex{-0.5, 1.5}},
+        .mask1 = phase_mask_abc,
+        .u0 = {1.02 * std::polar(1.0, -deg), 1.03 * std::polar(1.0, -121.0 * deg), 1.01 * std::polar(1.0, 119.0 * deg)},
+        .u1 = {0.97 * std::polar(1.0, -3.0 * deg), 0.98 * std::polar(1.0, -124.0 * deg),
+               0.96 * std::polar(1.0, 117.0 * deg)},
+        .delta_s = Value{DoubleComplex{-0.3, -0.1}, DoubleComplex{-0.2, -0.05}, DoubleComplex{0.1, -0.02}}};
+}
+
+// the two-phase bus of two_phase_case (three-phase pattern) with a delta load on ab
+ReducedPhaseCase two_phase_delta_case() {
+    ReducedPhaseCase rpc = two_phase_case();
+    rpc.delta_s = Value{DoubleComplex{-0.3, -0.1}, 0.0, 0.0};
+    return rpc;
+}
+
+// centre-tapped winding: phase a of the from bus feeds the legs a and b of the to bus through the series admittances
+// y_a and y_b, leg b inverted (U_b about -U_a)
+BranchCalcParam<asymmetric_t> centre_tapped_branch(DoubleComplex y_a, DoubleComplex y_b) {
+    Tensor yff{0.0};
+    yff(0, 0) = y_a + y_b;
+    Tensor yft{0.0};
+    yft(0, 0) = -y_a;
+    yft(0, 1) = y_b;
+    Tensor ytf{0.0};
+    ytf(0, 0) = -y_a;
+    ytf(1, 0) = y_b;
+    Tensor ytt{0.0};
+    ytt(0, 0) = y_a;
+    ytt(1, 1) = y_b;
+    return {{yff, yft, ytf, ytt}};
+}
+
+// split-phase bus1 (legs a and b of a centre-tapped winding at phase a of bus0) with a delta load on ab, i.e. across
+// both legs; phases b and c of bus0 are not loaded by any branch
+ReducedPhaseCase split_phase_delta_case() {
+    return {.y_branch = Tensor{0.0},
+            .mask1 = phase_mask_ab,
+            .u0 = {1.03 * std::polar(1.0, -deg), source_voltage()(1), source_voltage()(2)},
+            .u1 = {1.02 * std::polar(1.0, 2.0 * deg), 0.99 * std::polar(1.0, -178.0 * deg), 0.0},
+            .delta_s = Value{DoubleComplex{-0.4, -0.1}, 0.0, 0.0},
+            .pattern1 = SlotPattern::split_phase,
+            .branch = centre_tapped_branch({3.0, -9.0}, {2.5, -8.0})};
+}
+
+// source -- bus0 (abc) --branch-- bus1 (mask1) with a delta load of the given type as the only load_gen; bus1 is a
+// plain three-phase bus (no reduced phase flag) if mask1 is abc; no expected output
+ReducedPhaseGrid make_delta_only_grid(BranchCalcParam<asymmetric_t> const& branch, PhaseMask mask1,
+                                      SlotPattern pattern1, Value const& s_delta, LoadGenType type) {
+    ReducedPhaseGrid grid{};
+    grid.topo.slack_bus = 0;
+    grid.topo.phase_shift = {0.0, 0.0};
+    grid.topo.branch_bus_idx = {{0, 1}};
+    grid.topo.sources_per_bus = {from_sparse, {0, 1, 1}};
+    grid.topo.shunts_per_bus = {from_sparse, {0, 0, 0}};
+    grid.topo.load_gens_per_bus = {from_sparse, {0, 0, 1}};
+    grid.topo.load_gen_type = {type};
+    grid.topo.load_gen_connection = {LoadGenConnection::delta};
+    grid.topo.voltage_regulators_per_load_gen = {from_sparse, {0, 0}};
+    if (!mask1.all()) {
+        grid.topo.has_reduced_phase = true;
+        grid.topo.bus_phase_mask = {phase_mask_abc, mask1};
+        grid.topo.bus_slot_pattern = {SlotPattern::three_phase, pattern1};
+    }
+    grid.param.branch_param = {branch};
+    grid.param.source_param = {SourceCalcParam{.y1 = y_ref, .y0 = y_ref}};
+    grid.input.source = {u_ref};
+    grid.input.s_injection = {s_delta};
+    grid.input.initialization = CalculationInitialization::default_initialization;
+    return grid;
+}
+
+BranchCalcParam<asymmetric_t> three_phase_branch(DoubleComplex y) {
+    return {{Tensor{y}, -Tensor{y}, -Tensor{y}, Tensor{y}}};
 }
 
 // meshed network with a single phase bus that is eliminated first, so that the LU factorization has a fill-in
@@ -547,6 +696,117 @@ TEST_CASE_TEMPLATE("Test math solver - PF with all phases flagged as reduced is 
     }
 }
 
+TEST_CASE_TEMPLATE("Test math solver - PF with a delta load", SolverCaseType, NewtonRaphsonLinearStart,
+                   NewtonRaphsonFlatStart, NewtonRaphsonAverageSourceStart, IterativeCurrent, Linear) {
+    using enum LoadGenType;
+    constexpr bool const_y_only = !SolverCaseType::Solver::is_iterative;
+    // the linear solver models every load as const_y; make_grid applies that to the delta load too
+    std::vector<LoadGenType> const delta_types =
+        const_y_only ? std::vector<LoadGenType>{const_y} : std::vector<LoadGenType>{const_pq, const_i, const_y};
+
+    auto const run_delta_case = [](ReducedPhaseCase const& rpc) {
+        ReducedPhaseGrid const grid = make_grid(rpc, const_y_only);
+        REQUIRE(grid.topo.is_delta_load_gen(grid.topo.n_load_gen() - 1));
+        REQUIRE_FALSE(grid.topo.is_delta_load_gen(0));
+        auto output = run_case<SolverCaseType>(grid.topo, grid.param, grid.input);
+        check_reduced_phase_grid(grid, output);
+        return output;
+    };
+
+    SUBCASE("Three-phase bus, entries ab, bc and ca") {
+        for (LoadGenType const type : delta_types) {
+            CAPTURE(voltage_power(type));
+            ReducedPhaseCase rpc = three_phase_delta_case();
+            rpc.delta_type = type;
+            run_delta_case(rpc);
+        }
+    }
+
+    SUBCASE("Two-phase bus, entry ab") {
+        for (LoadGenType const type : delta_types) {
+            CAPTURE(voltage_power(type));
+            ReducedPhaseCase rpc = two_phase_delta_case();
+            rpc.delta_type = type;
+            auto const output = run_delta_case(rpc);
+            CHECK(output.u[1](2) == 0.0);
+        }
+    }
+
+    SUBCASE("Split-phase bus, entry ab across both legs") {
+        for (LoadGenType const type : delta_types) {
+            CAPTURE(voltage_power(type));
+            ReducedPhaseCase rpc = split_phase_delta_case();
+            rpc.delta_type = type;
+            auto const output = run_delta_case(rpc);
+            CHECK(output.u[1](2) == 0.0);
+        }
+    }
+
+    SUBCASE("Delta entries on an absent phase are ignored") {
+        for (LoadGenType const type : delta_types) {
+            CAPTURE(voltage_power(type));
+            ReducedPhaseCase rpc = two_phase_delta_case();
+            rpc.delta_type = type;
+            auto const ref_output = run_delta_case(rpc);
+            rpc.delta_s.value()(1) = DoubleComplex{0.3, 0.1};
+            rpc.delta_s.value()(2) = DoubleComplex{-0.2, 0.05};
+            auto const output = run_delta_case(rpc);
+            assert_output(output, ref_output, false, result_tol);
+        }
+    }
+}
+
+TEST_CASE_TEMPLATE("Test math solver - PF with all load_gens flagged wye is unchanged", SolverCaseType,
+                   NewtonRaphsonLinearStart, NewtonRaphsonFlatStart, NewtonRaphsonAverageSourceStart, IterativeCurrent,
+                   Linear) {
+    // a math model with a load_gen_connection vector that has no delta entry runs through the gated code paths, which
+    // must leave every value bit for bit identical to the run without the vector
+    PFSolverTestGrid<asymmetric_t> const grid;
+    MathModelTopology const topo_ref = grid.topo();
+    MathModelTopology topo_flagged = grid.topo();
+    topo_flagged.load_gen_connection.assign(static_cast<size_t>(topo_flagged.n_load_gen()), LoadGenConnection::wye);
+    REQUIRE(topo_flagged.has_delta_load_gen());
+    REQUIRE_FALSE(topo_ref.has_delta_load_gen());
+
+    for (auto const& input : {grid.pf_input(), grid.pf_input_z()}) {
+        auto const output_ref = run_case<SolverCaseType>(topo_ref, grid.param(), input);
+        auto const output_flagged = run_case<SolverCaseType>(topo_flagged, grid.param(), input);
+        check_solver_output_exact(output_flagged, output_ref);
+    }
+}
+
+TEST_CASE("Test math solver - NR converges quadratically with delta loads") {
+    // a weak branch and heavy delta loads, so that the phase coupling of the delta Jacobian matters; with the exact
+    // Jacobian, Newton-Raphson from a flat start reaches a tight tolerance within a few iterations
+    using enum LoadGenType;
+    constexpr double tight_tol = 1e-12;
+    constexpr Idx few_iterations = 6;
+    DoubleComplex const y{4.0, -12.0};
+    // unequal legs, so that the split-phase voltages are not antisymmetric and the angle terms are needed
+    DoubleComplex const y_leg_b{3.0, -8.0};
+    Value const s_abc{DoubleComplex{-0.4, -0.3}, DoubleComplex{-0.3, -0.4}, DoubleComplex{-0.5, -0.1}};
+    Value const s_ab{DoubleComplex{-0.4, -0.3}, 0.0, 0.0};
+
+    for (LoadGenType const type : {const_pq, const_i, const_y}) {
+        CAPTURE(voltage_power(type));
+        for (ReducedPhaseGrid const& grid :
+             {make_delta_only_grid(three_phase_branch(y), phase_mask_abc, SlotPattern::three_phase, s_abc, type),
+              make_delta_only_grid(centre_tapped_branch(y, y_leg_b), phase_mask_ab, SlotPattern::split_phase, s_ab,
+                                   type)}) {
+            CAPTURE(grid.topo.has_reduced_phase);
+            SolverOutput<asymmetric_t> output;
+            REQUIRE_NOTHROW(output = run_case<NewtonRaphsonFlatStart>(grid.topo, grid.param, grid.input, tight_tol,
+                                                                      few_iterations));
+            check_absent_slots_zero(output, grid.topo);
+            check_meshed_power_balance(output, grid.topo);
+            if (type == const_pq) {
+                // a const_pq delta load draws its specified power, whatever the voltages, split over its phases
+                CHECK(cabs(sum_val(output.load_gen[0].s) - sum_val(grid.input.s_injection[0])) < result_tol);
+            }
+        }
+    }
+}
+
 TEST_CASE_TEMPLATE("Test math solver - PF with absent phases in a meshed network with fill-in", SolverCaseType,
                    NewtonRaphsonLinearStart, NewtonRaphsonFlatStart, NewtonRaphsonAverageSourceStart, IterativeCurrent,
                    Linear) {
@@ -762,6 +1022,96 @@ TEST_CASE("Test math solver - reduced phase guards") {
                             .fault_phase = FaultPhase::abc}};
         CHECK_THROWS_AS(solver.run_short_circuit(sc_input, log, CalculationMethod::iec60909, y_bus),
                         ReducedPhaseNotSupported);
+    }
+}
+
+TEST_CASE("Test math solver - delta load guards") {
+    // source -- bus0 (abc) --abc-- bus1 (abc) with a delta load
+    using enum LoadGenType;
+    DoubleComplex const y{4.0, -12.0};
+    Value const s_delta{DoubleComplex{-0.1, -0.05}, DoubleComplex{-0.2, -0.02}, DoubleComplex{0.05, 0.0}};
+    ReducedPhaseGrid const grid =
+        make_delta_only_grid(three_phase_branch(y), phase_mask_abc, SlotPattern::three_phase, s_delta, const_pq);
+    auto const topo_ptr = std::make_shared<MathModelTopology const>(grid.topo);
+    NoLogger log;
+    constexpr bool cache_run = false;
+
+    SUBCASE("Asymmetric power flow is supported") {
+        YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        // the linear solver is exact for its constant admittance model, so the power balance holds for it as well
+        for (auto const method :
+             {CalculationMethod::newton_raphson, CalculationMethod::iterative_current, CalculationMethod::linear}) {
+            SolverOutput<asymmetric_t> output;
+            REQUIRE_NOTHROW(output =
+                                solver.run_power_flow(grid.input, err_tol, max_iter, cache_run, log, method, y_bus));
+            check_meshed_power_balance(output, grid.topo);
+        }
+        // a single iterative current step is not a converged solution
+        CHECK_NOTHROW(solver.run_power_flow(grid.input, err_tol, max_iter, cache_run, log,
+                                            CalculationMethod::linear_current, y_bus));
+    }
+
+    SUBCASE("State estimation is not supported") {
+        YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        StateEstimationInput<asymmetric_t> const se_input{};
+        for (auto const method : {CalculationMethod::default_method, CalculationMethod::iterative_linear,
+                                  CalculationMethod::newton_raphson}) {
+            CHECK_THROWS_WITH_AS(solver.run_state_estimation(se_input, err_tol, max_iter, log, method, y_bus),
+                                 "State estimation is not supported in a network with delta-connected loads or "
+                                 "generators.\n",
+                                 ReducedPhaseNotSupported);
+        }
+    }
+
+    SUBCASE("Reduced phase nodes take precedence") {
+        ReducedPhaseGrid const reduced_grid = make_grid(two_phase_delta_case(), false);
+        auto const reduced_topo_ptr = std::make_shared<MathModelTopology const>(reduced_grid.topo);
+        YBus<asymmetric_t> const y_bus{*reduced_topo_ptr, reduced_grid.param};
+        MathSolver<asymmetric_t> solver{reduced_topo_ptr};
+        StateEstimationInput<asymmetric_t> const se_input{};
+        CHECK_THROWS_WITH_AS(
+            solver.run_state_estimation(se_input, err_tol, max_iter, log, CalculationMethod::iterative_linear, y_bus),
+            doctest::Contains("one- or two-phase nodes"), ReducedPhaseNotSupported);
+    }
+
+    SUBCASE("Symmetric power flow and state estimation are not supported, the symmetric short circuit is") {
+        MathModelParam<symmetric_t> param_sym;
+        param_sym.branch_param = {{y, -y, -y, y}};
+        param_sym.source_param = {{.y1 = y_ref, .y0 = y_ref}};
+        YBus<symmetric_t> const y_bus{*topo_ptr, param_sym};
+        MathSolver<symmetric_t> solver{topo_ptr};
+
+        PowerFlowInput<symmetric_t> const pf_input{.source = {u_ref},
+                                                   .s_injection = {DoubleComplex{-0.1, -0.05}},
+                                                   .voltage_regulator = {},
+                                                   .load_gen_status = {},
+                                                   .initialization = CalculationInitialization::default_initialization};
+        for (auto const method : {CalculationMethod::newton_raphson, CalculationMethod::iterative_current,
+                                  CalculationMethod::linear, CalculationMethod::linear_current}) {
+            CHECK_THROWS_WITH_AS(
+                solver.run_power_flow(pf_input, err_tol, max_iter, cache_run, log, method, y_bus),
+                "Symmetric power flow is not supported in a network with delta-connected loads or generators.\n",
+                ReducedPhaseNotSupported);
+        }
+
+        StateEstimationInput<symmetric_t> const se_input{};
+        CHECK_THROWS_WITH_AS(
+            solver.run_state_estimation(se_input, err_tol, max_iter, log, CalculationMethod::iterative_linear, y_bus),
+            doctest::Contains("delta-connected"), ReducedPhaseNotSupported);
+
+        // load_gens are ignored in the short circuit, so it needs no delta model
+        ShortCircuitInput sc_input;
+        sc_input.fault_buses = {from_sparse, {0, 0, 1}};
+        sc_input.source = {u_ref};
+        sc_input.faults = {{.y_fault = DoubleComplex{1.0, -1.0},
+                            .fault_type = FaultType::three_phase,
+                            .fault_phase = FaultPhase::abc}};
+        ShortCircuitSolverOutput<symmetric_t> sc_output;
+        REQUIRE_NOTHROW(sc_output = solver.run_short_circuit(sc_input, log, CalculationMethod::iec60909, y_bus));
+        REQUIRE(sc_output.fault.size() == 1);
+        CHECK(cabs(sc_output.fault[0].i_fault) > 0.0);
     }
 }
 

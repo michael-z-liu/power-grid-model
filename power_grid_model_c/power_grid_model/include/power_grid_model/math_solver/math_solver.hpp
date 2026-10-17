@@ -45,6 +45,7 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
         using enum CalculationMethod;
 
         check_symmetric_calculation_supported();
+        check_symmetric_power_flow_supported();
 
         // set method to always linear if all load_gens have const_y
         calculation_method = all_const_y_ ? linear : calculation_method;
@@ -72,6 +73,10 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
 
         if (topo_ptr_->has_reduced_phase) {
             throw ReducedPhaseNotSupported{"State estimation"};
+        }
+        // the measured load_gen values have no delta (phase-to-phase) model
+        if (topo_ptr_->has_delta_load_gen()) {
+            throw ReducedPhaseNotSupported{"State estimation", ReducedPhaseNotSupported::Cause::delta_load_gens};
         }
 
         switch (calculation_method) {
@@ -135,6 +140,17 @@ template <symmetry_tag sym> class MathSolver : public MathSolverBase<sym> {
         if constexpr (is_symmetric_v<sym>) {
             if (topo_ptr_->has_reduced_phase) {
                 throw ReducedPhaseNotSupported{"Symmetric calculation"};
+            }
+        }
+    }
+
+    // a delta (phase-to-phase) load_gen has no positive-sequence model in the power flow; the short circuit ignores
+    // load_gens, so it is not affected
+    void check_symmetric_power_flow_supported() const {
+        if constexpr (is_symmetric_v<sym>) {
+            if (topo_ptr_->has_delta_load_gen()) {
+                throw ReducedPhaseNotSupported{"Symmetric power flow",
+                                               ReducedPhaseNotSupported::Cause::delta_load_gens};
             }
         }
     }

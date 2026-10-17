@@ -8,6 +8,7 @@
 #include "enum.hpp"
 
 #include <concepts>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <string>
@@ -127,8 +128,13 @@ class ShuntAtReducedPhaseNode : public PowerGridError {
 
 class ReducedPhaseNotSupported : public PowerGridError {
   public:
-    explicit ReducedPhaseNotSupported(std::string_view feature)
-        : PowerGridError{std::format("{} is not supported in a network with one- or two-phase nodes.\n", feature)} {}
+    // the network feature that rules the calculation out
+    enum class Cause : std::uint8_t { reduced_phase_nodes, delta_load_gens };
+
+    explicit ReducedPhaseNotSupported(std::string_view feature, Cause cause = Cause::reduced_phase_nodes)
+        : PowerGridError{std::format("{} is not supported in a network with {}.\n", feature,
+                                     cause == Cause::delta_load_gens ? "delta-connected loads or generators"
+                                                                     : "one- or two-phase nodes")} {}
 };
 
 class SparseMatrixError : public PowerGridError {

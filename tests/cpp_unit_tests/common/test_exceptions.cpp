@@ -320,6 +320,16 @@ TEST_CASE("Exceptions") {
         auto const msg = std::string{ReducedPhaseNotSupported{"State estimation"}.what()};
         CHECK(msg == "State estimation is not supported in a network with one- or two-phase nodes.\n");
         CHECK(msg.find(" is not implemented for ") == std::string::npos);
+        // the default cause is the reduced phase nodes
+        CHECK(std::string{
+                  ReducedPhaseNotSupported{"State estimation", ReducedPhaseNotSupported::Cause::reduced_phase_nodes}
+                      .what()} == msg);
+    }
+    SUBCASE("ReducedPhaseNotSupported with delta-connected load_gens") {
+        auto const msg = std::string{
+            ReducedPhaseNotSupported{"Symmetric power flow", ReducedPhaseNotSupported::Cause::delta_load_gens}.what()};
+        CHECK(msg == "Symmetric power flow is not supported in a network with delta-connected loads or generators.\n");
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
     }
     SUBCASE("InvalidShortCircuitPhaseOrType") {
         CHECK(std::string{InvalidShortCircuitPhaseOrType{}.what()} ==
