@@ -40,6 +40,7 @@ from power_grid_model.enum import (
     FaultType,
     LoadGenType,
     MeasuredTerminalType,
+    PhaseConnection,
     WindingType,
 )
 from power_grid_model.validation._rules import (
@@ -68,6 +69,7 @@ from power_grid_model.validation._rules import (
     ids_valid_in_update_data_set as _ids_valid_in_update_data_set,
     no_strict_subset_missing as _no_strict_subset_missing,
     none_missing as _none_missing,
+    none_provided as _none_provided,
     not_all_missing as _not_all_missing,
     valid_p_q_sigma as _valid_p_q_sigma,
 )
@@ -79,7 +81,7 @@ from power_grid_model.validation.errors import (
     MultiComponentNotUniqueError,
     ValidationError,
 )
-from power_grid_model.validation.utils import _update_input_data
+from power_grid_model.validation.utils import _nan_type, _update_input_data
 
 
 def validate_input_data(
@@ -273,6 +275,107 @@ def validate_ids(update_data: SingleDataset, input_data: SingleDataset) -> list[
     return list(chain(*errors))
 
 
+# The entries of the asym_line r, x and c matrices: (field, row conductor, column conductor), "n" being the neutral
+_ASYM_LINE_PHASE_ENTRIES = [
+    (AT.r_aa, "a", "a"),
+    (AT.r_ba, "b", "a"),
+    (AT.r_bb, "b", "b"),
+    (AT.r_ca, "c", "a"),
+    (AT.r_cb, "c", "b"),
+    (AT.r_cc, "c", "c"),
+    (AT.x_aa, "a", "a"),
+    (AT.x_ba, "b", "a"),
+    (AT.x_bb, "b", "b"),
+    (AT.x_ca, "c", "a"),
+    (AT.x_cb, "c", "b"),
+    (AT.x_cc, "c", "c"),
+]
+_ASYM_LINE_NEUTRAL_ENTRIES = [
+    (AT.r_na, "n", "a"),
+    (AT.r_nb, "n", "b"),
+    (AT.r_nc, "n", "c"),
+    (AT.r_nn, "n", "n"),
+    (AT.x_na, "n", "a"),
+    (AT.x_nb, "n", "b"),
+    (AT.x_nc, "n", "c"),
+    (AT.x_nn, "n", "n"),
+]
+_ASYM_LINE_C_ENTRIES = [
+    (AT.c_aa, "a", "a"),
+    (AT.c_ba, "b", "a"),
+    (AT.c_bb, "b", "b"),
+    (AT.c_ca, "c", "a"),
+    (AT.c_cb, "c", "b"),
+    (AT.c_cc, "c", "c"),
+]
+_ASYM_LINE_ENTRIES = _ASYM_LINE_PHASE_ENTRIES + _ASYM_LINE_NEUTRAL_ENTRIES + _ASYM_LINE_C_ENTRIES
+# The phase r and x entries are always required on a three-phase (abc) line
+_ASYM_LINE_PHASE_FIELDS = {field for field, _, _ in _ASYM_LINE_PHASE_ENTRIES}
+# The phases with a conductor of a one- or two-phase asym_line
+_REDUCED_PHASES = {
+    PhaseConnection.a: "a",
+    PhaseConnection.b: "b",
+    PhaseConnection.c: "c",
+    PhaseConnection.ab: "ab",
+    PhaseConnection.ac: "ac",
+    PhaseConnection.bc: "bc",
+}
+
+
+def _asym_line_phase_rows(asym_line: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """
+    Classify the rows of an asym_line array by their phases.
+
+    Args:
+        asym_line: The asym_line input data
+
+    Returns:
+        A tuple (abc, reduced, present) of boolean row masks: the three-phase rows (phases not provided or abc), the
+        one- or two-phase rows, and per conductor ("a", "b", "c" and the neutral "n") the one- or two-phase rows on
+        which that conductor is present. A one- or two-phase line has a neutral if r_nn or x_nn is provided. Rows with
+        an unknown phases value are in none of the masks.
+    """
+    phases = asym_line[AT.phases]
+    abc = np.isin(phases, [_nan_type(CT.asym_line, AT.phases), PhaseConnection.abc])
+    reduced = np.isin(phases, list(_REDUCED_PHASES))
+    present = {
+        conductor: np.isin(phases, [phase for phase, conductors in _REDUCED_PHASES.items() if conductor in conductors])
+        for conductor in "abc"
+    }
+    present["n"] = reduced & ~(np.isnan(asym_line[AT.r_nn]) & np.isnan(asym_line[AT.x_nn]))
+    return abc, reduced, present
+
+
+def _validate_required_asym_line(data: SingleDataset) -> list[MissingValueError]:
+    """
+    Checks that the required r, x and c matrix entries of each asym_line are provided.
+
+    On a three-phase (abc) line, the phase r and x entries are required; the neutral entries and the capacitances are
+    checked by validate_asym_line. On a one- or two-phase line, every entry between two present conductors is
+    required, including the c matrix and, if the line has a neutral, the neutral entries.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero or more MissingValueErrors; one for each field, listing all ids where the value is
+        required but missing.
+    """
+    if CT.asym_line not in data or data[CT.asym_line].size == 0:
+        return []
+    asym_line = data[CT.asym_line]
+    abc, _, present = _asym_line_phase_rows(asym_line)
+    errors = []
+    for field, row, col in _ASYM_LINE_ENTRIES:
+        required = present[row] & present[col]
+        if field in _ASYM_LINE_PHASE_FIELDS:
+            required |= abc
+        missing = required & np.isnan(asym_line[field])
+        if missing.any():
+            errors.append(MissingValueError(CT.asym_line, field, asym_line[AT.id][missing].flatten().tolist()))
+    return errors
+
+
 def validate_required_values(  # noqa: PLR0915
     data: SingleDataset, calculation_type: CalculationType | None = None, symmetric: bool = True
 ) -> list[MissingValueError]:
@@ -307,20 +410,8 @@ def validate_required_values(  # noqa: PLR0915
         AT.c1,
         AT.tan1,
     ]
-    required[CT.asym_line] = required["branch"] + [
-        AT.r_aa,
-        AT.r_ba,
-        AT.r_bb,
-        AT.r_ca,
-        AT.r_cb,
-        AT.r_cc,
-        AT.x_aa,
-        AT.x_ba,
-        AT.x_bb,
-        AT.x_ca,
-        AT.x_cb,
-        AT.x_cc,
-    ]
+    # The r, x and c matrix entries depend on the phases of the line; see _validate_required_asym_line
+    required[CT.asym_line] = required["branch"].copy()
     required[CT.transformer] = required["branch"] + [
         AT.u1,
         AT.u2,
@@ -463,6 +554,7 @@ def validate_required_values(  # noqa: PLR0915
         required[CT.shunt] += [AT.g0, AT.b0]
 
     errors = _validate_required_in_data(data, required)
+    errors += _validate_required_asym_line(data)
 
     if calculation_type is None or calculation_type == CalculationType.state_estimation:
         errors += _validate_required_power_sigma_or_p_q_sigma(data, CT.sym_power_sensor)
@@ -714,10 +806,23 @@ def validate_asym_line(data: SingleDataset) -> list[ValidationError]:
     # The mutual capacitances of the nodal (Maxwell) capacitance matrix are usually negative, e.g. (c0 - c1) / 3 when
     # the matrix is built from c0 and c1, so they may have any sign.
 
-    errors += _no_strict_subset_missing(data, optional_r_matrix_fields + optional_x_matrix_fields, CT.asym_line)
-    errors += _no_strict_subset_missing(data, required_c_matrix_fields, CT.asym_line)
-    errors += _no_strict_subset_missing(data, c_fields, CT.asym_line)
-    errors += _not_all_missing(data, required_c_matrix_fields + c_fields, CT.asym_line)
+    errors += _all_valid_enum_values(data, CT.asym_line, AT.phases, PhaseConnection)
+    abc, reduced, present = _asym_line_phase_rows(data[CT.asym_line])
+
+    # Three-phase (abc) lines: either all neutral entries or none, and either the c matrix or c0 and c1
+    abc_data = {CT.asym_line: data[CT.asym_line][abc]}
+    errors += _no_strict_subset_missing(abc_data, optional_r_matrix_fields + optional_x_matrix_fields, CT.asym_line)
+    errors += _no_strict_subset_missing(abc_data, required_c_matrix_fields, CT.asym_line)
+    errors += _no_strict_subset_missing(abc_data, c_fields, CT.asym_line)
+    errors += _not_all_missing(abc_data, required_c_matrix_fields + c_fields, CT.asym_line)
+
+    # One- or two-phase lines: the entries of an absent phase or a missing neutral, and c0 and c1, must be left empty.
+    # The required entries are checked by _validate_required_asym_line.
+    for field, row, col in _ASYM_LINE_ENTRIES:
+        not_applicable = reduced & ~(present[row] & present[col])
+        errors += _none_provided(data, CT.asym_line, field, [AT.phases], not_applicable)
+    for field in c_fields:
+        errors += _none_provided(data, CT.asym_line, field, [AT.phases], reduced)
 
     return errors
 

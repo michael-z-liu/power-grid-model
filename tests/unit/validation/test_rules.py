@@ -50,6 +50,7 @@ from power_grid_model.validation._rules import (
     no_strict_subset_missing,
     none_match_comparison,
     none_missing,
+    none_provided,
     not_all_missing,
 )
 from power_grid_model.validation.errors import (
@@ -64,6 +65,7 @@ from power_grid_model.validation.errors import (
     MixedPowerCurrentSensorError,
     MultiComponentNotUniqueError,
     MultiFieldValidationError,
+    NotApplicableValueError,
     NotBetweenError,
     NotBetweenOrAtError,
     NotBooleanError,
@@ -685,6 +687,59 @@ def test_not_all_missing():
             str(excinfo.value)
             == "The fields parameter must contain at least 2 fields. Otherwise use the none_missing function."
         )
+
+
+def test_none_provided():
+    dfoo = [("id", "i4"), ("foo", "f8"), ("bar", "(3,)f8"), ("bla", "i1"), ("cond", "i1")]
+
+    def _mock_nan_type(component: CT, field: str):
+        return {
+            "foo_test": {
+                "id": np.iinfo("i4").min,
+                "foo": np.nan,
+                "bar": np.nan,
+                "bla": np.iinfo("i1").min,
+                "cond": np.iinfo("i1").min,
+            },
+        }[component][field]
+
+    nan_i1 = np.iinfo("i1").min
+    data = {
+        "foo_test": np.array(
+            [
+                (1, np.nan, (np.nan, np.nan, np.nan), nan_i1, 0),
+                (2, 5.2, (np.nan, 3.4, np.nan), 7, 1),
+                (3, 7.3, (8.4, 8.5, 8.6), 0, 1),
+                (4, np.nan, (np.nan, np.nan, np.nan), nan_i1, 1),
+            ],
+            dtype=dfoo,
+        )
+    }
+
+    with mock.patch("power_grid_model.validation._rules._nan_type", _mock_nan_type):
+        # mask off: nothing is reported, even where a value is provided
+        mask_off = np.zeros(4, dtype=bool)
+        for field in ("foo", "bar", "bla"):
+            assert none_provided(data, "foo_test", field, ["cond"], mask_off) == []
+
+        # mask on: only the records with a provided value are reported
+        mask_on = np.ones(4, dtype=bool)
+        assert none_provided(data, "foo_test", "foo", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "foo"], [2, 3])
+        ]
+        assert none_provided(data, "foo_test", "bar", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "bar"], [2, 3])
+        ]
+        assert none_provided(data, "foo_test", "bla", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "bla"], [2, 3])
+        ]
+
+        # partial mask
+        mask = np.array([True, False, True, True])
+        assert none_provided(data, "foo_test", "foo", ["cond"], mask) == [
+            NotApplicableValueError("foo_test", ["cond", "foo"], [3])
+        ]
+        assert none_provided(data, "foo_test", "bla", ["cond"], np.array([True, False, False, True])) == []
 
 
 @pytest.mark.skip("No unit tests available for all_valid_clocks")

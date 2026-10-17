@@ -401,6 +401,18 @@ class TwoValuesZeroError(MultiFieldValidationError):
     _message = "Fields {field} are both zero for {n} {objects}."
 
 
+class NotApplicableValueError(MultiFieldValidationError):
+    """
+    A value is provided for a field that does not apply, given the other field(s).
+    E.g. `r_bb` of an `asym_line` with `phases` a, which has no conductor on phase b.
+    """
+
+    _message = (
+        "Combination of fields {field} is not valid for {n} {objects}: "
+        "a value is provided that does not apply and must be left empty."
+    )
+
+
 class ComparisonError(SingleFieldValidationError):
     """
     Base class for comparison errors.

@@ -63,6 +63,7 @@ from power_grid_model.validation.errors import (
     MixedPowerCurrentSensorError,
     MultiComponentNotUniqueError,
     MultiFieldValidationError,
+    NotApplicableValueError,
     NotBetweenError,
     NotBetweenOrAtError,
     NotBooleanError,
@@ -876,6 +877,41 @@ def not_all_missing(data: SingleDataset, fields: list[AttributeType], component_
             errors.append(MultiFieldValidationError(component_type, fields, ids))
 
     return errors
+
+
+def none_provided(
+    data: SingleDataset,
+    component: ComponentType,
+    field: AttributeType,
+    condition_fields: list[AttributeType],
+    mask: np.ndarray,
+) -> list[NotApplicableValueError]:
+    """
+    Check that the value in the 'field' column is not provided (i.e. is NaN) for the records selected by 'mask'. The
+    value does not apply to these records, given the values in the 'condition_fields' columns.
+
+    Args:
+        data: The input/update data set for all components
+        component: The component of interest
+        field: The field of interest
+        condition_fields: The fields that determine whether 'field' applies, reported together with 'field'
+        mask: A boolean array that selects the records for which 'field' does not apply
+
+    Returns:
+        A list containing zero or one NotApplicableValueError, listing all ids in 'mask' where a value was provided
+        in the field of interest.
+    """
+    values = data[component][field]
+    nan = _nan_type(component, field)
+    provided = np.logical_not(np.isnan(values)) if np.isnan(nan) else np.not_equal(values, nan)
+    if provided.ndim > 1:
+        # handle both symmetric and asymmetric values
+        provided = np.any(provided, axis=tuple(range(1, provided.ndim)))
+    invalid = np.logical_and(mask, provided)
+    if invalid.any():
+        ids = data[component][AttributeType.id][invalid].flatten().tolist()
+        return [NotApplicableValueError(component, [*condition_fields, field], ids)]
+    return []
 
 
 def none_missing(

@@ -14,6 +14,7 @@ from power_grid_model.validation.errors import (
     InvalidIdError,
     MultiComponentValidationError,
     MultiFieldValidationError,
+    NotApplicableValueError,
     SingleFieldValidationError,
     ValidationError,
 )
@@ -42,6 +43,18 @@ def test_multi_field_validation_error():
 
     with pytest.raises(ValueError, match="at least 2 fields"):
         MultiFieldValidationError(component=CT.node, fields=["delta"], ids=[])
+
+
+def test_not_applicable_value_error():
+    error = NotApplicableValueError(component=CT.asym_line, fields=["r_bb", "phases"], ids=[3, 1])
+    assert isinstance(error, MultiFieldValidationError)
+    assert error.component == CT.asym_line
+    assert error.field == ["phases", "r_bb"]
+    assert error.ids == [1, 3]
+    assert str(error) == (
+        "Combination of fields 'phases' and 'r_bb' is not valid for 2 asym_lines: "
+        "a value is provided that does not apply and must be left empty."
+    )
 
 
 def test_multi_component_validation_error():
