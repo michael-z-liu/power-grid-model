@@ -52,8 +52,9 @@ Modelling choices:
   the total of three equal entries); kV is the rated branch voltage, which PGM uses as U_delta,nom (decision D29):
   u_rated, or 2 u_rated / sqrt(3) (480 V) at a split-phase node (the to nodes of centre-tapped windings, spread along
   lines without phase c, as PGM does). After the solve the total power of every delta Load element must equal
-  sum_k S_k (|V_p - V_q| / kV)^n to 1e-9 relative (check_delta_load_bases, the decisive check of the kV base, of the
-  scaling of model 5 and 2 and of the 3-phase split). In the delta cases (load_output) the reference also has the
+  sum_k S_k (|V_p - V_q| / kV)^n to 1e-9 relative (check_delta_load_bases, the decisive check of the kV base and of the
+  scaling of model 5 and 2; the 3-phase split is proven end-to-end by the per-phase load outputs). In the delta
+  cases (load_output) the reference also has the
   asym_load and asym_gen outputs: p, q and i per phase are the sums per node of the terminal powers and currents of
   the Load elements of a load (negated for a generator), which are the phase quantities PGM reports (decision D30)
 - a branch side with status 0 is connected to its own dummy bus in OpenDSS (the open-end pi model); PGM reports
@@ -823,9 +824,10 @@ def check_delta_load_bases(case: Case):
     """the decisive check of the OpenDSS delta-load conventions, after the solve: the total power of every delta Load
     element (the sum of CktElement.Powers over its conductors) equals sum_k S_k (|V_p - V_q| / kV)^n with the OpenDSS
     voltages, S_k the entry, kV the branch voltage of the element and n = 0, 1, 2 for model 1, 5, 2, to 1e-9 relative.
-    This proves that the kV of a delta load (1-phase and native 3-phase) is the branch voltage, that model 5 and 2
-    scale with the branch voltage as PGM does (D29), and that a native 3-phase delta load puts a third of kW and kvar
-    on each branch"""
+    This proves that the kV of a delta load (1-phase and native 3-phase) is the branch voltage and that model 5 and 2
+    scale with the branch voltage as PGM does (D29). It compares the element total only, which for const_pq equals 3S
+    whatever the split, so it does not prove the split of a native 3-phase delta load into a third per branch; that is
+    proven end-to-end by the per-phase load outputs matching the OpenDSS terminal values"""
     exponent = {"const_pq": 0, "const_i": 1, "const_y": 2}
     worst = 0.0
     n_elements = 0

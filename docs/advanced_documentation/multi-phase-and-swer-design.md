@@ -472,6 +472,11 @@ Taken in M7 for delta (phase-to-phase) loads (decided by recommendation under Mi
     instantiations, and a separate asymmetric-only class would clash with the generated alias `AsymLoadGenInput`.
     `sym_load` and `sym_gen` accept `wye` and `na`; `delta` raises `InvalidPhaseConnection` with the ID ("a delta
     connection is only supported for asym_load and asym_gen"). The later delta `sym_load` reuses the attribute.
+  * **C API compatibility.** Buffers made with `PGM_create_buffer` are uninitialised, so a caller that sets only the
+    attributes it knows leaves `connection` as garbage: a value other than 0 or 1 fails construction with
+    `MissingCaseForEnumError`, and a garbage value of exactly 1 would silently make an `asym_load` delta (softened by
+    the experimental gate until M9). C API callers must therefore call `PGM_buffer_set_nan` on input buffers before
+    setting attributes, as the C examples now do.
 * **D27. Meaning of the entries.** For a delta load_gen, `p_specified`/`q_specified` are the **ab, bc, ca** values.
   Entry k is the branch from the first to the second letter: $U_{ab} = U_a - U_b$, $U_{bc} = U_b - U_c$,
   $U_{ca} = U_c - U_a$. A single phase-to-phase load is a delta load with one non-zero entry; a load between a and
@@ -832,8 +837,10 @@ need rtol 1e-6 (the convergence criterion of iterative current; Newton-Raphson a
 * **Base check.** After the solve, the generator checks every OpenDSS delta load: the sum of
   `CktElement.Powers()` over its conductors must equal $\sum_k S_k (|V_p - V_q| / kV)^n$ with the OpenDSS voltages
   to 1e-9 relative (it agrees to 6e-13). This is the decisive check of the conventions (the `kV` base of a 1-phase
-  and a 3-phase delta load, the voltage scaling of models 5 and 2, and the 3-phase split), like the YPrim check of
-  M6. It confirms that PGM's $U_{\Delta,nom}$ (D29) and OpenDSS's `kV` are the same base.
+  and a 3-phase delta load, and the voltage scaling of models 5 and 2), like the YPrim check of M6. It confirms that
+  PGM's $U_{\Delta,nom}$ (D29) and OpenDSS's `kV` are the same base. It compares the element total, which for
+  const_pq equals 3S whatever the split, so it does not prove the 3-phase split; that is proven end-to-end by the
+  per-phase load outputs matching the OpenDSS terminal values.
 * **Load outputs.** The per-phase `p`, `q` and `i` of a load are the sums per node of the terminal powers and
   currents of its OpenDSS `Load` elements (negated for a generator). They equal the PGM phase quantities of D30 to
   the same 3.4e-10, which confirms the phase-level output, including the reactive-power artefacts

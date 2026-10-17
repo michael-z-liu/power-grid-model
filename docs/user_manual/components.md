@@ -1037,6 +1037,11 @@ Entries that are zero do not contribute to the calculation.
 * As for all loads and generators, a short circuit calculation ignores them.
 * The Python validation functions do not yet check the `connection` attribute; this follows with the validation of
   reduced-phase networks.
+* Compatibility for C API callers: `PGM_create_buffer` returns uninitialised memory. Call `PGM_buffer_set_nan` on
+  every input buffer before setting attributes. Otherwise the new `connection` attribute holds garbage: a value other
+  than `wye`, `delta` or `na` fails the construction of the model with a `MissingCaseForEnumError`, and a garbage value
+  of exactly `delta` (1) would silently make an `asym_load` or `asym_gen` a delta load (which still needs the
+  experimental features to be enabled).
 
 ### Shunt
 
