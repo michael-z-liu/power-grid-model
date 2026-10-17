@@ -582,6 +582,7 @@ def test_validate_input_data_sym_calculation(input_data):
                 CT.asym_line,
                 CT.generic_branch,
                 CT.transformer,
+                CT.single_phase_transformer,
                 CT.three_winding_transformer,
                 CT.source,
                 CT.shunt,
@@ -599,7 +600,7 @@ def test_validate_input_data_sym_calculation(input_data):
             CT.sym_power_sensor,
             AT.measured_object,
             [107, 110],
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             {AT.measured_terminal_type: MeasuredTerminalType.branch_to},
         )
         in validation_errors
@@ -620,6 +621,7 @@ def test_validate_input_data_sym_calculation(input_data):
                 CT.asym_line,
                 CT.generic_branch,
                 CT.transformer,
+                CT.single_phase_transformer,
                 CT.three_winding_transformer,
                 CT.source,
                 CT.shunt,
@@ -637,7 +639,7 @@ def test_validate_input_data_sym_calculation(input_data):
             CT.asym_power_sensor,
             AT.measured_object,
             [107, 110],
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             {AT.measured_terminal_type: MeasuredTerminalType.branch_to},
         )
         in validation_errors
@@ -657,6 +659,7 @@ def test_validate_input_data_sym_calculation(input_data):
                 CT.asym_line,
                 CT.generic_branch,
                 CT.transformer,
+                CT.single_phase_transformer,
                 CT.three_winding_transformer,
             ],
         )
@@ -669,7 +672,7 @@ def test_validate_input_data_sym_calculation(input_data):
             CT.sym_current_sensor,
             AT.measured_object,
             [107],
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             {AT.measured_terminal_type: MeasuredTerminalType.branch_to},
         )
         in validation_errors
@@ -708,6 +711,7 @@ def test_validate_input_data_sym_calculation(input_data):
                 CT.asym_line,
                 CT.generic_branch,
                 CT.transformer,
+                CT.single_phase_transformer,
                 CT.three_winding_transformer,
             ],
         )
@@ -720,7 +724,7 @@ def test_validate_input_data_sym_calculation(input_data):
             CT.asym_current_sensor,
             AT.measured_object,
             [107],
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             {AT.measured_terminal_type: MeasuredTerminalType.branch_to},
         )
         in validation_errors

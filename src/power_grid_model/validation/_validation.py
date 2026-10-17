@@ -41,6 +41,7 @@ from power_grid_model.enum import (
     LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
+    WindingConnection1P,
     WindingType,
 )
 from power_grid_model.validation._rules import (
@@ -59,12 +60,14 @@ from power_grid_model.validation._rules import (
     all_not_two_values_zero as _all_not_two_values_zero,
     all_same_current_angle_measurement_type_on_terminal as _all_same_current_angle_measurement_type_on_terminal,
     all_same_sensor_type_on_same_terminal as _all_same_sensor_type_on_same_terminal,
+    all_supported_enum_values as _all_supported_enum_values,
     all_unique as _all_unique,
     all_valid_associated_enum_values as _all_valid_associated_enum_values,
     all_valid_clocks as _all_valid_clocks,
     all_valid_enum_values as _all_valid_enum_values,
     all_valid_fault_phases as _all_valid_fault_phases,
     all_valid_ids as _all_valid_ids,
+    all_valid_single_phase_clocks as _all_valid_single_phase_clocks,
     any_voltage_angle_measurement_if_global_current_measurement as _any_voltage_angle_measurement_if_global_current_measurement,  # noqa: E501
     ids_valid_in_update_data_set as _ids_valid_in_update_data_set,
     no_strict_subset_missing as _no_strict_subset_missing,
@@ -74,14 +77,19 @@ from power_grid_model.validation._rules import (
     valid_p_q_sigma as _valid_p_q_sigma,
 )
 from power_grid_model.validation.errors import (
+    ComparisonError,
     IdNotInDatasetError,
     InvalidIdError,
     InvalidVoltageRegulationError,
     MissingValueError,
     MultiComponentNotUniqueError,
+    NotBetweenOrAtError,
+    NotGreaterOrEqualError,
+    NotGreaterThanError,
     ValidationError,
+    ValidationWarning,
 )
-from power_grid_model.validation.utils import _nan_type, _update_input_data
+from power_grid_model.validation.utils import _get_indexer, _nan_type, _update_input_data
 
 
 def validate_input_data(
@@ -105,6 +113,11 @@ def validate_input_data(
 
     Raises:
         Error: KeyError | TypeError | ValueError: if the data structure is invalid.
+
+    Warns:
+        ValidationWarning: once per side, if u1 or u2 of a single_phase_transformer differs by more than 20% from the
+        nominal winding voltage implied by the u_rated of its node. The data is still valid, so this does not change
+        the returned value.
     """
     input_data = _map_to_component_types(input_data)
 
@@ -115,6 +128,7 @@ def validate_input_data(
     input_data_copy = copy.deepcopy(row_input_data)
 
     assert_valid_data_structure(input_data_copy, DatasetType.input)
+    _warn_single_phase_transformer_winding_voltages(input_data_copy)
 
     errors: list[ValidationError] = []
     errors += validate_required_values(input_data_copy, calculation_type, symmetric)
@@ -155,6 +169,11 @@ def validate_batch_data(
 
     Raises:
         Error: KeyError | TypeError | ValueError: if the data structure is invalid.
+
+    Warns:
+        ValidationWarning: once per side, on the input data and not per scenario, if u1 or u2 of a
+        single_phase_transformer differs by more than 20% from the nominal winding voltage implied by the u_rated of
+        its node. The data is still valid, so this does not change the returned value.
     """
     input_data = _map_to_component_types(input_data)
     update_data = _map_to_component_types(update_data)
@@ -165,6 +184,8 @@ def validate_batch_data(
     # A deep copy is made of the input data, since default values will be added in the validation process
     input_data_copy = copy.deepcopy(row_input_data)
     assert_valid_data_structure(input_data_copy, DatasetType.input)
+    # u1, u2 and u_rated cannot be updated, so the input data is checked once instead of once per scenario
+    _warn_single_phase_transformer_winding_voltages(input_data_copy)
 
     input_errors: list[ValidationError] = list(validate_unique_ids_across_components(input_data_copy))
 
@@ -428,6 +449,18 @@ def validate_required_values(  # noqa: PLR0915
         AT.tap_max,
         AT.tap_size,
     ]
+    # The clock, the tap fields, uk_half/pk_half and the earthing impedances are optional
+    required[CT.single_phase_transformer] = required["branch"] + [
+        AT.u1,
+        AT.u2,
+        AT.sn,
+        AT.uk,
+        AT.pk,
+        AT.i0,
+        AT.p0,
+        AT.from_connection,
+        AT.to_connection,
+    ]
     # Branch3
     required["branch3"] = required["base"] + [
         AT.node_1,
@@ -671,6 +704,7 @@ def validate_values(data: SingleDataset, calculation_type: CalculationType | Non
         CT.link: lambda d: validate_branch(d, CT.link),
         CT.generic_branch: validate_generic_branch,
         CT.transformer: validate_transformer,
+        CT.single_phase_transformer: validate_single_phase_transformer,
         CT.three_winding_transformer: validate_three_winding_transformer,
         CT.source: validate_source,
         CT.sym_load: lambda d: validate_generic_load_gen(d, CT.sym_load),
@@ -917,6 +951,212 @@ def validate_transformer(data: SingleDataset) -> list[ValidationError]:
         data[CT.transformer][AT.pk],
     )
     return errors
+
+
+_PHASE_TO_EARTH_WINDINGS = [WindingConnection1P.a, WindingConnection1P.b, WindingConnection1P.c]
+_PHASE_TO_PHASE_WINDINGS = [WindingConnection1P.ab, WindingConnection1P.ac, WindingConnection1P.bc]
+
+
+def validate_single_phase_transformer(data: SingleDataset) -> list[ValidationError]:
+    """
+    Checks the values of the single_phase_transformer: the ranges as for transformer, the connections, the clock, the
+    earthing impedances, the taps and the half-winding fields of a centre-tapped winding.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero or more ValidationErrors.
+    """
+    spt = CT.single_phase_transformer
+    errors = validate_branch(data, spt)
+    errors += _all_greater_than_zero(data, spt, AT.u1)
+    errors += _all_greater_than_zero(data, spt, AT.u2)
+    errors += _all_greater_than_zero(data, spt, AT.sn)
+    errors += _all_greater_or_equal(data, spt, AT.uk, f"{AT.pk}/{AT.sn}")
+    errors += _all_between(data, spt, AT.uk, 0, 1)
+    errors += _all_greater_than_or_equal_to_zero(data, spt, AT.pk)
+    errors += _all_greater_or_equal(data, spt, AT.i0, f"{AT.p0}/{AT.sn}")
+    errors += _all_less_than(data, spt, AT.i0, 1)
+    errors += _all_greater_than_or_equal_to_zero(data, spt, AT.p0)
+
+    # Connections: a centre-tapped winding is only allowed on the to side
+    errors += _all_valid_enum_values(data, spt, AT.from_connection, WindingConnection1P)
+    errors += _all_valid_enum_values(data, spt, AT.to_connection, WindingConnection1P)
+    errors += _all_supported_enum_values(
+        data, spt, AT.from_connection, WindingConnection1P, _PHASE_TO_EARTH_WINDINGS + _PHASE_TO_PHASE_WINDINGS
+    )
+    errors += _all_valid_single_phase_clocks(data, spt, AT.clock)
+
+    # Earthing impedances: a phase-to-phase winding has no earthed terminal
+    for connection, r_grounding, x_grounding in (
+        (AT.from_connection, AT.r_grounding_from, AT.x_grounding_from),
+        (AT.to_connection, AT.r_grounding_to, AT.x_grounding_to),
+    ):
+        phase_to_phase = np.isin(data[spt][connection], _PHASE_TO_PHASE_WINDINGS)
+        errors += _none_provided(data, spt, r_grounding, [connection], phase_to_phase)
+        errors += _none_provided(data, spt, x_grounding, [connection], phase_to_phase)
+        errors += _all_greater_than_or_equal_to_zero(data, spt, r_grounding)
+
+    # Taps
+    errors += _all_valid_enum_values(data, spt, AT.tap_side, BranchSide)
+    errors += _all_greater_than_or_equal_to_zero(data, spt, AT.tap_size)
+    for uk_limit, pk_limit in ((AT.uk_min, AT.pk_min), (AT.uk_max, AT.pk_max)):
+        errors += _all_greater_or_equal(data, spt, uk_limit, f"{pk_limit}/{AT.sn}", data[spt][AT.uk])
+        errors += _all_between(data, spt, uk_limit, 0, 1, data[spt][AT.uk])
+        errors += _all_greater_than_or_equal_to_zero(data, spt, pk_limit, data[spt][AT.pk])
+    errors += _validate_single_phase_transformer_taps(data)
+
+    errors += _validate_half_windings(data)
+    return errors
+
+
+def _validate_single_phase_transformer_taps(data: SingleDataset) -> list[NotBetweenOrAtError]:
+    """
+    Checks that tap_pos and tap_nom of each single_phase_transformer lie within the provided tap limits.
+
+    All tap fields are optional. The tap direction follows from the provided limits: it is reversed when both limits
+    are provided and tap_max < tap_min, when only tap_min is provided and tap_min > tap_nom, or when only tap_max is
+    provided and tap_max < tap_nom. A limit that is not provided leaves its side unbounded. tap_nom defaults to 0 and
+    tap_pos to tap_nom. The C++ core clamps tap_pos to the limits instead.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero, one or two NotBetweenOrAtErrors, for tap_pos and tap_nom.
+    """
+    spt_data = data[CT.single_phase_transformer]
+    na = _nan_type(CT.single_phase_transformer, AT.tap_min)
+    tap_min = spt_data[AT.tap_min]
+    tap_max = spt_data[AT.tap_max]
+    tap_nom = np.where(spt_data[AT.tap_nom] == na, 0, spt_data[AT.tap_nom])
+    tap_pos = np.where(spt_data[AT.tap_pos] == na, tap_nom, spt_data[AT.tap_pos])
+    has_min = tap_min != na
+    has_max = tap_max != na
+    reversed_ = np.where(
+        has_min & has_max, tap_max < tap_min, np.where(has_min, tap_min > tap_nom, has_max & (tap_max < tap_nom))
+    )
+    # the provided limits at the low and high end of the numbering
+    low, has_low = np.where(reversed_, tap_max, tap_min), np.where(reversed_, has_max, has_min)
+    high, has_high = np.where(reversed_, tap_min, tap_max), np.where(reversed_, has_min, has_max)
+
+    errors = []
+    pos_outside = (has_low & (tap_pos < low)) | (has_high & (tap_pos > high))
+    nom_outside = has_low & has_high & ((tap_nom < low) | (tap_nom > high))
+    for field, outside in ((AT.tap_pos, pos_outside), (AT.tap_nom, nom_outside)):
+        if outside.any():
+            ids = spt_data[AT.id][outside].flatten().tolist()
+            errors.append(NotBetweenOrAtError(CT.single_phase_transformer, field, ids, (AT.tap_min, AT.tap_max)))
+    return errors
+
+
+def _validate_half_windings(data: SingleDataset) -> list[ValidationError]:
+    """
+    Checks uk_half and pk_half of each single_phase_transformer.
+
+    They only apply to a centre-tapped to winding. On a centre-tapped winding, with the default of the C++ core for
+    a value that is not provided (pk_half = 0.375 pk and uk_half = |1.5 r + j1.2 x| / 2, with r + jx the short circuit
+    impedance from uk, pk and sn), the valid ranges are uk_half > uk/2, pk/4 <= pk_half <= pk/2 and
+    uk_half >= pk_half/(sn/2). Rows on which both are left to their defaults are not checked: the defaults satisfy the
+    ranges whenever uk >= pk/sn, which is checked separately, and the last one holds with equality when uk = pk/sn,
+    which floating point rounding could report as an error.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero or more ValidationErrors.
+    """
+    spt = CT.single_phase_transformer
+    spt_data = data[spt]
+    to_connection = spt_data[AT.to_connection]
+    center_tapped = to_connection == WindingConnection1P.ab_center_tapped
+    # an unknown to_connection is reported by validate_single_phase_transformer
+    other_winding = np.isin(to_connection, list(WindingConnection1P)) & ~center_tapped
+
+    errors: list[ValidationError] = []
+    errors += _none_provided(data, spt, AT.uk_half, [AT.to_connection], other_winding)
+    errors += _none_provided(data, spt, AT.pk_half, [AT.to_connection], other_winding)
+
+    uk, pk, sn = spt_data[AT.uk], spt_data[AT.pk], spt_data[AT.sn]
+    uk_half_missing, pk_half_missing = np.isnan(spt_data[AT.uk_half]), np.isnan(spt_data[AT.pk_half])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = pk / sn
+        x = np.sqrt(np.maximum(uk * uk - r * r, 0.0))
+        # uk > 0 is checked separately, so the sign of uk is not taken into account
+        uk_half = np.where(uk_half_missing, 0.5 * np.hypot(1.5 * r, 1.2 * x), spt_data[AT.uk_half])
+        pk_half = np.where(pk_half_missing, 0.375 * pk, spt_data[AT.pk_half])
+        checked = center_tapped & ~(uk_half_missing & pk_half_missing)
+        # NaN comparisons are False, so rows with missing values are skipped
+        violations: list[tuple[AT, np.ndarray, type[ComparisonError], ComparisonError.RefType]] = [
+            (AT.uk_half, uk_half <= 0.5 * uk, NotGreaterThanError, f"{AT.uk}/2"),
+            (
+                AT.pk_half,
+                (pk_half < 0.25 * pk) | (pk_half > 0.5 * pk),
+                NotBetweenOrAtError,
+                (f"{AT.pk}/4", f"{AT.pk}/2"),
+            ),
+            (AT.uk_half, uk_half < pk_half / (0.5 * sn), NotGreaterOrEqualError, f"{AT.pk_half}/({AT.sn}/2)"),
+        ]
+    for field, violated, error, ref_value in violations:
+        invalid = checked & violated
+        if invalid.any():
+            errors.append(error(spt, field, spt_data[AT.id][invalid].flatten().tolist(), ref_value))
+    return errors
+
+
+def _warn_single_phase_transformer_winding_voltages(data: SingleDataset) -> None:
+    """
+    Warns if u1 or u2 of a single_phase_transformer differs by more than 20% from the nominal winding voltage implied
+    by the u_rated of its node: u_rated/sqrt(3) for a phase-to-earth, u_rated for a phase-to-phase and
+    2 u_rated/sqrt(3) for a centre-tapped winding. Off-nominal ratios are legitimate, so this is a warning and not an
+    error. Unknown nodes and connections and non-positive voltages are skipped; they are reported by the
+    validation itself.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Warns:
+        ValidationWarning: at most once per side, listing the ids.
+    """
+    spt = CT.single_phase_transformer
+    if spt not in data or CT.node not in data or data[spt].size == 0 or data[CT.node].size == 0:
+        return
+    spt_data = data[spt]
+    node_data = data[CT.node]
+    for voltage, node_field, connection in (
+        (AT.u1, AT.from_node, AT.from_connection),
+        (AT.u2, AT.to_node, AT.to_connection),
+    ):
+        idx = _get_indexer(node_data[AT.id], spt_data[node_field], default_value=-1)
+        u_rated = np.where(idx >= 0, node_data[AT.u_rated][idx], np.nan)
+        factor = np.select(
+            [
+                np.isin(spt_data[connection], _PHASE_TO_EARTH_WINDINGS),
+                np.isin(spt_data[connection], _PHASE_TO_PHASE_WINDINGS),
+                spt_data[connection] == WindingConnection1P.ab_center_tapped,
+            ],
+            [1.0 / np.sqrt(3.0), 1.0, 2.0 / np.sqrt(3.0)],
+            default=np.nan,
+        )
+        u_nominal = factor * u_rated
+        voltage_values = spt_data[voltage]
+        # a non-positive voltage is an error, reported by the validation itself
+        with np.errstate(divide="ignore", invalid="ignore"):
+            off_nominal = (
+                (u_nominal > 0) & (voltage_values > 0) & (np.abs(voltage_values / u_nominal - 1.0) > 0.2)  # noqa: PLR2004
+            )
+        if off_nominal.any():
+            ids = spt_data[AT.id][off_nominal].flatten().tolist()
+            warnings.warn(
+                f"{voltage} of {spt}(s) {ids} differs by more than 20% from the nominal winding voltage implied by "
+                f"its {node_field} (u_rated/sqrt(3) for a phase-to-earth, u_rated for a phase-to-phase and "
+                f"2 u_rated/sqrt(3) for a centre-tapped winding). {voltage} is the rated voltage across the winding "
+                "terminals.",
+                ValidationWarning,
+                stacklevel=3,
+            )
 
 
 def validate_branch3(data: SingleDataset, component: CT) -> list[ValidationError]:
@@ -1389,6 +1629,7 @@ def validate_generic_power_sensor(data: SingleDataset, component: CT) -> list[Va
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
             CT.three_winding_transformer,
             CT.source,
             CT.shunt,
@@ -1407,6 +1648,7 @@ def validate_generic_power_sensor(data: SingleDataset, component: CT) -> list[Va
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
         ],
         measured_terminal_type=MeasuredTerminalType.branch_from,
     )
@@ -1419,6 +1661,7 @@ def validate_generic_power_sensor(data: SingleDataset, component: CT) -> list[Va
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
         ],
         measured_terminal_type=MeasuredTerminalType.branch_to,
     )
@@ -1513,6 +1756,7 @@ def validate_generic_current_sensor(data: SingleDataset, component: CT) -> list[
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
             CT.three_winding_transformer,
         ],
     )
@@ -1525,6 +1769,7 @@ def validate_generic_current_sensor(data: SingleDataset, component: CT) -> list[
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
         ],
         measured_terminal_type=MeasuredTerminalType.branch_from,
     )
@@ -1537,6 +1782,7 @@ def validate_generic_current_sensor(data: SingleDataset, component: CT) -> list[
             CT.asym_line,
             CT.generic_branch,
             CT.transformer,
+            CT.single_phase_transformer,
         ],
         measured_terminal_type=MeasuredTerminalType.branch_to,
     )

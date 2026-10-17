@@ -11,16 +11,19 @@ with a connection. New cases are picked up automatically.
 The expected-error cases (e.g. delta-on-absent-phase, swer-fault-on-absent-phase and missing-phase-for-winding) are
 included on purpose: their errors depend on the topology (the phases present at each node), which only the C++ core
 checks. The Python validation checks each component's own data, so it must accept them.
+
+No case may raise a ValidationWarning either: the winding voltages of every single_phase_transformer are nominal.
 """
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
 
 from power_grid_model import CalculationType
 from power_grid_model.utils import json_deserialize_from_file
-from power_grid_model.validation import validate_batch_data, validate_input_data
+from power_grid_model.validation import ValidationWarning, validate_batch_data, validate_input_data
 
 DATA_PATH = Path(__file__).parents[2] / "data"
 MIN_CASE_COUNT = 33
@@ -52,7 +55,9 @@ def test_case_count():
 def test_reduced_phase_case_is_valid(case_dir: Path):
     calculation_type = CalculationType[case_dir.relative_to(DATA_PATH).parts[0]]
     input_data = json_deserialize_from_file(case_dir / "input.json")
-    assert validate_input_data(input_data, calculation_type, symmetric=False) is None
-    if (case_dir / "update_batch.json").exists():
-        update_data = json_deserialize_from_file(case_dir / "update_batch.json")
-        assert validate_batch_data(input_data, update_data, calculation_type, symmetric=False) is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValidationWarning)
+        assert validate_input_data(input_data, calculation_type, symmetric=False) is None
+        if (case_dir / "update_batch.json").exists():
+            update_data = json_deserialize_from_file(case_dir / "update_batch.json")
+            assert validate_batch_data(input_data, update_data, calculation_type, symmetric=False) is None

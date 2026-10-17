@@ -23,7 +23,13 @@ from power_grid_model import (
 )
 from power_grid_model._core.enum import AngleMeasurementType
 from power_grid_model._core.utils import compatibility_convert_row_columnar_dataset
-from power_grid_model.enum import Branch3Side, BranchSide, ComponentAttributeFilterOptions, FaultType
+from power_grid_model.enum import (
+    Branch3Side,
+    BranchSide,
+    ComponentAttributeFilterOptions,
+    FaultType,
+    WindingConnection1P,
+)
 from power_grid_model.validation import assert_valid_input_data
 from power_grid_model.validation._validation import (
     assert_valid_data_structure,
@@ -880,11 +886,11 @@ def _deprecated_measured_terminal_type_node():
     ("ref_component", "measured_terminal_type"),
     [
         (
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             MeasuredTerminalType.branch_from,
         ),
         (
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             MeasuredTerminalType.branch_to,
         ),
         (CT.source, MeasuredTerminalType.source),
@@ -1015,11 +1021,11 @@ def test_validate_generic_current_sensor__only_branches_supported(
     ("ref_component", "measured_terminal_type"),
     [
         (
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             MeasuredTerminalType.branch_from,
         ),
         (
-            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer],
+            [CT.line, CT.asym_line, CT.generic_branch, CT.transformer, CT.single_phase_transformer],
             MeasuredTerminalType.branch_to,
         ),
         (CT.three_winding_transformer, MeasuredTerminalType.branch3_1),
@@ -1393,6 +1399,23 @@ def test_all_default_values():
     three_winding_transformer[AT.tap_max] = [10]
     three_winding_transformer[AT.tap_size] = [1380]
 
+    # only the required fields: the clock, the tap fields, uk_half/pk_half and the earthing impedances are optional
+    single_phase_transformer = initialize_array(DatasetType.input, CT.single_phase_transformer, 1)
+    single_phase_transformer[AT.id] = [7]
+    single_phase_transformer[AT.from_node] = [0]
+    single_phase_transformer[AT.to_node] = [2]
+    single_phase_transformer[AT.from_status] = [1]
+    single_phase_transformer[AT.to_status] = [1]
+    single_phase_transformer[AT.u1] = [50e3]
+    single_phase_transformer[AT.u2] = [10.5e3]
+    single_phase_transformer[AT.sn] = [1e5]
+    single_phase_transformer[AT.uk] = [0.1]
+    single_phase_transformer[AT.pk] = [1e3]
+    single_phase_transformer[AT.i0] = [1.0e-6]
+    single_phase_transformer[AT.p0] = [0.1]
+    single_phase_transformer[AT.from_connection] = [WindingConnection1P.ab]
+    single_phase_transformer[AT.to_connection] = [WindingConnection1P.bc]
+
     fault = initialize_array(DatasetType.input, CT.fault, 1)
     fault[AT.id] = [5]
     fault[AT.status] = [1]
@@ -1402,6 +1425,7 @@ def test_all_default_values():
         CT.node: node,
         CT.transformer: transformer,
         CT.three_winding_transformer: three_winding_transformer,
+        CT.single_phase_transformer: single_phase_transformer,
         CT.source: source,
         CT.fault: fault,
     }

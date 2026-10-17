@@ -6,7 +6,7 @@ from enum import IntEnum
 
 import pytest
 
-from power_grid_model import ComponentType as CT
+from power_grid_model import ComponentType as CT, validation
 from power_grid_model.validation.errors import (
     ComparisonError,
     InvalidAssociatedEnumValueError,
@@ -16,7 +16,9 @@ from power_grid_model.validation.errors import (
     MultiFieldValidationError,
     NotApplicableValueError,
     SingleFieldValidationError,
+    SinglePhaseTransformerClockError,
     ValidationError,
+    ValidationWarning,
 )
 
 
@@ -55,6 +57,25 @@ def test_not_applicable_value_error():
         "Combination of fields 'phases' and 'r_bb' is not valid for 2 asym_lines: "
         "a value is provided that does not apply and must be left empty."
     )
+
+
+def test_single_phase_transformer_clock_error():
+    error = SinglePhaseTransformerClockError(component=CT.single_phase_transformer, field="clock", ids=[3, 1])
+    assert isinstance(error, SingleFieldValidationError)
+    assert error.field == "clock"
+    assert error.ids == [1, 3]
+    assert str(error) == (
+        "Invalid clock number for 2 single_phase_transformers. "
+        "The clock of a single-phase transformer must be 0 or 6 (modulo 12); "
+        "6 reverses the polarity of the to-side winding."
+    )
+
+
+def test_validation_warning():
+    assert validation.ValidationWarning is ValidationWarning
+    assert "ValidationWarning" in validation.__all__
+    assert issubclass(ValidationWarning, UserWarning)
+    assert not issubclass(ValidationWarning, ValidationError)
 
 
 def test_multi_component_validation_error():

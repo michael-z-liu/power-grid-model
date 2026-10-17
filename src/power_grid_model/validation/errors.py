@@ -516,6 +516,18 @@ class TransformerClockError(MultiFieldValidationError):
     )
 
 
+class SinglePhaseTransformerClockError(SingleFieldValidationError):
+    """
+    Invalid clock number of a single-phase transformer.
+    """
+
+    _message = (
+        "Invalid clock number for {n} {objects}. "
+        "The clock of a single-phase transformer must be 0 or 6 (modulo 12); "
+        "6 reverses the polarity of the to-side winding."
+    )
+
+
 class FaultPhaseError(MultiFieldValidationError):
     """
     The fault phase does not match the fault type.
@@ -623,3 +635,12 @@ class MissingVoltageAngleMeasurementError(MultiComponentValidationError):
         "Missing voltage angle measurement for {n} {objects}. "
         "If a voltage sensor measures the voltage of a terminal, it must also measure the voltage angle."
     )
+
+
+class ValidationWarning(UserWarning):
+    """
+    Input data that is valid, but probably not what was intended.
+
+    It is raised with warnings.warn and does not change the result of the validation.
+    E.g. u1 of a single_phase_transformer that differs by more than 20% from the nominal winding voltage of its node.
+    """
