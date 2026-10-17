@@ -14,6 +14,7 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
   missing-phase-for-winding, split-phase, split-phase-flat-start, split-phase-linear}
 - tests/data/short_circuit/{single-phase-transformer-swer, single-phase-transformer-split-phase}
+- tests/data/short_circuit/{swer-fault-impedance, swer-multiple-faults, swer-c-minimum, swer-fault-on-absent-phase}
 - tests/data/power_flow/asym-load-delta/{three-phase, three-phase-linear, two-phase, two-phase-linear, split-phase,
   split-phase-flat-start, split-phase-linear, symmetric-not-supported, delta-on-absent-phase}
 - tests/data/state_estimation/asym-load-delta-not-supported
@@ -28,7 +29,9 @@ Optionally pass case path fragments after the root to generate only the matching
 Modelling choices:
 
 - source: Vsource with Z1/Z0 in ohm from sk, rx_ratio and z01_ratio, exactly as PGM computes them; in a short
-  circuit the voltage is c * u_rated (pu=1.1) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM)
+  circuit the voltage is c * u_rated (pu=c) and the impedance is c * u_rated^2 / sk (IEC 60909, as in PGM). c is
+  taken as PGM takes it, from the u_rated of the source node (not of the fault location): 1.1 for maximum voltage
+  scaling; for minimum 0.95 if the source node is at most 1000 V and 1.0 otherwise
 - faults: OpenDSS replaces a fault resistance of 0 by 1e-4 ohm, so a bolted fault (r_f = 0) gets 1e-13 ohm instead,
   which is below the OpenDSS agreement of about 3e-10 relative. A bolted two-phase fault is a 1e-13 ohm bridge
   between the phases; its 1e13 S conductance swamps the nodal admittance of the two phases in double precision and
@@ -40,8 +43,17 @@ Modelling choices:
   without a bridge. With r_f > 0, PGM joins the two phases and connects them to earth through z_f; in OpenDSS this
   needs a bridge between the phases at a node with a non-zero voltage, where the same round-off limits the reference
   to about 3e-9 relative (LV) and 1e-8 relative (22 kV) for any bridge resistance, too coarse for the tolerances of
-  these cases, so it is not generated. The fault current per phase is the sum over all Fault elements of the fault
+  these cases, so it is not generated. The fault current per phase is the sum over all OpenDSS elements of the fault
   and over their terminals of the current from the node into the element
+- fault impedance: an OpenDSS Fault is resistive only, so a fault with x_f != 0 (x_f > 0 only; OpenDSS may treat a
+  Reactor with X = 0 specially) is a series R + jX Reactor from the faulted phase to earth (bus2 = n.0), between the
+  two phases of a two-phase fault, or from each phase to earth for a three-phase fault. After the solve its current
+  must equal V / (r_f + j x_f) with the OpenDSS node voltages to 1e-9 relative (check_fault_impedance, the decisive
+  check of the Reactor R/X convention)
+- several faults per scenario: an entry of Case.faults is a Fault or a tuple of simultaneous Faults. The input has
+  every fault ID (the faults of the first scenario with status 1, the others with status 0 at their first
+  appearance); with more than one ID the update sets each scenario's faults to status 1 and switches the others off,
+  and the reference has i_f = 0 for a fault that is off (PGM's null output)
 - lines: explicit R/X/C matrices of the present phases; a line with a neutral gets the numpy Kron-reduced matrix,
   which is cross-checked against an OpenDSS LineCode with Kron=yes; the exception is a line with opendss_kron=True,
   which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
@@ -530,21 +542,24 @@ class Fault:
         return self.fault_type == "two_phase" and self.r_f == 0.0
 
     def dss_elements(self, bridge_scale=1.0):
-        """the OpenDSS Fault elements of this fault, as (name, definition); all names start with f{id}; bridge_scale
+        """the OpenDSS elements of this fault, as (element, definition), e.g. ("Fault.f601", "phases=1 ..."); all
+        element names start with f{id}; a fault with x_f is a Reactor (an OpenDSS Fault is resistive only); bridge_scale
         multiplies the resistance of a bolted two-phase fault (for the accuracy check)"""
-        assert self.x_f == 0.0, "OpenDSS faults are resistive"
         bus = f"n{self.node}"
         name = f"f{self.id}"
+        if self.x_f != 0.0:
+            return [(f"Reactor.{name}", self.dss_reactor(bus))]
+        element = f"Fault.{name}"
         if self.fault_type == "single_phase_to_ground":
             k = "abc".index(self.fault_phase) + 1
-            return [(name, f"phases=1 bus1={bus}.{k} r={self.dss_r()!r}")]
+            return [(element, f"phases=1 bus1={bus}.{k} r={self.dss_r()!r}")]
         if self.fault_type == "two_phase":
             k1, k2 = ("abc".index(p) + 1 for p in self.fault_phase)
             r = self.dss_r() * bridge_scale if self.has_bridge() else self.dss_r()
-            return [(name, f"phases=1 bus1={bus}.{k1} bus2={bus}.{k2} r={r!r}")]
+            return [(element, f"phases=1 bus1={bus}.{k1} bus2={bus}.{k2} r={r!r}")]
         if self.fault_type == "three_phase":
             # three phase-to-earth resistances r_f, as PGM models a three-phase fault with impedance
-            return [(name, f"phases=3 bus1={bus}.1.2.3 bus2={bus}.0.0.0 r={self.dss_r()!r}")]
+            return [(element, f"phases=3 bus1={bus}.1.2.3 bus2={bus}.0.0.0 r={self.dss_r()!r}")]
         if self.fault_type == "two_phase_to_ground":
             if self.r_f > 0.0:
                 # PGM joins the two phases and connects them to earth through z_f; the bridge between the phases that
@@ -552,10 +567,26 @@ class Fault:
                 raise NotImplementedError("two_phase_to_ground with r_f > 0 has no accurate OpenDSS reference")
             # bolted: both phases to earth
             return [
-                (f"{name}_{k}", f"phases=1 bus1={bus}.{k} r={DSS_BOLTED_FAULT_R!r}")
+                (f"{element}_{k}", f"phases=1 bus1={bus}.{k} r={DSS_BOLTED_FAULT_R!r}")
                 for k in ("abc".index(p) + 1 for p in self.fault_phase)
             ]
         raise NotImplementedError(self.fault_type)
+
+    def dss_reactor(self, bus):
+        """the definition of the series R + jX Reactor of a fault with x_f, from the faulted phases to earth (or
+        between the two phases of a two-phase fault); its R/X convention is checked by check_fault_impedance"""
+        # OpenDSS may treat a Reactor with X = 0 specially, so the cases use x_f > 0
+        assert self.x_f > 0.0, "use x_f > 0 for a fault with reactance"
+        impedance = f"R={self.r_f!r} X={self.x_f!r}"
+        if self.fault_type == "single_phase_to_ground":
+            k = "abc".index(self.fault_phase) + 1
+            return f"phases=1 bus1={bus}.{k} bus2={bus}.0 {impedance}"
+        if self.fault_type == "two_phase":
+            k1, k2 = ("abc".index(p) + 1 for p in self.fault_phase)
+            return f"phases=1 bus1={bus}.{k1} bus2={bus}.{k2} {impedance}"
+        if self.fault_type == "three_phase":
+            return f"phases=3 bus1={bus}.1.2.3 bus2={bus}.0.0.0 {impedance}"
+        raise NotImplementedError(f"{self.fault_type} with x_f has no OpenDSS reference")
 
 
 @dataclass
@@ -567,7 +598,8 @@ class Case:
     loads: list = field(default_factory=list)
     calculation: str = "power_flow"  # power_flow or short_circuit
     params: dict = field(default_factory=dict)
-    faults: list = field(default_factory=list)  # short circuit: one fault per scenario, batch if more than one
+    # short circuit: per scenario a Fault or a tuple of simultaneous Faults; a batch if more than one scenario
+    faults: list = field(default_factory=list)
     # cases that only check an error: (output type, raises name)
     raises_only: tuple | None = None
     source_id: int = 201
@@ -588,7 +620,31 @@ class Case:
 # PGM input
 
 
-def pgm_input(case: Case, fault: Fault | None):
+def fault_scenarios(case: Case) -> list[tuple[Fault, ...]]:
+    """the faults of each scenario, as a tuple of simultaneous faults"""
+    scenarios = [entry if isinstance(entry, tuple) else (entry,) for entry in case.faults]
+    for scenario in scenarios:
+        assert len({f.id for f in scenario}) == len(scenario), "a fault ID occurs once per scenario"
+    return scenarios
+
+
+def fault_ids(case: Case) -> list[int]:
+    """the fault IDs of all scenarios, in the order of their first appearance"""
+    return list(dict.fromkeys(f.id for scenario in fault_scenarios(case) for f in scenario))
+
+
+def first_appearance(case: Case, fault_id: int) -> Fault:
+    return next(f for scenario in fault_scenarios(case) for f in scenario if f.id == fault_id)
+
+
+def voltage_factor(case: Case) -> float:
+    """the IEC 60909 voltage factor c as PGM picks it, from the u_rated of the source node (not the fault location)"""
+    if case.params["short_circuit_voltage_scaling"] == "maximum":
+        return 1.1
+    return 0.95 if case.u_node(case.nodes[0]) <= 1000.0 else 1.0
+
+
+def pgm_input(case: Case, scenario: tuple[Fault, ...]):
     data = {
         "node": [{"id": n, "u_rated": case.u_node(n)} for n in case.nodes],
         "asym_line": [line.pgm() for line in case.lines],
@@ -610,8 +666,16 @@ def pgm_input(case: Case, fault: Fault | None):
         items = [load.pgm() for load in case.loads if load.kind == kind]
         if items:
             data[kind] = items
-    if fault is not None:
-        data["fault"] = [pgm_fault(fault, with_status=True)]
+    if case.faults:
+        # every fault ID: the faults of the scenario with status 1, the others with status 0 (at their first appearance)
+        present = {f.id: f for f in scenario}
+        rows = []
+        for fault_id in fault_ids(case):
+            row = pgm_fault(present.get(fault_id, first_appearance(case, fault_id)), with_status=True)
+            if fault_id not in present:
+                row["status"] = 0
+            rows.append(row)
+        data["fault"] = rows
     return {"version": "1.0", "type": "input", "is_batch": False, "attributes": {}, "data": data}
 
 
@@ -629,6 +693,16 @@ def pgm_fault(fault: Fault, with_status: bool):
         }
     )
     return result
+
+
+def fault_update(case: Case, scenario: tuple[Fault, ...]):
+    """the fault update of a scenario: with a single fault ID the fault without status; otherwise every fault ID, the
+    faults of the scenario with status 1 and the others switched off"""
+    ids = fault_ids(case)
+    if len(ids) == 1:
+        return [pgm_fault(scenario[0], with_status=False)]
+    present = {f.id: f for f in scenario}
+    return [pgm_fault(present[i], with_status=True) if i in present else {"id": i, "status": 0} for i in ids]
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -720,9 +794,10 @@ def dss_load_elements(case: Case, load: Load):
     return elements
 
 
-def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: bool, bridge_scale=1.0):
+def dss_script(case: Case, faults: tuple[Fault, ...], voltage_pu: float, with_loads: bool, bridge_scale=1.0):
+    """the OpenDSS script of a power flow (no faults) or of a short-circuit scenario (its simultaneous faults)"""
     z1, z0 = source_z(case)
-    if fault is not None:
+    if faults:
         # IEC 60909: sk is defined at the rated voltage, so the source impedance is c * u_rated^2 / sk (as in PGM)
         z1 *= voltage_pu
         z0 *= voltage_pu
@@ -772,11 +847,11 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
     if with_loads:
         for load in case.loads:
             lines += [f"New Load.{name} {definition}" for name, definition, _ in dss_load_elements(case, load)]
-    if fault is not None:
-        lines += [f"New Fault.{name} {definition}" for name, definition in fault.dss_elements(bridge_scale)]
+    for fault in faults:
+        lines += [f"New {element} {definition}" for element, definition in fault.dss_elements(bridge_scale)]
     bases = ", ".join(repr(u / 1e3) for u in sorted({case.u_node(n) for n in case.nodes}, reverse=True))
     lines += [f"Set VoltageBases=[{bases}]", "CalcVoltageBases", "Set Tolerance=1e-12", "Set MaxIterations=200"]
-    if fault is not None:
+    if faults:
         lines.append("Set Mode=Snapshot")
     lines.append("Solve")
     return lines
@@ -852,16 +927,46 @@ def check_delta_load_bases(case: Case):
         )
 
 
-def check_fault_bridge(case: Case, fault: Fault, i_f):
+def check_fault_bridge(case: Case, scenario: tuple[Fault, ...], currents):
     """a bolted two-phase fault (a bridge of 1e-13 ohm between the phases) solved again with a 10x larger bridge gives
     the same fault current to 1e-10 relative: the reference is limited neither by the bridge resistance nor by the
-    round-off of its large conductance"""
-    if not fault.has_bridge():
+    round-off of its large conductance; currents are the fault currents of the scenario, per fault"""
+    if not any(fault.has_bridge() for fault in scenario):
         return
-    run_dss(dss_script(case, fault, 1.1, with_loads=False, bridge_scale=10.0))
-    dev = np.max(np.abs(fault_currents(fault) - i_f)) / np.max(np.abs(i_f))
-    assert dev < 1e-10, f"bolted two-phase fault at node {fault.node} is not accurate in OpenDSS: {dev:.1e} relative"
-    print(f"  bolted two-phase fault at node {fault.node}: a 10x larger bridge changes i_f by {dev:.1e} relative")
+    run_dss(dss_script(case, scenario, voltage_factor(case), with_loads=False, bridge_scale=10.0))
+    for fault, i_f in zip(scenario, currents):
+        if not fault.has_bridge():
+            continue
+        dev = np.max(np.abs(fault_currents(fault) - i_f)) / np.max(np.abs(i_f))
+        assert dev < 1e-10, (
+            f"bolted two-phase fault at node {fault.node} is not accurate in OpenDSS: {dev:.1e} relative"
+        )
+        print(f"  bolted two-phase fault at node {fault.node}: a 10x larger bridge changes i_f by {dev:.1e} relative")
+
+
+def check_fault_impedance(fault: Fault, i_f):
+    """the decisive check of the R/X convention of the Reactor of a fault with x_f, after the solve: with the OpenDSS
+    node voltages, its current equals V / (r_f + j x_f) to 1e-9 relative on each faulted phase, with V the phase
+    voltage to earth, or V_k1 - V_k2 (and -(V_k1 - V_k2) on k2) for a two-phase fault"""
+    if fault.x_f == 0.0:
+        return
+    z_f = complex(fault.r_f, fault.x_f)
+    v = bus_phasors(fault.node)
+    expected = np.zeros(3, dtype=complex)
+    if fault.fault_type == "two_phase":
+        k1, k2 = ("abc".index(p) + 1 for p in fault.fault_phase)
+        expected[k1 - 1] = (v[k1] - v[k2]) / z_f
+        expected[k2 - 1] = -expected[k1 - 1]
+    else:
+        for p in fault.fault_phase:
+            k = "abc".index(p) + 1
+            expected[k - 1] = v[k] / z_f
+    dev = np.max(np.abs(i_f - expected)) / np.max(np.abs(expected))
+    assert dev < 1e-9, f"fault {fault.id} at node {fault.node}: the Reactor current is not V / z_f ({dev:.1e} relative)"
+    print(
+        f"  fault {fault.id} at node {fault.node}: the Reactor current equals V / z_f with z_f = {z_f} ohm"
+        f" (dev {dev:.1e} relative)"
+    )
 
 
 def check_kron_against_opendss(case: Case):
@@ -1140,7 +1245,9 @@ def transformer_pf_reference(transformer: Transformer1P):
     }
 
 
-def sc_reference(case: Case, fault: Fault):
+def sc_reference(case: Case, scenario: tuple[Fault, ...], currents):
+    """the reference of a short-circuit scenario; currents are the fault currents of the scenario, per fault; a fault
+    ID that is not in the scenario (status 0) gets i_f = 0, as PGM's null output"""
     isolated = isolated_nodes(case)
     nodes = []
     for node in case.nodes:
@@ -1167,22 +1274,27 @@ def sc_reference(case: Case, fault: Fault):
                 "i_to_angle": i_to_angle,
             }
         )
-    i_f = fault_currents(fault)
-    i_f_mag, i_f_angle = mag_angle(i_f)
     result = {"node": nodes, "asym_line": lines}
     if case.transformers:
+        # the fault current is only printed with the electrode current, for a single fault
+        i_f = currents[0] if len(scenario) == 1 else None
         result["single_phase_transformer"] = [transformer_sc_reference(t, i_f) for t in case.transformers]
-    result["fault"] = [{"id": fault.id, "i_f": i_f_mag, "i_f_angle": i_f_angle}]
+    present = {fault.id: i_f for fault, i_f in zip(scenario, currents)}
+    rows = []
+    for fault_id in fault_ids(case):
+        i_f_mag, i_f_angle = mag_angle(present.get(fault_id, np.zeros(3, dtype=complex)))
+        rows.append({"id": fault_id, "i_f": i_f_mag, "i_f_angle": i_f_angle})
+    result["fault"] = rows
     return result
 
 
 def fault_currents(fault: Fault):
-    """the current from the node into the fault on each faulted phase: the sum over all Fault elements of the fault and
-    over all their terminals (a terminal at earth, node 0, is dropped)"""
+    """the current from the node into the fault on each faulted phase: the sum over all OpenDSS elements of the fault
+    and over all their terminals (a terminal at earth, node 0, is dropped)"""
     i_f = np.zeros(3, dtype=complex)
     assigned = set()
-    for name, _ in fault.dss_elements():
-        dss.Circuit.SetActiveElement(f"Fault.{name}")
+    for element, _ in fault.dss_elements():
+        dss.Circuit.SetActiveElement(element)
         raw = dss.CktElement.Currents()
         order = dss.CktElement.NodeOrder()
         for idx, number in enumerate(order):
@@ -1303,8 +1415,8 @@ def generate(case: Case, root: Path):
     target = root / case.path
     target.mkdir(parents=True, exist_ok=True)
     print(f"{case.path}")
-    first_fault = case.faults[0] if case.faults else None
-    write_json(target / "input.json", pgm_input(case, first_fault))
+    scenarios = fault_scenarios(case)
+    write_json(target / "input.json", pgm_input(case, scenarios[0] if scenarios else ()))
     write_json(target / "params.json", case.params)
 
     if case.raises_only is not None:
@@ -1326,7 +1438,7 @@ def generate(case: Case, root: Path):
             check_transformer(transformer)
 
     if case.calculation == "power_flow":
-        script = dss_script(case, None, 1.0, with_loads=True)
+        script = dss_script(case, (), 1.0, with_loads=True)
         run_dss(script, case)
         check_delta_load_bases(case)
         for transformer in case.transformers:
@@ -1338,12 +1450,15 @@ def generate(case: Case, root: Path):
 
     scripts = []
     references = []
-    for fault in case.faults:
-        script = dss_script(case, fault, 1.1, with_loads=False)
+    for scenario in scenarios:
+        script = dss_script(case, scenario, voltage_factor(case), with_loads=False)
         run_dss(script, case)
         scripts.append(script)
-        references.append(sc_reference(case, fault))
-        check_fault_bridge(case, fault, fault_currents(fault))
+        currents = [fault_currents(fault) for fault in scenario]
+        for fault, i_f in zip(scenario, currents):
+            check_fault_impedance(fault, i_f)
+        references.append(sc_reference(case, scenario, currents))
+        check_fault_bridge(case, scenario, currents)
     dss_text = []
     for k, script in enumerate(scripts):
         if len(scripts) > 1:
@@ -1351,7 +1466,7 @@ def generate(case: Case, root: Path):
         dss_text += script
         dss_text.append("")
     write_text(target / "test.dss", "\n".join(dss_text))
-    if len(case.faults) == 1:
+    if len(scenarios) == 1:
         write_json(target / "sc_output.json", output_dataset("sc_output", references[0]))
     else:
         write_json(
@@ -1361,7 +1476,7 @@ def generate(case: Case, root: Path):
                 "type": "update",
                 "is_batch": True,
                 "attributes": {},
-                "data": [{"fault": [pgm_fault(fault, with_status=False)]} for fault in case.faults],
+                "data": [{"fault": fault_update(case, scenario)} for scenario in scenarios],
             },
         )
         write_json(target / "sc_output_batch.json", output_dataset("sc_output", references, is_batch=True))
@@ -1381,6 +1496,10 @@ SC_PARAMS = {
     "short_circuit_voltage_scaling": "maximum",
     "experimental_features": "enabled",
 }
+
+
+def sc_raises_params(raises, reason):
+    return dict(SC_PARAMS, raises={"raises": raises, "reason": reason})
 
 
 def pf_params(methods, rtol, atol):
@@ -1494,6 +1613,56 @@ def swer_chain_short_circuit_case():
             Fault(601, 2, "three_phase", "abc", 0.5),
         ],
     )
+
+
+def swer_short_circuit_cases():
+    """the short-circuit phase validity cases (M8) in the swer-chain network without loads: 22 kV abc nodes 1-2, the
+    isolating transformer ab -> a with its electrode, SWER nodes 3-4 and 240 V nodes 5 (behind the tapped
+    transformer) and 6"""
+    base = swer_chain_short_circuit_case()
+    spg = "single_phase_to_ground"
+    return [
+        # x_f != 0: an OpenDSS Reactor, checked by check_fault_impedance
+        replace(
+            base,
+            path="short_circuit/swer-fault-impedance",
+            faults=[
+                # the fault current returns through the electrode of the isolating transformer
+                Fault(601, 4, spg, "a", 10.0, 5.0),
+                Fault(601, 6, spg, "a", 0.05, 0.02),
+                Fault(601, 4, spg, "a", 0.0, 8.0),
+            ],
+        ),
+        # simultaneous faults; every fault has an impedance that keeps the voltage of the faults downstream of it, so
+        # that every fault current is far from zero
+        replace(
+            base,
+            path="short_circuit/swer-multiple-faults",
+            faults=[
+                (Fault(601, 4, spg, "a", 10.0), Fault(602, 6, spg, "a", 0.05)),
+                # a three-phase node and SWER and 240 V nodes in one calculation
+                (Fault(601, 2, spg, "a", 5.0), Fault(602, 5, spg, "a", 0.0), Fault(603, 3, spg, "a", 20.0, 10.0)),
+            ],
+        ),
+        # c = 1.0 from the 22 kV source node, also for the 240 V fault (IEC 60909: 0.95 at the fault location)
+        replace(
+            base,
+            path="short_circuit/swer-c-minimum",
+            params=dict(SC_PARAMS, short_circuit_voltage_scaling="minimum"),
+            faults=[Fault(601, 4, spg, "a", 0.0), Fault(601, 5, spg, "a", 0.0)],
+        ),
+        replace(
+            base,
+            path="short_circuit/swer-fault-on-absent-phase",
+            faults=[Fault(601, 4, spg, "b", 0.0)],
+            params=sc_raises_params(
+                "InvalidShortCircuitPhaseOrType",
+                "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); this"
+                " short circuit type cannot be applied there",
+            ),
+            raises_only=("sc_output", "InvalidShortCircuitPhaseOrType"),
+        ),
+    ]
 
 
 def phase_to_phase_case(path, all_const_y, methods):
@@ -1914,6 +2083,7 @@ CASES = [
     ),
     swer_chain_case(),
     swer_chain_short_circuit_case(),
+    *swer_short_circuit_cases(),
     # the floating common mode of n3 makes iterative_current diverge with const_pq loads, so only newton_raphson
     phase_to_phase_case(
         "power_flow/single-phase-transformer/phase-to-phase", all_const_y=False, methods="newton_raphson"
