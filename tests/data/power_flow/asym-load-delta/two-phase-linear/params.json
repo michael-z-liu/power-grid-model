@@ -1,0 +1,9 @@
+{
+  "calculation_method": [
+    "linear",
+    "linear_current"
+  ],
+  "rtol": 1e-07,
+  "atol": 1e-08,
+  "experimental_features": "enabled"
+}

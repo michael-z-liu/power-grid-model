@@ -14,6 +14,9 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/power_flow/single-phase-transformer/{swer-chain, phase-to-phase, phase-to-phase-linear,
   missing-phase-for-winding, split-phase, split-phase-flat-start, split-phase-linear}
 - tests/data/short_circuit/{single-phase-transformer-swer, single-phase-transformer-split-phase}
+- tests/data/power_flow/asym-load-delta/{three-phase, three-phase-linear, two-phase, two-phase-linear, split-phase,
+  split-phase-flat-start, split-phase-linear, symmetric-not-supported, delta-on-absent-phase}
+- tests/data/state_estimation/asym-load-delta-not-supported
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
 
@@ -44,6 +47,15 @@ Modelling choices:
   which gets the full matrices including the neutral as a LineCode with Kron=yes, so OpenDSS reduces the neutral itself
 - loads: every PGM load (also a sym_load) becomes single-phase wye loads with kV = u_rated / sqrt(3) exactly;
   const_pq -> model=1, const_y -> model=2, const_i -> model=5; a generator is a load with negative power
+- delta loads (connection = delta, M7): a 1-phase Load with conn=delta between the two phases of each non-zero entry
+  (bus1=n.1.2, n.2.3 and n.3.1 for ab, bc and ca), or one native 3-phase conn=delta Load (bus1=n.1.2.3, kW and kvar
+  the total of three equal entries); kV is the rated branch voltage, which PGM uses as U_delta,nom (decision D29):
+  u_rated, or 2 u_rated / sqrt(3) (480 V) at a split-phase node (the to nodes of centre-tapped windings, spread along
+  lines without phase c, as PGM does). After the solve the total power of every delta Load element must equal
+  sum_k S_k (|V_p - V_q| / kV)^n to 1e-9 relative (check_delta_load_bases, the decisive check of the kV base, of the
+  scaling of model 5 and 2 and of the 3-phase split). In the delta cases (load_output) the reference also has the
+  asym_load and asym_gen outputs: p, q and i per phase are the sums per node of the terminal powers and currents of
+  the Load elements of a load (negated for a generator), which are the phase quantities PGM reports (decision D30)
 - a branch side with status 0 is connected to its own dummy bus in OpenDSS (the open-end pi model); PGM reports
   the isolated node and the open side as 0, so the reference writes 0 for them as well
 - single-phase transformers: a 1-phase, 2-winding wye-wye Transformer whose windings are on the winding phases
@@ -205,15 +217,26 @@ class Line:
         return result
 
 
+# the phases (OpenDSS nodes) of the delta entries ab, bc and ca
+DELTA_BRANCHES = ((1, 2), (2, 3), (3, 1))
+DELTA_NAMES = ("ab", "bc", "ca")
+
+
 @dataclass
 class Load:
     id: int
     node: int
     kind: str  # asym_load, asym_gen, sym_load
     type: str
-    p: list  # per phase (W) for asym, total for sym
+    p: list  # per phase (W) for asym, total for sym; for a delta connection the ab, bc and ca entries
     q: list
     status: int = 1
+    connection: str = "wye"  # "wye" or "delta" (asym_load and asym_gen only)
+    # a delta load with three equal entries as one native 3-phase OpenDSS delta load (instead of 1-phase loads)
+    dss_three_phase: bool = False
+
+    def delta(self):
+        return self.connection == "delta"
 
     def pgm(self):
         result = {"id": self.id, "node": self.node, "status": self.status, "type": LOAD_TYPE[self.type]}
@@ -223,12 +246,22 @@ class Load:
         else:
             result["p_specified"] = list(self.p)
             result["q_specified"] = list(self.q)
+        if self.delta():
+            assert self.kind != "sym_load", "a delta connection is only supported for asym_load and asym_gen"
+            result["connection"] = 1
         return result
 
     def per_phase(self):
         """injection-free per-phase consumption (W, var) as seen by OpenDSS"""
+        assert not self.delta()
         if self.kind == "sym_load":
             return [self.p / 3.0] * 3, [self.q / 3.0] * 3
+        sign = -1.0 if self.kind == "asym_gen" else 1.0
+        return [sign * x for x in self.p], [sign * x for x in self.q]
+
+    def per_branch(self):
+        """injection-free consumption (W, var) of the delta entries ab, bc and ca as seen by OpenDSS"""
+        assert self.delta()
         sign = -1.0 if self.kind == "asym_gen" else 1.0
         return [sign * x for x in self.p], [sign * x for x in self.q]
 
@@ -543,6 +576,8 @@ class Case:
     # u_rated per node where it differs from u_rated (the source node always has u_rated)
     node_u_rated: dict[int, float] = field(default_factory=dict)
     transformers: list = field(default_factory=list)
+    # write the asym_load / asym_gen outputs (p, q, i per phase) to the reference as well
+    load_output: bool = False
 
     def u_node(self, node):
         return self.node_u_rated.get(node, self.u_rated)
@@ -616,6 +651,74 @@ def source_z(case: Case):
     return complex(r1, x1), complex(r1, x1) * case.z01_ratio
 
 
+def split_phase_nodes(case: Case):
+    """the split-phase nodes, as PGM finds them (decision D25): the to nodes of the connected centre-tapped windings,
+    spread along the connected lines without phase c (a node with phase c is never split-phase)"""
+    split = {t.to_node for t in case.transformers if t.center_tapped() and t.from_status and t.to_status}
+    changed = True
+    while changed:
+        changed = False
+        for line in case.lines:
+            if "c" in line.phases or not (line.from_status and line.to_status):
+                continue
+            for a, b in ((line.from_node, line.to_node), (line.to_node, line.from_node)):
+                if a in split and b not in split:
+                    split.add(b)
+                    changed = True
+    return split
+
+
+def delta_kv(case: Case, node):
+    """the OpenDSS kV of a delta load (the rated branch voltage, which PGM uses as U_delta,nom, decision D29):
+    u_rated at a three-phase-pattern node and 2 u_rated / sqrt(3) (480 V on 240-0-240 V) at a split-phase node"""
+    factor = 2.0 if node in split_phase_nodes(case) else math.sqrt(3.0)
+    return factor * case.u_node(node) / math.sqrt(3.0) / 1e3
+
+
+def dss_load_elements(case: Case, load: Load):
+    """the OpenDSS Load elements of an active load, as (name, definition, branches); all names start with ld{id}.
+    A wye load is 1-phase wye loads per phase with kV = u_rated / sqrt(3); a delta load is a 1-phase conn=delta load
+    per non-zero entry (bus1 = n.p.q, kV = the branch voltage) or, with dss_three_phase, one native 3-phase conn=delta
+    load with the total power. branches lists (p, q, S in VA) per delta entry of the element (for the base check)."""
+    if not load.status:
+        return []
+    model = DSS_LOAD_MODEL[load.type]
+    elements: list[tuple[str, str, list[tuple[int, int, complex]] | None]] = []
+    if not load.delta():
+        kv_phase = case.u_node(load.node) / math.sqrt(3.0) / 1e3
+        p, q = load.per_phase()
+        for k in range(3):
+            if p[k] == 0.0 and q[k] == 0.0:
+                continue
+            definition = (
+                f"bus1=n{load.node}.{k + 1} phases=1 conn=wye model={model} kV={kv_phase!r} kW={p[k] / 1e3!r}"
+                f" kvar={q[k] / 1e3!r} vminpu=0.1 vmaxpu=2"
+            )
+            elements.append((f"ld{load.id}_{'abc'[k]}", definition, None))
+        return elements
+    kv = delta_kv(case, load.node)
+    p, q = load.per_branch()
+    if load.dss_three_phase:
+        assert p[0] == p[1] == p[2], "a native 3-phase delta load has equal entries"
+        assert q[0] == q[1] == q[2], "a native 3-phase delta load has equal entries"
+        assert load.node not in split_phase_nodes(case)
+        definition = (
+            f"bus1=n{load.node}.1.2.3 phases=3 conn=delta model={model} kV={kv!r} kW={3.0 * p[0] / 1e3!r}"
+            f" kvar={3.0 * q[0] / 1e3!r} vminpu=0.1 vmaxpu=2"
+        )
+        branches = [(a, b, complex(p[k], q[k])) for k, (a, b) in enumerate(DELTA_BRANCHES)]
+        return [(f"ld{load.id}", definition, branches)]
+    for k, (a, b) in enumerate(DELTA_BRANCHES):
+        if p[k] == 0.0 and q[k] == 0.0:
+            continue
+        definition = (
+            f"bus1=n{load.node}.{a}.{b} phases=1 conn=delta model={model} kV={kv!r} kW={p[k] / 1e3!r}"
+            f" kvar={q[k] / 1e3!r} vminpu=0.1 vmaxpu=2"
+        )
+        elements.append((f"ld{load.id}_{DELTA_NAMES[k]}", definition, [(a, b, complex(p[k], q[k]))]))
+    return elements
+
+
 def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: bool, bridge_scale=1.0):
     z1, z0 = source_z(case)
     if fault is not None:
@@ -667,18 +770,7 @@ def dss_script(case: Case, fault: Fault | None, voltage_pu: float, with_loads: b
         lines += transformer.dss_lines(case.u_node(transformer.from_node), case.u_node(transformer.to_node))
     if with_loads:
         for load in case.loads:
-            if not load.status:
-                continue
-            kv_phase = case.u_node(load.node) / math.sqrt(3.0) / 1e3
-            p, q = load.per_phase()
-            for k in range(3):
-                if p[k] == 0.0 and q[k] == 0.0:
-                    continue
-                lines.append(
-                    f"New Load.ld{load.id}_{'abc'[k]} bus1=n{load.node}.{k + 1} phases=1 conn=wye"
-                    f" model={DSS_LOAD_MODEL[load.type]} kV={kv_phase!r} kW={p[k] / 1e3!r} kvar={q[k] / 1e3!r}"
-                    " vminpu=0.1 vmaxpu=2"
-                )
+            lines += [f"New Load.{name} {definition}" for name, definition, _ in dss_load_elements(case, load)]
     if fault is not None:
         lines += [f"New Fault.{name} {definition}" for name, definition in fault.dss_elements(bridge_scale)]
     bases = ", ".join(repr(u / 1e3) for u in sorted({case.u_node(n) for n in case.nodes}, reverse=True))
@@ -718,6 +810,44 @@ def check_opendss_kron_lines(case: Case):
         dev = np.max(np.abs(r + 1j * x - expected))
         assert dev < 1e-12 * np.max(np.abs(expected)), f"OpenDSS Kron differs from numpy for line {line.id}: {dev}"
         print(f"  OpenDSS-reduced line {line.id}: {n} phases, matches numpy Kron (max dev {dev:.1e} ohm)")
+
+
+def bus_phasors(node):
+    """complex voltages (V) of the phase nodes 1 to 3 of a bus, by node number"""
+    dss.Circuit.SetActiveBus(f"n{node}")
+    raw = np.array(dss.Bus.Voltages()).reshape(-1, 2)
+    return {number: complex(*pair) for number, pair in zip(dss.Bus.Nodes(), raw) if 1 <= number <= 3}
+
+
+def check_delta_load_bases(case: Case):
+    """the decisive check of the OpenDSS delta-load conventions, after the solve: the total power of every delta Load
+    element (the sum of CktElement.Powers over its conductors) equals sum_k S_k (|V_p - V_q| / kV)^n with the OpenDSS
+    voltages, S_k the entry, kV the branch voltage of the element and n = 0, 1, 2 for model 1, 5, 2, to 1e-9 relative.
+    This proves that the kV of a delta load (1-phase and native 3-phase) is the branch voltage, that model 5 and 2
+    scale with the branch voltage as PGM does (D29), and that a native 3-phase delta load puts a third of kW and kvar
+    on each branch"""
+    exponent = {"const_pq": 0, "const_i": 1, "const_y": 2}
+    worst = 0.0
+    n_elements = 0
+    for load in case.loads:
+        if not load.delta():
+            continue
+        kv = delta_kv(case, load.node)
+        v = bus_phasors(load.node)
+        for name, _, branches in dss_load_elements(case, load):
+            dss.Circuit.SetActiveElement(f"Load.{name}")
+            raw = np.array(dss.CktElement.Powers()).reshape(-1, 2)
+            total = complex(*raw.sum(axis=0)) * 1e3
+            expected = sum(s * (abs(v[a] - v[b]) / (kv * 1e3)) ** exponent[load.type] for a, b, s in branches)
+            dev = abs(total - expected) / abs(expected)
+            assert dev < 1e-9, f"OpenDSS delta load {name}: {total} VA instead of {expected} VA ({dev:.1e} relative)"
+            worst = max(worst, dev)
+            n_elements += 1
+    if n_elements:
+        print(
+            f"  delta load bases: {n_elements} OpenDSS delta loads agree with the branch-voltage model"
+            f" (max dev {worst:.1e} relative)"
+        )
 
 
 def check_fault_bridge(case: Case, fault: Fault, i_f):
@@ -953,7 +1083,35 @@ def pf_reference(case: Case):
     result = {"node": nodes, "asym_line": lines}
     if case.transformers:
         result["single_phase_transformer"] = [transformer_pf_reference(t) for t in case.transformers]
+    if case.load_output:
+        assert not isolated, "the load reference assumes energised loads"
+        for kind in ("asym_load", "asym_gen"):
+            rows = [load_pf_reference(case, load) for load in case.loads if load.kind == kind]
+            if rows:
+                result[kind] = rows
+        assert all(load.kind != "sym_load" for load in case.loads), "no sym_load reference"
     return result
+
+
+def load_pf_reference(case: Case, load: Load):
+    """per-phase terminal values of a load or generator: the sums per node over its OpenDSS Load elements of the
+    powers (p, q; negated for a generator) and of the currents (i = the magnitude of the sum); for a delta load these
+    are the phase quantities that PGM reports (decision D30)"""
+    s = np.zeros(3, dtype=complex)
+    current = np.zeros(3, dtype=complex)
+    for name, _, _ in dss_load_elements(case, load):
+        dss.Circuit.SetActiveElement(f"Load.{name}")
+        n_cond = dss.CktElement.NumConductors()
+        s += terminal_values(f"Load.{name}", dss.CktElement.Powers, n_cond)[0]
+        current += terminal_values(f"Load.{name}", dss.CktElement.Currents, n_cond)[0]
+    sign = -1.0 if load.kind == "asym_gen" else 1.0
+    s = sign * s * 1e3
+    return {
+        "id": load.id,
+        "p": [float(v.real) for v in s],
+        "q": [float(v.imag) for v in s],
+        "i": [float(abs(v)) for v in current],
+    }
 
 
 def transformer_pf_reference(transformer: Transformer1P):
@@ -1168,6 +1326,7 @@ def generate(case: Case, root: Path):
     if case.calculation == "power_flow":
         script = dss_script(case, None, 1.0, with_loads=True)
         run_dss(script, case)
+        check_delta_load_bases(case)
         for transformer in case.transformers:
             if transformer.center_tapped():
                 check_electrodes(transformer)
@@ -1460,6 +1619,181 @@ def split_phase_short_circuit_case():
     )
 
 
+DELTA_PATH = "power_flow/asym-load-delta/"
+
+
+def delta_three_phase_case(path, all_const_y, params):
+    """11 kV, abc only: delta loads of every type (a native 3-phase OpenDSS delta load and 1-phase delta loads), a
+    wye load and a delta generator"""
+
+    def t(load_type):
+        return "const_y" if all_const_y else load_type
+
+    return Case(
+        path=path,
+        u_rated=11e3,
+        nodes=[1, 2, 3],
+        lines=[Line(101, 1, 2, "abc", 2.0), Line(102, 2, 3, "abc", 1.5, neutral=True, c_form="c0c1")],
+        loads=[
+            Load(301, 2, "asym_load", t("const_pq"), [150e3] * 3, [50e3] * 3, connection="delta", dss_three_phase=True),
+            Load(302, 3, "asym_load", t("const_i"), [120e3, 0.0, 80e3], [40e3, 0.0, 20e3], connection="delta"),
+            Load(303, 3, "asym_load", "const_y", [0.0, 100e3, 60e3], [0.0, 30e3, 15e3], connection="delta"),
+            Load(304, 3, "asym_load", t("const_pq"), [60e3, 30e3, 0.0], [20e3, 10e3, 0.0]),
+            Load(401, 2, "asym_gen", t("const_pq"), [0.0, 50e3, 0.0], [0.0, 10e3, 0.0], connection="delta"),
+        ],
+        params=params,
+        load_output=True,
+    )
+
+
+def delta_two_phase_case(path, all_const_y, params):
+    """11 kV abc -> ab laterals (with and without neutral) and an ac lateral: phase-to-phase loads on two-phase nodes
+    (ab and ca entries), a wye load on a two-phase node and a delta load on the abc node"""
+
+    def t(load_type):
+        return "const_y" if all_const_y else load_type
+
+    return Case(
+        path=path,
+        u_rated=11e3,
+        nodes=[1, 2, 3, 4, 5],
+        lines=[
+            Line(101, 1, 2, "abc", 2.0),
+            Line(102, 2, 3, "ab", 2.0, neutral=True),
+            Line(103, 3, 4, "ab", 1.0),
+            Line(104, 2, 5, "ac", 1.5),
+        ],
+        loads=[
+            Load(301, 3, "asym_load", t("const_pq"), [80e3, 0.0, 0.0], [25e3, 0.0, 0.0], connection="delta"),
+            Load(302, 4, "asym_load", t("const_i"), [50e3, 0.0, 0.0], [15e3, 0.0, 0.0], connection="delta"),
+            Load(303, 4, "asym_load", "const_y", [20e3, 10e3, 0.0], [5e3, 3e3, 0.0]),
+            Load(304, 5, "asym_load", t("const_pq"), [0.0, 0.0, 60e3], [0.0, 0.0, 20e3], connection="delta"),
+            Load(305, 2, "asym_load", "const_y", [40e3, 30e3, 20e3], [10e3, 8e3, 5e3], connection="delta"),
+        ],
+        params=params,
+        load_output=True,
+    )
+
+
+def delta_split_phase_case(path, all_const_y, params):
+    """the split-phase network of M6 with 480 V (leg-to-leg) delta loads added at both split-phase nodes and at the
+    end of the service line"""
+
+    def t(load_type):
+        return "const_y" if all_const_y else load_type
+
+    case = split_phase_case(path, all_const_y, params)
+    return replace(
+        case,
+        loads=[
+            *case.loads,
+            Load(307, 5, "asym_load", t("const_pq"), [4e3, 0.0, 0.0], [1e3, 0.0, 0.0], connection="delta"),
+            Load(308, 7, "asym_load", t("const_i"), [2e3, 0.0, 0.0], [0.5e3, 0.0, 0.0], connection="delta"),
+            Load(309, 6, "asym_load", "const_y", [5e3, 0.0, 0.0], [1e3, 0.0, 0.0], connection="delta"),
+        ],
+        load_output=True,
+    )
+
+
+def raises_params(methods, raises, reason):
+    return {
+        "calculation_method": methods,
+        "rtol": 1e-6,
+        "atol": 1e-4,
+        "experimental_features": "enabled",
+        "raises": {"raises": raises, "reason": reason},
+    }
+
+
+def small_delta_case(path, raises_only, params):
+    """a small abc network with a delta load"""
+    return Case(
+        path=path,
+        u_rated=10e3,
+        nodes=[1, 2],
+        lines=[Line(101, 1, 2, "abc", 5.0)],
+        loads=[Load(301, 2, "asym_load", "const_pq", [200e3, 0.0, 0.0], [50e3, 0.0, 0.0], connection="delta")],
+        params=params,
+        raises_only=raises_only,
+    )
+
+
+def delta_cases():
+    """the delta-load cases (M7); the tolerances follow the rule above: newton_raphson and the linear methods agree to
+    about 3.4e-10 relative, two-phase and split-phase are limited by the iterative_current convergence, and
+    two-phase-linear by the reactive power of the lines, which nearly cancels (6e-6 var on a few kvar)"""
+    return [
+        delta_three_phase_case(
+            DELTA_PATH + "three-phase",
+            all_const_y=False,
+            params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8),
+        ),
+        delta_three_phase_case(
+            DELTA_PATH + "three-phase-linear",
+            all_const_y=True,
+            params=pf_params(["linear", "linear_current"], 1e-8, 1e-8),
+        ),
+        delta_two_phase_case(
+            DELTA_PATH + "two-phase",
+            all_const_y=False,
+            params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+        ),
+        delta_two_phase_case(
+            DELTA_PATH + "two-phase-linear",
+            all_const_y=True,
+            params=pf_params(["linear", "linear_current"], 1e-7, 1e-8),
+        ),
+        delta_split_phase_case(
+            DELTA_PATH + "split-phase",
+            all_const_y=False,
+            params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+        ),
+        delta_split_phase_case(
+            DELTA_PATH + "split-phase-flat-start",
+            all_const_y=False,
+            params=dict(pf_params("newton_raphson", 1e-8, 1e-8), calculation_initialization="flat"),
+        ),
+        delta_split_phase_case(
+            DELTA_PATH + "split-phase-linear",
+            all_const_y=True,
+            params=pf_params(["linear", "linear_current"], 1e-8, 1e-8),
+        ),
+        small_delta_case(
+            DELTA_PATH + "symmetric-not-supported",
+            ("sym_output", "ReducedPhaseNotSupported"),
+            raises_params(
+                "newton_raphson",
+                "ReducedPhaseNotSupported",
+                "Symmetric power flow is not supported in a network with delta-connected loads or generators.",
+            ),
+        ),
+        Case(
+            path=DELTA_PATH + "delta-on-absent-phase",
+            u_rated=10e3,
+            nodes=[1, 2, 3],
+            lines=[Line(101, 1, 2, "abc", 2.0), Line(102, 2, 3, "ab", 3.0)],
+            loads=[Load(301, 3, "asym_load", "const_pq", [0.0, 50e3, 0.0], [0.0, 10e3, 0.0], connection="delta")],
+            params=raises_params(
+                "newton_raphson",
+                "LoadGenOnAbsentPhase",
+                "Load or generator 301 has a non-zero specified power on phases (c) that are not present at its"
+                " node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and"
+                " b, bc needs b and c, ca needs c and a.",
+            ),
+            raises_only=("asym_output", "LoadGenOnAbsentPhase"),
+        ),
+        small_delta_case(
+            "state_estimation/asym-load-delta-not-supported",
+            ("asym_output", "ReducedPhaseNotSupported"),
+            raises_params(
+                ["iterative_linear", "newton_raphson"],
+                "ReducedPhaseNotSupported",
+                "State estimation is not supported in a network with delta-connected loads or generators.",
+            ),
+        ),
+    ]
+
+
 def small_reduced_case(path, raises_only, params):
     return Case(
         path=path,
@@ -1624,6 +1958,7 @@ CASES = [
         },
         raises_only=("asym_output", "MissingPhaseForWinding"),
     ),
+    *delta_cases(),
 ]
 
 
