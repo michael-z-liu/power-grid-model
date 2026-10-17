@@ -88,6 +88,7 @@ user_manual/data-model
 user_manual/dataset-terminology
 user_manual/components
 user_manual/calculations
+user_manual/reduced-phase-networks
 user_manual/non-native-components
 user_manual/performance-guide
 user_manual/data-validator

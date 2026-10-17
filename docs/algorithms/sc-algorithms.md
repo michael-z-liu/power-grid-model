@@ -65,6 +65,18 @@ with the following possible combinations of the {py:class}`associated phases <po
 - Two phase: `ab`, `bc`, `ac`
 - Two phase to ground: `ab`, `bc`, `ac`
 
+```{note}
+At a node without all three phases, for example a single-wire earth return (SWER) or a split-phase node, the phases of
+a fault must all be present at the node; otherwise the calculation raises `InvalidShortCircuitPhaseOrType`.
+The default phases of a fault type (`a` for single phase to ground, `bc` for the two-phase faults) are not adapted to
+the node, so set `fault_phase` explicitly where they are not present.
+A short circuit in a network with one- or two-phase components is always calculated asymmetrically.
+The voltage factor `c` still follows the source node, also for a fault at a lower voltage level behind single-phase
+transformers.
+See [Fault](../user_manual/components.md#fault) and
+[Reduced-phase networks](../user_manual/reduced-phase-networks.md).
+```
+
 ## Prefault voltages
 
 IEC 60909 prescribes use of rated voltage of the fault node on the Thevenin equivalent of the grid impedance for

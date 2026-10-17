@@ -56,6 +56,14 @@ Physically a node can be a busbar, a joint, or other similar component.
 |-----------|-----------|----------|-------------------------|:--------:|:--------:|:------------:|
 | `u_rated` | `double`  | volt (V) | rated line-line voltage | &#10004; | &#10060; |    `> 0`     |
 
+```{note}
+For a node without all three phases, for example a single-wire earth return (SWER) node or a 240-0-240 V split-phase
+node, `u_rated` is still $\sqrt3$ times the nominal phase-to-earth voltage: 22 kV for a 12.7 kV SWER node and
+$240\sqrt3 = 415.7$ V for a split-phase node with 240 V from each leg to the centre tap.
+The phases of a node are derived from the lines and transformer windings connected to it.
+See [Reduced-phase networks](reduced-phase-networks.md).
+```
+
 #### Steady state output
 
 | name      | data type         | unit                       | description                                                                                     |
@@ -319,8 +327,9 @@ and earth. The to-side winding can also be centre-tapped, for a 240-0-240 V spli
 
 ```{warning}
 The single-phase transformer is an experimental feature. A calculation on a model with a `single_phase_transformer`
-requires experimental features to be enabled. The Python data validation (`validate_input_data`) does not support
-it yet: it does not check its attributes, and it may report nodes that are only connected through it as invalid.
+requires experimental features to be enabled (see [Reduced-phase networks](reduced-phase-networks.md)). The Python
+data validation (`validate_input_data`) checks its attributes; the rules that need the phases of the nodes are checked
+by the calculation.
 ```
 
 #### Input
@@ -340,10 +349,10 @@ it yet: it does not check its attributes, and it may report nodes that are only 
 | `to_connection`    | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the to-side winding                                                       |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`, `ab_center_tapped` |
 | `clock`            | `int8_t`                                                                    | -                | relative polarity: `6` reverses the to-side winding                                 |           &#10060; default `0`           | &#10060; |       `0` or `6` (modulo 12)               |
 | `tap_side`         | {py:class}`BranchSide <power_grid_model.enum.BranchSide>`                   | -                | side of tap changer                                                                 |       &#10060; default `from_side`       | &#10060; |                                            |
-| `tap_pos`          | `int8_t`                                                                    | -                | current position of tap changer                                                     |        &#10060; default `tap_nom`        | &#10004; |                                            |
+| `tap_pos`          | `int8_t`                                                                    | -                | current position of tap changer                                                     |        &#10060; default `tap_nom`        | &#10004; | within the provided limits (see **Taps** below) |
 | `tap_min`          | `int8_t`                                                                    | -                | position of tap changer at minimum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
 | `tap_max`          | `int8_t`                                                                    | -                | position of tap changer at maximum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
-| `tap_nom`          | `int8_t`                                                                    | -                | nominal position of tap changer                                                     |           &#10060; default `0`           | &#10060; |                                            |
+| `tap_nom`          | `int8_t`                                                                    | -                | nominal position of tap changer                                                     |           &#10060; default `0`           | &#10060; | between `tap_min` and `tap_max` if both are provided |
 | `tap_size`         | `double`                                                                    | volt (V)         | size of each tap of the tap changer                                                 |           &#10060; default `0`           | &#10060; |                   `>= 0`                   |
 | `uk_min`           | `double`                                                                    | -                | relative short circuit voltage at minimum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_min / sn` and `> 0` and `< 1`    |
 | `uk_max`           | `double`                                                                    | -                | relative short circuit voltage at maximum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_max / sn` and `> 0` and `< 1`    |
@@ -363,7 +372,9 @@ it yet: it does not check its attributes, and it may report nodes that are only 
   `ab` winding, 12.7 kV for an `a` SWER winding and 240 V for an `a` low-voltage winding. The `u_rated` of every node
   stays $\sqrt3$ × the phase-to-earth voltage (22 kV for a 12.7 kV SWER node, 415 V for a 240 V node), so the
   nominal winding voltage implied by a node is $u_{\text{rated}} / \sqrt3$ for a phase-to-earth winding and
-  $u_{\text{rated}}$ for a phase-to-phase winding. Other values give an off-nominal ratio; this is not checked.
+  $u_{\text{rated}}$ for a phase-to-phase winding. Other values give an off-nominal ratio. `validate_input_data` emits
+  a `ValidationWarning` when a winding voltage differs by more than 20% from the nominal winding voltage implied by
+  its node, for example for `u1` = 22 kV on an `a` winding at a 22 kV node; the data stays valid.
 * **Earthing.** The earthed end of a phase-to-earth winding is connected to earth through `r_grounding_<side>` +
   j `x_grounding_<side>`; not provided means solidly earthed. For a SWER isolating transformer this is the earth
   electrode, which carries the entire SWER load current. A phase-to-phase winding has no earthed terminal, so its
@@ -430,15 +441,17 @@ the to side; on the from side it raises `InvalidPhaseConnection`. The from-side 
   $2 u_{k,\text{half}}$. Each is optional: not provided, it follows the split of Kersting, $0.5R + j0.8X$ for the
   from-side winding and $R + j0.4X$ for each half (with $R + jX$ from `uk` and `pk`), which gives `pk_half` $=
   0.375\,p_k$ and `uk_half` $= \tfrac12 |1.5R + j1.2X|$ with $R = p_k / s_n$. `uk_half` must be larger than `uk / 2`
-  (at `uk / 2` the impedance of each half branch is zero and the model is singular), and `pk_half` must be
-  between `pk / 4` and `pk / 2`; this is not checked yet. On a winding that is not centre-tapped, `uk_half` and
-  `pk_half` must be left empty (`InvalidPhaseConnection`).
+  (at `uk / 2` the impedance of each half branch is zero and the model is singular), `pk_half` must be between
+  `pk / 4` and `pk / 2`, and `uk_half` must be at least `pk_half / (sn / 2)`. `validate_input_data` checks these
+  ranges, using the default for a value that is not provided; the calculation does not. On a winding that is not
+  centre-tapped, `uk_half` and `pk_half` must be left empty (`InvalidPhaseConnection`).
 * **Earthing.** The centre tap is solidly earthed, or earthed through `r_grounding_to` + j `x_grounding_to`. A node
   has no neutral conductor, so a wye `asym_load` on phase `a` or `b` of the split-phase node is connected between its
   leg and true earth. With an earthing impedance, the whole out-of-balance load current therefore returns through
   it. That is right for earth faults, but pessimistic for loads with a neutral conductor that is earthed at the
-  customer (MEN). 240 V loads are `asym_load` on phase `a` or `b`; 480 V loads between `a` and `b` are not
-  supported yet.
+  customer (MEN). 240 V loads are `asym_load` on phase `a` or `b`; 480 V loads between `a` and `b` are delta
+  `asym_load` with the **ab** entry (see [Generic Load and Generator](#generic-load-and-generator)), whose power is
+  split about evenly over the two legs in the output.
 * **Loading.** Each half is rated `sn / 2`, so the to side counts twice the apparent power of its more loaded leg:
   $\max(|\sum_p \underline{S}_{\text{from},p}|,\ 2|\underline{S}_{\text{to},a}|,\ 2|\underline{S}_{\text{to},b}|) / s_n$.
   A balanced full load gives 1.0 on both sides, and so does all load on one leg at `sn / 2`.
@@ -529,7 +542,8 @@ $$
 `asym_line` is a [branch](#branch) with specified resistance and reactance per phase.
 A cable can be modelled as `line` or `asym_line`. An `asym_line` can only connect two nodes with the same rated voltage.
 If `i_n` is not provided, `loading` of line will be a `nan` value.
-The `asym_line` denotes a 3 or 4 phase line with phases `a`, `b`, `c` and optionally `n` for neutral.
+The `asym_line` denotes a 3 or 4 phase line with phases `a`, `b`, `c` and optionally `n` for neutral, or, with
+`phases`, a one- or two-phase line (see *One- and two-phase lines* below).
 
 #### Input
 
@@ -555,22 +569,22 @@ The mutual capacitances `c_ba`, `c_ca` and `c_cb` may therefore have any sign.
 | name   | data type | unit       | description                       | required                     |  update  | valid values |
 |--------|-----------|------------|-----------------------------------|------------------------------|:--------:|:------------:|
 | `phases` | {py:class}`PhaseConnection <power_grid_model.enum.PhaseConnection>` | - | Phases with a conductor | &#10060; default `abc` | &#10060; | `abc`, `a`, `b`, `c`, `ab`, `ac`, `bc` |
-| `r_aa` | `double`  | ohm (Ω)    | Series serial resistance aa       | &#10004;                     | &#10060; |    `> 0`     |
-| `r_ba` | `double`  | ohm (Ω)    | Series serial resistance ba       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_bb` | `double`  | ohm (Ω)    | Series serial resistance bb       | &#10004;                     | &#10060; |    `> 0`     |
-| `r_ca` | `double`  | ohm (Ω)    | Series serial resistance ca       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_cb` | `double`  | ohm (Ω)    | Series serial resistance cb       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_cc` | `double`  | ohm (Ω)    | Series serial resistance cc       | &#10004;                     | &#10060; |    `> 0`     |
+| `r_aa` | `double`  | ohm (Ω)    | Series serial resistance aa       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `r_ba` | `double`  | ohm (Ω)    | Series serial resistance ba       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_bb` | `double`  | ohm (Ω)    | Series serial resistance bb       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `r_ca` | `double`  | ohm (Ω)    | Series serial resistance ca       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_cb` | `double`  | ohm (Ω)    | Series serial resistance cb       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_cc` | `double`  | ohm (Ω)    | Series serial resistance cc       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
 | `r_na` | `double`  | ohm (Ω)    | Series serial resistance na       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nb` | `double`  | ohm (Ω)    | Series serial resistance nb       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nc` | `double`  | ohm (Ω)    | Series serial resistance nc       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nn` | `double`  | ohm (Ω)    | Series serial resistance nn       | &#10024; for a neutral phase | &#10060; |    `> 0`     |
-| `x_aa` | `double`  | ohm (Ω)    | Series serial reactance aa        | &#10004;                     | &#10060; |    `> 0`     |
-| `x_ba` | `double`  | ohm (Ω)    | Series serial reactance ba        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_bb` | `double`  | ohm (Ω)    | Series serial reactance bb        | &#10004;                     | &#10060; |    `> 0`     |
-| `x_ca` | `double`  | ohm (Ω)    | Series serial reactance ca        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_cb` | `double`  | ohm (Ω)    | Series serial reactance cb        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_cc` | `double`  | ohm (Ω)    | Series serial reactance cc        | &#10004;                     | &#10060; |    `> 0`     |
+| `x_aa` | `double`  | ohm (Ω)    | Series serial reactance aa        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `x_ba` | `double`  | ohm (Ω)    | Series serial reactance ba        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_bb` | `double`  | ohm (Ω)    | Series serial reactance bb        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `x_ca` | `double`  | ohm (Ω)    | Series serial reactance ca        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_cb` | `double`  | ohm (Ω)    | Series serial reactance cb        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_cc` | `double`  | ohm (Ω)    | Series serial reactance cc        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
 | `x_na` | `double`  | ohm (Ω)    | Series serial reactance na        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nb` | `double`  | ohm (Ω)    | Series serial reactance nb        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nc` | `double`  | ohm (Ω)    | Series serial reactance nc        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
@@ -625,8 +639,8 @@ The table below provides guidance in providing valid input.
 
 ```{warning}
 One- and two-phase lines are an experimental feature. A calculation on a model with an `asym_line` with `phases`
-other than `abc` requires experimental features to be enabled. The Python data validation
-(`validate_input_data`) does not support them yet and reports such lines as invalid.
+other than `abc` requires experimental features to be enabled (see
+[Reduced-phase networks](reduced-phase-networks.md)).
 ```
 
 With `phases` set to a single phase (`a`, `b` or `c`) or two phases (`ab`, `ac` or `bc`), the `asym_line` only has
@@ -636,8 +650,9 @@ includes the earth return.
 * Provide `r`, `x` and `c` values only for the present phases (and for the neutral, if any) and leave the values of
   the absent phases empty. A neutral is present when `r_nn` or `x_nn` is provided; then the entries between the
   neutral and the present phases are required as well. Every value between two present conductors is required
-  (a capacitance of 0 is allowed); a value that refers to an absent phase or a missing neutral is an error
-  (`InvalidPhaseConnection`).
+  (a mutual capacitance of 0 is allowed); a value that refers to an absent phase or a missing neutral is an error.
+  `validate_input_data` reports a `MissingValueError` for a missing value and a `NotApplicableValueError` for a value
+  that does not apply; the construction of the model raises `InvalidPhaseConnection` for both.
 * `c0` and `c1` are only supported with `abc`; use the c matrix otherwise.
 * The phases of each node are derived from the lines connected to it. A conductor must be present at the nodes it
   connects (`DanglingConductor`), and a transformer winding must have all of its phases present at its node
@@ -955,7 +970,8 @@ where $\bar{u}$ is the calculated node voltage.
 ##### Delta (phase-to-phase) connection
 
 ```{note}
-Delta-connected loads and generators are an experimental feature.
+Delta-connected loads and generators are an experimental feature (see
+[Reduced-phase networks](reduced-phase-networks.md)).
 ```
 
 By default, a load/generator is connected phase-to-earth (`connection` is `wye`) and the three entries of `p_specified`
@@ -1034,7 +1050,8 @@ Entries that are zero do not contribute to the calculation.
 
 ##### Limitations of the delta connection
 
-* It is an experimental feature, and needs the experimental features to be enabled in the calculation.
+* It is an experimental feature, and needs the experimental features to be enabled in the calculation (see
+  [Reduced-phase networks](reduced-phase-networks.md)).
 * `delta` is only supported for `asym_load` and `asym_gen`.
   A delta `sym_load` or `sym_gen` raises an {py:class}`InvalidPhaseConnection
   <power_grid_model.errors.InvalidPhaseConnection>` error.
@@ -1043,13 +1060,16 @@ Entries that are zero do not contribute to the calculation.
   {py:class}`ReducedPhaseNotSupported <power_grid_model.errors.ReducedPhaseNotSupported>` error.
 * A `voltage_regulator` cannot regulate a delta-connected load/generator.
 * As for all loads and generators, a short circuit calculation ignores them.
-* The Python validation functions do not yet check the `connection` attribute; this follows with the validation of
-  reduced-phase networks.
+* `validate_input_data` checks `connection`: it must be `wye`, `delta` or not provided, `delta` is only allowed for
+  `asym_load` and `asym_gen`, and a `voltage_regulator` cannot regulate a delta load or generator. Whether the
+  phases of the non-zero delta entries are present at the node is checked by the calculation
+  (`LoadGenOnAbsentPhase`).
 * Compatibility for C API callers: `PGM_create_buffer` returns uninitialised memory. Call `PGM_buffer_set_nan` on
   every input buffer before setting attributes. Otherwise the new `connection` attribute holds garbage: a value other
   than `wye`, `delta` or `na` fails the construction of the model with a `MissingCaseForEnumError`, and a garbage value
   of exactly `delta` (1) would silently make an `asym_load` or `asym_gen` a delta load (which still needs the
-  experimental features to be enabled).
+  experimental features to be enabled). See
+  [C API compatibility](reduced-phase-networks.md#c-api-compatibility).
 
 ### Shunt
 
@@ -1466,8 +1486,8 @@ The supported values of `fault_phase`, as well as its default value, are listed 
 ##### Faults at nodes without all phases
 
 ```{warning}
-Nodes without all phases are an experimental feature (see [Asym Line](#asym-line) and
-[Single-Phase Transformer](#single-phase-transformer)).
+Nodes without all phases are an experimental feature (see [Asym Line](#asym-line),
+[Single-Phase Transformer](#single-phase-transformer) and [Reduced-phase networks](reduced-phase-networks.md)).
 ```
 
 The phases of a fault must all be present at its node. The phases of a node are derived from the lines and

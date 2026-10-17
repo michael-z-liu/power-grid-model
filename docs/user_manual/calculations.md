@@ -249,6 +249,15 @@ For short-circuit calculations, a three-phase `fault_type` is calculated with a 
 Outputs for short circuit calculations always give asymmetric output, independent of the fault type present.
 ```
 
+```{note}
+A network with one- or two-phase components (`asym_line` with `phases`, or `single_phase_transformer`) or with
+delta-connected loads or generators only supports the asymmetric power flow and the short circuit; symmetric power flow
+and state estimation raise `ReducedPhaseNotSupported`.
+In a network with one- or two-phase components the short circuit is always calculated asymmetrically, also when all
+faults are `three_phase`.
+These networks are an experimental feature; see [Reduced-phase networks](./reduced-phase-networks.md).
+```
+
 #### Floating grid handling
 
 In power-grid-model, two different concepts should be distinguished:
