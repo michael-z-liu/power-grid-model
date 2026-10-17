@@ -1348,6 +1348,7 @@ constexpr std::string_view split_phase_unbalanced_loads = R"json(,
 constexpr int fault_type_three_phase = 0;
 constexpr int fault_type_single_phase_to_ground = 1;
 constexpr int fault_type_two_phase = 2;
+constexpr int fault_type_two_phase_to_ground = 3;
 constexpr int fault_phase_abc = 0;
 constexpr int fault_phase_b = 2;
 constexpr int fault_phase_ab = 4;
@@ -1652,7 +1653,38 @@ TEST_CASE("API Model - short circuit fault phases") {
                 },
                 PGM_regular_error,
                 "The short circuit phases (bc) of fault 31 are not all present at its node 3 (node phases: b); this "
-                "short circuit type cannot be applied there; the phases are the default of the fault type"s);
+                "short circuit type cannot be applied there\n"s);
+        }
+    }
+
+    SUBCASE("The hint is only given when an explicit phase can fit the node") {
+        // the message ends directly after "there", so there is no hint
+        SUBCASE("Default three-phase at the a node: no explicit phase can fit") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_three_phase, fault_phase_not_given, 2)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (abc) of fault 31 are not all present at its node 2 (node phases: a); this "
+                "short circuit type cannot be applied there\n"s);
+        }
+        SUBCASE("Default two-phase at the a node: the node has fewer than two phases") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_two_phase, fault_phase_not_given, 2)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (bc) of fault 31 are not all present at its node 2 (node phases: a); this "
+                "short circuit type cannot be applied there\n"s);
+        }
+        SUBCASE("Default two-phase-to-ground at the b node: the node has fewer than two phases") {
+            check_throws_with(
+                [&fault_currents, &single_fault]() {
+                    fault_currents({single_fault(fault_type_two_phase_to_ground, fault_phase_not_given, 3)});
+                },
+                PGM_regular_error,
+                "The short circuit phases (bc) of fault 31 are not all present at its node 3 (node phases: b); this "
+                "short circuit type cannot be applied there\n"s);
         }
     }
 

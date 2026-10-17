@@ -1480,12 +1480,14 @@ transformer windings connected to it. The valid faults are:
   node 4 (node phases: a); this short circuit type cannot be applied there".
 * The default phases (`a` for `single_phase_to_ground`, `bc` for `two_phase` and `two_phase_to_ground`) are not
   adapted to the node. At a node without these phases, set `fault_phase` explicitly; the error message says when the
-  phases are the default of the fault type. For a SWER network fed by a `single_phase_transformer`, a
+  phases are the default of the fault type and an explicit phase can fit the node (not for a `three_phase` fault,
+  or a two-phase fault at a node with fewer than two phases). For a SWER network fed by a `single_phase_transformer`, a
   `to_connection` of `a` makes the default single-phase fault valid.
 * A fault with `status` 0 and a fault at an isolated or de-energised node are not checked; their output is 0.
 * In a batch calculation, the check runs for each scenario, so the update data may fix the base input.
-* The rule that all faults in one calculation have the same `fault_type` and `fault_phase` still applies. A fault on
-  a SWER line on phase `a` and a fault on a lateral on phase `b` therefore cannot be in one scenario.
+* The rule that all faults in one connected network (per math model) have the same `fault_type` and `fault_phase`
+  still applies. A fault on a SWER line on phase `a` and a fault on a lateral on phase `b` therefore cannot be in
+  the same connected network.
 * The voltage factor $c$ is taken from the `u_rated` of the source node, not from the fault location. For a fault on
   a 240 V node fed from a 22 kV source, $c$ follows the 22 kV level.
 

@@ -546,7 +546,9 @@ Taken in M8 for short-circuit phase validity (decided by recommendation under Mi
   `InvalidShortCircuitPhases(fault_id, node_id, fault_phases, node_phases, default_phases)` gives "The short circuit
   phases (b) of fault 601 are not all present at its node 4 (node phases: a); this short circuit type cannot be
   applied there", with the tail "; the phases are the default of the fault type, so set fault_phase explicitly" when
-  `fault_phase` was not given or is `default_value` (`Fault::has_default_phase()`). No new class and no Python
+  `fault_phase` was not given or is `default_value` (`Fault::has_default_phase()`) and some explicit phase of that
+  fault type fits the node: `single_phase_to_ground` needs at least one node phase, `two_phase` and
+  `two_phase_to_ground` at least two, `three_phase` never (it always needs `abc`, so a hint would mislead). No new class and no Python
   change: the message keeps "short circuit type", so the Python mapping and the C++ validation regex still map it
   to `InvalidShortCircuitPhaseOrType`, as in M2 and M6. The two existing messages are unchanged.
 * **D36. Default phases are not adapted to the node.** `default_value` keeps resolving statically
@@ -563,6 +565,10 @@ Taken in M8 for short-circuit phase validity (decided by recommendation under Mi
   and fails on its own, with the fault ID. During a calculation the class is only thrown by D34 and the solver
   backstop (`Fault::check_sanity` throws it at construction and update, which the cache run does not do).
   `InvalidShortCircuitPhaseOrType` for mixed types in the base input keeps its existing, unswallowed behaviour.
+  Note: when the base input has mixed fault types and also a fault on an absent phase, the model check
+  (`InvalidShortCircuitPhaseOrType` for the mixed types) runs first and the cache run swallows the phase error. Each
+  scenario then fails on its own with `InvalidShortCircuitPhaseOrType`; with mixed types only, the whole batch still
+  fails at once.
 
 ## Component models (phase domain)
 

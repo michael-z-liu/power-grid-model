@@ -221,6 +221,21 @@ inline void check_no_shunt_at_reduced_phase_bus(main_model_state_c auto const& s
     }
 }
 
+// whether setting fault_phase explicitly can make a fault of the given type valid at a node with the given phases
+inline bool explicit_fault_phase_can_fit(FaultType fault_type, PhaseMask node_phases) {
+    Idx const n_node_phases = static_cast<Idx>(node_phases.has(0)) + static_cast<Idx>(node_phases.has(1)) +
+                              static_cast<Idx>(node_phases.has(2));
+    switch (fault_type) {
+    case FaultType::single_phase_to_ground:
+        return n_node_phases >= 1;
+    case FaultType::two_phase:
+    case FaultType::two_phase_to_ground:
+        return n_node_phases >= 2;
+    default: // three_phase: always needs all phases
+        return false;
+    }
+}
+
 // a fault may only involve phases that are present at its node; otherwise it would silently give a zero fault current;
 // a fault with status off and a fault at an isolated node are skipped (the short-circuit solver keeps an ID-less check
 // as a backstop)
@@ -241,8 +256,9 @@ inline void check_fault_phases_present(main_model_state_c auto const& state) {
         PhaseMask const node_phases = topo.bus_phase(math_idx.pos);
         if (PhaseMask const fault_phases = fault_phase_mask(fault.get_fault_phase());
             !node_phases.contains(fault_phases)) {
-            throw InvalidShortCircuitPhases{fault.id(), fault.get_fault_object(), phase_letters(fault_phases),
-                                            phase_letters(node_phases), fault.has_default_phase()};
+            throw InvalidShortCircuitPhases{
+                fault.id(), fault.get_fault_object(), phase_letters(fault_phases), phase_letters(node_phases),
+                fault.has_default_phase() && explicit_fault_phase_can_fit(fault.get_fault_type(), node_phases)};
         }
     }
 }
