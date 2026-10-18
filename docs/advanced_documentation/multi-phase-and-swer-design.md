@@ -8,7 +8,7 @@ SPDX-License-Identifier: MPL-2.0
 
 ```{note}
 This is a design and investigation document. It describes what is needed to support one- and two-phase
-components in power flow and short-circuit calculations. Milestones M0 to M10 are implemented. One- and two-phase
+components in power flow and short-circuit calculations. Milestones M0 to M11 are implemented. One- and two-phase
 components and delta loads stay an experimental feature (decisions D9 and D45). For how to use the feature, see
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md).
 ```
@@ -671,7 +671,8 @@ Python validation and documentation (decided by recommendation under Michael's b
   * Graduating a feature is the decision of the maintainers (`terminology.md`: undefined behaviour, no guarantees).
   * Real limitations remain: state estimation, symmetric calculations, sources and voltage regulators on
     reduced-phase buses; the start-value limitation of D25; the iterative-current divergence on a floating common
-    mode; and the topology rules that only C++ checks (D38).
+    mode with only const_pq or const_i loads (const_y loads anchor it since M11, D61); and the topology rules that
+    only C++ checks (D38).
   * **The public Python API has no experimental switch:** `calculate_*` does not accept `experimental_features`, only
     the private `_calculate_*` methods do (the tests use them). Removing the gate is the only way to make the
     feature publicly usable from Python, which is an API decision for upstream.
@@ -756,7 +757,9 @@ reported to him, because it changes the approved plan):
     with a small impedance (down to 1e-3 ohm) amplifies their round-off to an absolute error that no relative tolerance covers; the
     dict `atol` is limited to the power fields. The worst ratio of measured deviation to tolerance is 0.066 and 0.069. `newton_raphson` runs on both networks (3 and 4
     iterations), `iterative_current` on SMR8 only (8 and 12 iterations); on KLO14 it misses the rule (ratio 0.207, on the power of
-    the regulator PLENTY_VLY_RISE).
+    the regulator PLENTY_VLY_RISE). *M11 update:* both methods run on both networks, with iterative current at an error
+    tolerance of 1e-10. SMR8 tightens to rtol 1e-7 (worst ratio 0.050 for Newton-Raphson, 0.044 for iterative current);
+    KLO14 keeps rtol 1e-6 and iterative current gets its own `atol` of 1e-2 on `[pq]_(from|to)` (D62).
   * **Short circuit:** rtol 1e-8, atol 1e-8, and 1e-6 on `i_(from|to)` and its angle. Fault current magnitudes agree to 6.7e-11 and 9.2e-11 relative, and
     branch currents above 1 A to 6.0e-9 relative. Currents up to 10 A agree to 3.6e-8 A absolute: they are small currents through low-impedance branches,
     driven by small voltage differences, which have the same round-off amplification. rtol 1e-9 is not enough (the fault angles agree to 3e-10 only). The worst ratio is 0.033 and 0.030
@@ -781,7 +784,100 @@ reported to him, because it changes the approved plan):
 * **D59. Runtime cost in the debug test run.** In the debug `ctest` (clang with the sanitizers), `Validation test batch - power flow` goes from 98.8 s to
   235 s (the two cases take 79 s and 58 s, of which `iterative_current` on SMR8 is 19 s), and `Validation test batch - short circuit` from 24.8 s to
   70.9 s. The time is spent in the sanitizer build on networks of 3.2k to 3.4k nodes. The merge of D54 cut the power-flow
-  time from 256.5 s, which it took with the impedance floor.
+  time from 256.5 s, which it took with the impedance floor. *M11 update:* the power-flow batch takes 238.6 s with
+  iterative current on every M3 to M9 case and 256.6 s with iterative current on KLO14 as well (about 18 s more; debug
+  build, one run each).
+
+#### Taken in M11
+
+The iterative current method (IC) runs on every power-flow validation case (decided by recommendation under Michael's
+blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed for one method, and Michael is asked to review it):
+
+* **D60. Per-method solver options in the validation parameters.** `extra_params.<method>` may hold `error_tolerance`,
+  `max_iterations`, `rtol` and `atol`, and both harnesses read them (C++ `construct_case`, and
+  `reduced_phase_compare_pgm.py`). A key in `extra_params.<method>` replaces the key of `params.json` as a whole, so
+  a nested object such as a dictionary `atol` is replaced, not merged; the C++ harness did a recursive merge before
+  and now matches Python. The defaults are `error_tolerance` 1e-8 and `max_iterations` 20. An error tolerance for all
+  methods in one case is ruled out, because Newton-Raphson stalls at about 5e-11 on the SMR8 and KLO14 networks and
+  does not converge at 1e-11 or below.
+* **D61. The IC changes are gated on "some bus has an absent phase".** The gate is an asymmetric calculation where
+  `topo.bus_phase(bus)` is not full for at least one bus; `has_reduced_phase` alone is not enough. Three-phase networks,
+  abc networks with delta loads and a network flagged reduced-phase with all buses abc keep the old path, bit for bit.
+  In a gated network:
+  * **const_y loads are in the matrix.** The wye and delta const_y `load_gen`s are added to the diagonal of the
+    prefactorised matrix as constant admittances and skipped on the right-hand side. A const_y load to earth then
+    anchors a floating common mode (the `ab` secondary of an `ab` → `ab` transformer), where the explicit form
+    diverged with a gain of about 1e6 per iteration. The per-bus const_y admittance of the input is cached and the
+    matrix is refactorised when it changes (exact comparison), so a batch does not depend on the scenario order. The
+    M10 networks have no const_y load and never refactorise.
+  * **`linear_current` treats const_y exactly.** It is the first iteration of IC, so the const_y loads are in its matrix as well.
+    No validation case notices: the `-linear` cases are all const_y and run the `linear` method. Before this, `phase-to-phase`
+    `linear_current` returned 7e5 pu garbage.
+  * **NaN of any bus and phase reaches the guard of D64.** `fold_max_deviation` replaces `std::max` and `max_val`
+    in the Newton-Raphson and IC `iterate_unknown`, which could drop a NaN depending on the argument order.
+    Finite deviations are unchanged.
+  * **Measured bit-identity.** A capture of 21506 result keys (144 cases, 74 batch runs) before and after: every
+    Newton-Raphson, linear, symmetric and three-phase key is identical. Only the IC and `linear_current` keys of absent-phase cases with const_y
+    loads differ (IC node voltages by at most 2.5e-10 relative), and `phase-to-phase` IC no longer raises.
+  * **Applying it to all networks** is listed under [Later work](#later-work), because it changes three-phase results.
+* **D62. KLO14 runs IC with an IC-only `atol` of 1e-2 on `[pq]_(from|to)`.** *Taken under blanket approval; Michael
+  is to review it, because it is a looser tolerance than Newton-Raphson has.* Newton-Raphson keeps 1e-3.
+  * **What fails.** At the default IC the worst entry is the 795 W phase-c flow through the 200 kVA regulator PLENTY_VLY_RISE
+    (ratio 0.207 with the 1e-3 `atol`). Raising `error_tolerance` to 1e-10 lowers it to 0.111, no further: the fixed
+    point of IC solves the rounded matrix, and the entry is off by about 2e-4 W of round-off (Newton-Raphson 1.2e-4 W).
+    The failure is round-off at the 10x margin (0.111 against 0.1), not convergence.
+  * **Result.** With `error_tolerance` 1e-10 and the 1e-2 `atol` the worst ratio is 0.018 and 0.016 (9 and 12 iterations);
+    node voltages and the other fields keep the tolerances of Newton-Raphson. The other option is to leave KLO14 Newton-Raphson only.
+  * **C1 was evaluated first and rejected.** C1 is the residual (defect-correction) form of IC: iterate
+    $\Delta U = M^{-1} (I(U) - Y U)$, $U \leftarrow U + \Delta U$, with $M$ the prefactorised matrix and $Y$ the true admittance
+    matrix, so that the fixed point is $I(U) = Y U$ evaluated with the true matrix. It was implemented behind the absent-phase gate (kept as a patch in the
+    local notes, not in the repository) and measured on KLO14 and SMR8:
+    * It did not give a better accuracy. Against OpenDSS KLO14 reached 0.085/0.063 at error tolerance 1e-10 and
+      0.058/0.050 at 1e-9 (passing the rule), but IC against Newton-Raphson was no closer: 0.049/0.030 (1e-10) and
+      0.040/0.065 (1e-9) with C1, against 0.044/0.046 (1e-10) and 0.041/0.046 (1e-14) without it.
+      C1 does not remove a systematic offset; it makes IC limited by the residual round-off, like Newton-Raphson.
+    * It added a stall floor. With C1, IC stalls at a deviation between 3e-11 and 5e-11 on KLO14 and between 2e-11 and 3e-11 on SMR8
+      (error tolerance 1e-11 raises), so 1e-10 leaves a margin of 2x to 3x only, where the form without C1 converges
+      down to 1e-14.
+    * The ratios move with the error tolerance (KLO14 scenario 0: 0.133, 0.058, 0.085 at 1e-8, 1e-9, 1e-10), which is noise.
+      Other cases got worse: SMR8 at 1e-10 from 0.0285 to 0.0475, `swer-chain` at 1e-8/1e-8 from 3.6 to 10.3.
+    * A small-grid check against a long-double reference (a chain with a 1e6x branch) showed the same: the form
+      without C1, with C1 and Newton-Raphson all sit at the floor of machine epsilon times the condition number,
+      so no unit test could separate C1 from the form without it.
+* **D63. The IC cases run with an IC-only `error_tolerance` of 1e-10, and the tolerances are tightened.** The constant
+  `IC_ERROR_TOLERANCE` of `reduced_phase_opendss_cases.py` is passed through `extra_params.iterative_current` in every case that lists IC, and
+  `australian_swer_networks.py` imports it. At the default 1e-8 IC stops on its convergence residual (worst ratio 2.645 on
+  `split-phase-flat-start`); at 1e-10 it agrees with OpenDSS as closely as Newton-Raphson (0.034). It is 9 to 14 iterations,
+  below the limit of 20. Tolerances were then re-measured by the rule of the earlier cases (the smallest round `rtol` with `atol` ≤ 1e-6, then the smallest `atol`, worst ratio < 0.1 over all methods):
+
+  | Case | Before (rtol / atol) | After | Worst ratio |
+  |------|----------------------|-------|-------------|
+  | `asym-line/single-phase-a` | 1e-6 / 1e-8 | 1e-8 / 1e-8 | 0.034 |
+  | `asym-line/two-phase-bc-neutral-opendss-kron` | 1e-7 / 1e-8 | 1e-8 / 1e-8 | 0.034 |
+  | `asym-line/swer-a` | 1e-7 / 1e-7 | 1e-8 / 1e-7 | 0.039 |
+  | `asym-line/reduced-phase-feeder` | 1e-6 / 1e-6 | 1e-8 / 1e-6 | 0.080 |
+  | `single-phase-transformer/swer-chain` | 1e-7 / 1e-5 | 1e-8 / 1e-6 | 0.049 |
+  | `single-phase-transformer/split-phase` | 1e-6 / 1e-8 | 1e-8 / 1e-8 | 0.034 |
+  | `asym-load-delta/split-phase` | 1e-6 / 1e-8 | 1e-8 / 1e-8 | 0.034 |
+  | `asym-load-delta/two-phase` | 1e-6 / 1e-8 | 1e-7 / 1e-8 | 0.033 |
+  | `australian-swer/smr8` | 1e-6 / 1e-8 (1e-3 on the branch powers) | 1e-7 / 1e-8 (same) | 0.050 |
+
+  Every tolerance that is still looser than 1e-8 / 1e-8 is needed by Newton-Raphson too (near-zero line powers, nearly cancelling
+  line reactive power). The `*-linear` cases are unchanged. Only `params.json` and the READMEs changed; a second
+  generation is byte-identical.
+* **D64. A NaN deviation raises `IterationDiverge`.** The loop of Newton-Raphson and IC runs while `max_dev > err_tol`; a
+  NaN fails that comparison, so the loop ended as if it had converged and returned NaN results without an error.
+  `IterativePFSolver::run_power_flow` now throws `IterationDiverge` as soon as the deviation is NaN. Finite results are
+  unchanged (the 21506-key capture is identical). The unit test uses a three-phase bus whose zero sequence is held to
+  earth by 1e-8 only, with an explicit const_y load: the voltages overflow and turn NaN within 100 iterations. A floating
+  mode with only const_pq loads never gives NaN: IC stays finite (deviation about 5e5) and raises at `max_iterations`.
+* **D65. IC keeps ignoring `calculation_initialization`.** IC always starts from the average-source voltage (with the slot patterns
+  of D25); the option applies to Newton-Raphson only. The two `split-phase-flat-start` cases run IC from the
+  average-source start, which equals the flat start there (8 and 9 iterations). Making IC honour the option is listed under [Later work](#later-work).
+* **D66. Scope of IC in the validation cases.** Every reduced-phase, split-phase, delta and real-network power-flow case that lists `newton_raphson` also lists `iterative_current`:
+  `phase-to-phase`, both `split-phase-flat-start` cases, KLO14 and the four expected-error cases (they raise the same exception type and message as
+  Newton-Raphson). The `-linear` cases do not, because with all loads const_y PGM runs the `linear` method for every method name.
+  The `*-linear` cases list `linear_current`, whose const_y treatment in absent-phase networks changed (D61).
 
 ### Decision index
 
@@ -846,6 +942,13 @@ reported to him, because it changes the approved plan):
 | D57 | Licence sidecars `MPL-2.0 AND BSD-3-Clause` | [Taken in M10](#taken-in-m10) |
 | D58 | OpenDSS reference: $Z_1$/$C_1$ of one-phase lines, tolerance 1e-11 | [Taken in M10](#taken-in-m10) |
 | D59 | Runtime cost in the debug test run | [Taken in M10](#taken-in-m10) |
+| D60 | Per-method solver options in the validation parameters | [Taken in M11](#taken-in-m11) |
+| D61 | Iterative current changes gated on a bus with an absent phase | [Taken in M11](#taken-in-m11) |
+| D62 | KLO14 iterative current: IC-only `atol` of 1e-2 on the branch powers (to be reviewed by Michael) | [Taken in M11](#taken-in-m11) |
+| D63 | Iterative current cases run with error tolerance 1e-10 and tighter tolerances | [Taken in M11](#taken-in-m11) |
+| D64 | A NaN deviation raises `IterationDiverge` | [Taken in M11](#taken-in-m11) |
+| D65 | Iterative current ignores `calculation_initialization` | [Taken in M11](#taken-in-m11) |
+| D66 | Scope of iterative current in the validation cases | [Taken in M11](#taken-in-m11) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
@@ -996,9 +1099,13 @@ M5:
   common mode is set by the loads only): its fixed-point iteration ends on the constant-impedance fallback of the
   loads, or diverges. The `phase-to-phase` case therefore uses mostly const_y loads there, with a small const_pq
   part.
-* The iterative current method diverges on such a floating common mode with const_pq loads, because its Y-bus holds
-  the common mode only through the low susceptance. The `phase-to-phase` case therefore runs Newton-Raphson only,
-  and `phase-to-phase-linear` (all const_y) runs the linear methods.
+* The iterative current method diverged on such a floating common mode, because its Y-bus holds the common mode only
+  through the low susceptance and it treated the const_y loads as explicit currents. M5 therefore ran the
+  `phase-to-phase` case with Newton-Raphson only, and `phase-to-phase-linear` (all const_y) with the linear methods.
+  Since M11 the iterative current method puts the const_y loads into its matrix in a network with an absent phase
+  (D61), which anchors the common mode, and `phase-to-phase` runs it too (11 iterations at error tolerance 1e-10).
+  The limitation that remains is a floating common mode with only const_pq or const_i loads and no const_y load
+  (see [Later work](#later-work)).
 * OpenDSS replaces a fault resistance of 0 by 1e-4 Ω, so the reference models a bolted fault with 1e-13 Ω.
 * The earth electrode carries the winding current of the isolating transformer, which the generator checks in
   OpenDSS and the short-circuit case compares with PGM. In a SWER fault it is the phasor sum of the fault current and
@@ -1041,8 +1148,10 @@ measured to the earthed centre tap; slot c is absent. In normal operation $U_b \
 **Validation of the centre-tapped secondary against OpenDSS** (M6). The cases are generated by the same script as
 for M5: power flow `tests/data/power_flow/single-phase-transformer/{split-phase,split-phase-flat-start,split-phase-linear}`
 and short circuit `tests/data/short_circuit/single-phase-transformer-split-phase`. PGM and OpenDSS agree to about
-3.4e-10 relative, as before; all cases pass with rtol 1e-8 and atol 1e-8 with a margin of at least 10x, except
-`split-phase` (rtol 1e-6), which is limited by the convergence criterion of iterative current. Lessons from M6:
+3.4e-10 relative, as before; all cases pass with rtol 1e-8 and atol 1e-8 with a margin of at least 10x. `split-phase`
+needed rtol 1e-6 in M6, because of the convergence criterion of iterative current at its default error tolerance of
+1e-8; since M11 iterative current runs with an error tolerance of 1e-10 (D63) and `split-phase` passes at rtol 1e-8
+(worst ratio 0.034). Lessons from M6:
 
 * **Three-winding mapping.** A centre-tapped transformer is a 1-phase, 3-winding wye-wye-wye `Transformer` with
   `kVs` = $u_1$, $u_2/2$, $u_2/2$ and equal `kVAs` = $s_n$, so that all reactances are on $s_n$. The star
@@ -1144,10 +1253,12 @@ Implemented in M7 (decisions D26 to D33).
 on an abc-only 11 kV network, on two-phase `ab` and `ac` laterals, and on the 240-0-240 V split-phase network of M6
 with 480 V leg-to-leg loads. The references also hold the `asym_load` and `asym_gen` outputs. PGM and OpenDSS agree to
 about 3.4e-10 relative, as before: `three-phase`, `three-phase-linear`, `split-phase-flat-start` and
-`split-phase-linear` pass with rtol 1e-8 and atol 1e-8 with a margin of at least 10x; `two-phase` and `split-phase`
-need rtol 1e-6 (the convergence criterion of iterative current; Newton-Raphson alone passes at 1e-8), and
-`two-phase-linear` rtol 1e-7, because the reactive power of the lines nearly cancels there (6e-6 var on about 2 kvar,
-2.8e-9 relative). Lessons from M7:
+`split-phase-linear` pass with rtol 1e-8 and atol 1e-8 with a margin of at least 10x. `two-phase` and `split-phase`
+needed rtol 1e-6 in M7 (the convergence criterion of iterative current at its default error tolerance;
+Newton-Raphson alone passed at 1e-8). Since M11 iterative current runs with an error tolerance of 1e-10 (D63):
+`split-phase` passes at rtol 1e-8 and `two-phase` at rtol 1e-7 with atol 1e-8 (worst ratio 0.033).
+`two-phase-linear` needs rtol 1e-7, and so does `two-phase` for the same reason, because the reactive power of the
+lines nearly cancels there (6e-6 var on about 2 kvar, 2.8e-9 relative). Lessons from M7:
 
 * **Delta loads in OpenDSS.** Each non-zero entry is a 1-phase `Load` with `conn=delta` and `bus1=X.p.q` (ca is
   `X.3.1`), with `kV` = the rated branch voltage: $u_{rated}$ at a node with the three-phase slot pattern, also at a
@@ -1199,7 +1310,7 @@ three-phase, split-phase and SWER transformers, and connectors with a near-zero 
 `tests/data/generators/australian_swer_networks.py` (D47 to D59) and compared with OpenDSS: power flow in
 `tests/data/power_flow/australian-swer/{smr8,klo14}` and short circuit in `tests/data/short_circuit/australian-swer/{smr8,klo14}`. PGM and OpenDSS
 agree to about 1e-10 relative in node voltages and fault currents, and every case passes with a margin of at least 14x in the tolerance (worst
-ratio 0.069). The generated `README.md` of each case lists every deviation from the source repository's `backend.py`. The reduced-phase code needed no change. Lessons from M10:
+ratio 0.069 at M10; see D56 for the values after M11). The generated `README.md` of each case lists every deviation from the source repository's `backend.py`. The reduced-phase code needed no change. Lessons from M10:
 
 * **Check that the load level is feasible before fixing it.** The 60 % of the transformer rating first approved does not converge
   in OpenDSS and collapses the voltage (D47). The planning step ran the networks in OpenDSS first, and the generator stops at a voltage gate of 0.8 pu.
@@ -1316,8 +1427,8 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M7 (implemented) | Delta loads (`connection` on `asym_load`/`asym_gen`) | `input.json` (`connection`), `<core>/common/enum.hpp` and `src/power_grid_model/_core/enum.py` (`LoadGenConnection`), `<core>/component/load_gen.hpp`, `MathModelTopology`/`ComponentTopology` (`load_gen_connection`), new `<core>/math_solver/delta_load_gen.hpp`, `add_loads` in the Newton-Raphson and iterative current solvers, `common_solver_functions.hpp` (linear and results), `main_model_impl.hpp` (gates) | `tests/cpp_unit_tests/math_solver/test_delta_load_gen.cpp` (closed forms, finite-difference check of the Newton-Raphson Jacobian, exact zeros, linear admittance); `math_solver/test_math_solver_pf_reduced_phase.cpp` (KCL for all solvers, bit-identity with all load_gens flagged wye, quadratic convergence, backstops); `component/test_load_gen.cpp`, `test_topology.cpp`, `main_core/test_main_core_topology.cpp`, `common/test_exceptions.cpp`; native API tests (`tests/native_api_tests/test_api_model.cpp`); Python tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS (1-phase `Load conn=delta` on `bus.p.q` and a native 3-phase `conn=delta` load, checked by the branch-voltage base check), generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/power_flow/asym-load-delta/{three-phase,three-phase-linear,two-phase,two-phase-linear,split-phase,split-phase-flat-start,split-phase-linear}` (with `asym_load`/`asym_gen` outputs in the reference) and the expected-error cases `power_flow/asym-load-delta/{symmetric-not-supported,delta-on-absent-phase}` and `state_estimation/asym-load-delta-not-supported` (see [Phase-to-phase loads](#phase-to-phase-loads-connection-on-asym_load--asym_gen)) | M / medium |
 | M8 (implemented) | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp` (`check_fault_phases_present`), `<core>/component/fault.hpp` (`has_default_phase`), `<core>/common/exception.hpp` (`InvalidShortCircuitPhases` with the fault ID), `<core>/calculation_parameters.hpp` (`fault_phase_mask`), `<core>/job_adapter.hpp` (cache-run catch); decisions D34-D37 | `tests/cpp_unit_tests/common/test_exceptions.cpp`, `component/test_fault.cpp`, `math_solver/test_math_solver_sc.cpp` (solver backstop); native API tests (`tests/native_api_tests/test_api_model.cpp`: valid, absent, default and skipped faults); Python tests (`tests/unit/test_error_handling.py`: single and batch, per-scenario topology); validation cases against OpenDSS, generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/short_circuit/{swer-fault-impedance,swer-multiple-faults,swer-c-minimum}` (`x_f` as a `Reactor`, simultaneous faults on three-phase, SWER and 240 V nodes, minimum voltage scaling) and the expected-error case `short_circuit/swer-fault-on-absent-phase`; user docs in `docs/user_manual/components.md` | S / low |
 | M9 (implemented) | Python validation and documentation (decisions D38-D46) | `src/power_grid_model/validation/_validation.py` (required values and ranges of `asym_line` with `phases`, new `validate_single_phase_transformer`, load `connection`: valid enum value, `delta` only on `asym_load` and `asym_gen`, no voltage regulator on a delta load_gen, sensor branch lists, the `ValidationWarning` hooks), `_rules.py`, `errors.py` (`NotApplicableValueError`, `SinglePhaseTransformerClockError`, `ValidationWarning`), `__init__.py`; the new user manual page `docs/user_manual/reduced-phase-networks.md` (a worked example instead of a notebook, D46); `docs/user_manual/{components,calculations,data-validator,model-validation}.md`, `docs/advanced_documentation/c-api.md` and `docs/algorithms/sc-algorithms.md`; the comment of the experimental gate in `<core>/main_model_impl.hpp` | `tests/unit/validation/test_reduced_phase_validation.py` (every rule, with the mirror tests against C++), `test_reduced_phase_cases.py` (all reduced-phase, split-phase and delta validation cases validate cleanly without a warning), `test_rules.py`, `test_errors.py`, `test_input_validation.py`, `test_validation_functions.py`; `tests/unit/test_docs_reduced_phase_example.py` (runs the code of the user manual page) | M / low |
-| M10 (implemented) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`, BSD-3-Clause, AusNet Services data). Only the 22 kV and SWER (12.7 kV) parts are modelled; the LV side is lumped into one constant-power load per distribution transformer (three-phase, centre-tapped 250-0-250 V, SWER 12.7 kV / 240 V, and the 44 phase-to-earth units of KLO14) on its secondary busbar. Minimum demand is 10 % and maximum demand 20 % of the transformer kVA, at power factor 0.95. The generator writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py`; decisions D47-D59 | `tests/data/generators/australian_swer_networks.py` (new: downloads the workbooks at the pinned commit and checks their sha256, maps them to OpenDSS and PGM, runs the self-checks, runs OpenDSS and writes the cases); `tests/data/generators/reduced_phase_compare_pgm.py` (extended: compact JSON rows, power-flow batches, a wider tolerance grid when no standard candidate passes); `LICENSES/BSD-3-Clause.txt`; `tests/unit/validation/test_reduced_phase_cases.py` (`MIN_CASE_COUNT` 37); no library changes | Four case folders, each with a generated `README.md` that lists every deviation from `backend.py`: power flow `tests/data/power_flow/australian-swer/{smr8,klo14}` (asymmetric batch of two scenarios, minimum and maximum demand; `newton_raphson` on both, `iterative_current` on SMR8 only) and short circuit `tests/data/short_circuit/australian-swer/{smr8,klo14}` (IEC 60909, maximum voltage scaling, a batch of 8 (SMR8) and 9 (KLO14) faults on 22 kV, SWER and LV busbars). Measured agreement with OpenDSS: power flow rtol 1e-6, atol 1e-8 (1e-3 on `[pq]_(from|to)`), worst ratio 0.066 (SMR8) and 0.069 (KLO14), node voltages to 1.1e-10 and 9.8e-11 relative; short circuit rtol 1e-8, atol 1e-8 (1e-6 on `i_(from|to)` and its angle), worst ratio 0.033 and 0.030, fault currents to 6.7e-11 and 9.2e-11 relative. The data is 4.9 MB for power flow and 4.1 MB for short circuit | M / medium (data size, convergence, conditioning) |
-| M11 (planned) | The iterative current method works for every reduced-phase, split-phase, delta and real-network power-flow case: `iterative_current` is added to every power-flow validation case that has only `newton_raphson` today (`australian-swer/klo14`, `single-phase-transformer/phase-to-phase`, `single-phase-transformer/split-phase-flat-start`, `asym-load-delta/split-phase-flat-start`, and the expected-error cases), with the same tolerances, and any solver or harness change this needs | To be planned | Validation cases with `iterative_current`; solver unit tests for any change | M / medium |
+| M10 (implemented) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`, BSD-3-Clause, AusNet Services data). Only the 22 kV and SWER (12.7 kV) parts are modelled; the LV side is lumped into one constant-power load per distribution transformer (three-phase, centre-tapped 250-0-250 V, SWER 12.7 kV / 240 V, and the 44 phase-to-earth units of KLO14) on its secondary busbar. Minimum demand is 10 % and maximum demand 20 % of the transformer kVA, at power factor 0.95. The generator writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py`; decisions D47-D59 | `tests/data/generators/australian_swer_networks.py` (new: downloads the workbooks at the pinned commit and checks their sha256, maps them to OpenDSS and PGM, runs the self-checks, runs OpenDSS and writes the cases); `tests/data/generators/reduced_phase_compare_pgm.py` (extended: compact JSON rows, power-flow batches, a wider tolerance grid when no standard candidate passes); `LICENSES/BSD-3-Clause.txt`; `tests/unit/validation/test_reduced_phase_cases.py` (`MIN_CASE_COUNT` 37); no library changes | Four case folders, each with a generated `README.md` that lists every deviation from `backend.py`: power flow `tests/data/power_flow/australian-swer/{smr8,klo14}` (asymmetric batch of two scenarios, minimum and maximum demand; `newton_raphson` on both, `iterative_current` on SMR8 only until M11) and short circuit `tests/data/short_circuit/australian-swer/{smr8,klo14}` (IEC 60909, maximum voltage scaling, a batch of 8 (SMR8) and 9 (KLO14) faults on 22 kV, SWER and LV busbars). Measured agreement with OpenDSS: power flow rtol 1e-6, atol 1e-8 (1e-3 on `[pq]_(from|to)`), worst ratio 0.066 (SMR8) and 0.069 (KLO14), node voltages to 1.1e-10 and 9.8e-11 relative; short circuit rtol 1e-8, atol 1e-8 (1e-6 on `i_(from|to)` and its angle), worst ratio 0.033 and 0.030, fault currents to 6.7e-11 and 9.2e-11 relative. The data is 4.9 MB for power flow and 4.1 MB for short circuit | M / medium (data size, convergence, conditioning) |
+| M11 (implemented) | The iterative current method works for every reduced-phase, split-phase, delta and real-network power-flow case (decisions D60-D66). Solver: const_y loads in the iterative current matrix at networks with an absent phase, refactorised when they change; a NaN deviation raises `IterationDiverge`; NaN folding of the maximum deviation over buses and phases. Validation: `iterative_current` with `error_tolerance` 1e-10 on every case that lists `newton_raphson` (including `australian-swer/klo14`, `single-phase-transformer/phase-to-phase`, both `split-phase-flat-start` cases and the expected-error cases) and tighter tolerances. The residual (defect-correction) form C1 was tried and reverted (D62) | `<core>/math_solver/iterative_current_pf_solver.hpp` (`absent_phase_` gate, cached const_y admittance, refactorisation), `<core>/math_solver/iterative_pf_solver.hpp` (NaN check), `<core>/math_solver/common_solver_functions.hpp` (`add_linear_load`, `add_const_y_loads`, `fold_max_deviation`), `<core>/math_solver/newton_raphson_pf_solver.hpp`; `tests/cpp_validation_tests/test_validation.cpp` (per-method `extra_params`); `tests/data/generators/{reduced_phase_opendss_cases,australian_swer_networks,reduced_phase_compare_pgm}.py`; `params.json` and READMEs of the power-flow cases | `tests/cpp_unit_tests/math_solver/test_math_solver_pf_reduced_phase.cpp` (NaN deviation raises, NaN folding of any bus and phase, IC with const_y loads on a floating common mode, refactorisation when the const_y loads change, delta const_y loads at buses with an absent phase); validation cases with IC on all power-flow cases; a capture of 21506 result keys before and after each solver commit: NR, linear, symmetric and three-phase results bit-identical. Results: `phase-to-phase` IC 11 iterations (worst ratio 0.034, equal to Newton-Raphson); worst ratio against OpenDSS 0.033 to 0.080 on the M3 to M9 cases (D63), 0.044 on SMR8 and 0.018 on KLO14 for IC; the PF batch takes 256.6 s (was 238.6 s before KLO14 IC); ctest 323/323, pytest 2465 passed | M / medium-high (core numerics, gated) |
 | Later | See [Later work](#later-work) | — | — | — |
 
 ### Cross-cutting concerns
@@ -1373,6 +1484,19 @@ scope by Michael (2026-10-15).
   (see [`asym_line` with `phases`](#asym_line-with-phases)); changing it changes three-phase results.
 * **A best-effort Python check of the node phases** (D38).
 * **A public Python experimental switch, or graduating the feature** (D45).
+* **The M11 solver changes for all networks, upstream** (D61). The const_y loads in the IC matrix ("C2") are gated on a
+  bus with an absent phase, so that three-phase results stay bit-identical. Applying them to every network makes IC converge
+  in fewer iterations wherever const_y loads exist, but it changes three-phase results bit for bit, so it is a decision for the upstream maintainers.
+* **The residual (defect-correction) form of IC, "C1"** (D62). Evaluated in M11 and not adopted: no gain in accuracy against
+  OpenDSS or Newton-Raphson, and a stall floor of 2e-11 to 5e-11 in the deviation on SMR8 and KLO14 (see D62 for the numbers). It could be reconsidered
+  only if a case shows a systematic IC offset that the form without C1 cannot remove. The patch is not in the repository.
+* **An all-load preconditioner for IC at a floating common mode with only const_pq or const_i loads.** Since M11
+  a floating common mode converges when some const_y load is at it. With only const_pq or const_i loads, IC stays
+  finite but does not converge and raises `IterationDiverge` at `max_iterations`; the matrix could also hold the linearised
+  admittance $-\overline{S}$ of those loads at the floating buses. OpenDSS cannot solve such a network either (M5).
+* **The Newton-Raphson `SparseMatrixError` on KLO14 from the flat and average-source starts.** Both starts give a singular matrix on KLO14; the default (linear) start
+  works, and IC (which always starts at the average source) converges. Not investigated.
+* **IC honouring `calculation_initialization`** (D65). IC always starts from the average-source voltage.
 * **The Newton-Raphson stall on networks with near-zero impedance branches** (D54). On the SMR8 and KLO14 data, with
   connectors down to 1.4e-7 ohm, the Newton-Raphson power flow stalls at a maximum deviation of about 3e-7, above the
   error tolerance of 1e-8. This is pre-existing: it also happens with only the three-phase parts. Possible remedies are

@@ -193,6 +193,24 @@ The $Y_{bus}$ matrix here does not change across iterations which means it only 
 linear equations in all iterations.
 The $Y_{bus}$ matrix also remains unchanged in certain batch calculations like timeseries calculations.
 
+The start $U_N^0$ is always the `average_source` start described under
+[Newton-Raphson initialization](#initialization). The `calculation_initialization` option does not change it.
+
+### Networks with an absent phase
+
+In a network where some node has an absent phase (one- and two-phase components, see
+[Reduced-phase networks](../user_manual/reduced-phase-networks.md)), the constant-impedance (`const_y`) loads are
+not treated as injected currents. Their admittance is added to the diagonal of the matrix, which is therefore
+$Y_{bus}$ plus the `const_y` admittances, and they are left out of $I_N$. The solution is the same, because the
+current of such a load is linear in $U_N$, but a `const_y` load to earth now holds a floating common-mode voltage
+(for example the secondary of an `ab` → `ab` transformer).
+
+- The matrix is factorized again when the `const_y` loads of the input change, for example between the scenarios
+  of a batch calculation. A change of the other loads does not need it.
+- A floating common mode with only constant-power or constant-current loads still does not converge: the voltages
+  stay finite and the calculation raises `IterationDiverge` at the maximum number of iterations.
+- Networks where all nodes have all three phases are calculated as described above, bit for bit.
+
 ## Linear power flow
 
 Algorithm call: {py:class}`CalculationMethod.linear <power_grid_model.enum.CalculationMethod.linear>`
@@ -225,6 +243,10 @@ This approximation method will give better results when most of the load/generat
 Similar to [iterative current](#iterative-current-power-flow), batch calculations like timeseries will also be faster.
 Same reason applies here: the $Y_{bus}$ matrix does not change across batches and as a result the same factorization
 ould be used.
+
+In a network with an absent phase, the `const_y` loads are part of the matrix, as in the iterative current method
+(see [Networks with an absent phase](#networks-with-an-absent-phase)), so they are treated exactly instead of as a
+current at the start voltage.
 
 In practical grids most loads and generations correspond to the constant power type.
 Linear current would give a better approximation than [Linear](#linear-power-flow) in such case.

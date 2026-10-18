@@ -302,9 +302,12 @@ A valid result of `validate_input_data` therefore does not guarantee that the ca
 | state estimation               | not supported, symmetric or asymmetric (`ReducedPhaseNotSupported`)                                           |
 
 * **Power flow.** Newton-Raphson with its default (linear) initialization is the most robust method.
-  The iterative current method can diverge on a phase-to-phase secondary that is not earthed (for example an `ab` →
-  `ab` transformer) with constant-power loads, because the common-mode voltage of such a winding is only held by a
-  very small admittance to earth.
+  The iterative current method handles a phase-to-phase secondary that is not earthed (for example an `ab` → `ab`
+  transformer) when a constant-impedance (`const_y`) load is connected to it, because such loads are part of its
+  matrix in a network with an absent phase. With only constant-power or constant-current loads there, the
+  common-mode voltage of the winding is held only by a very small admittance to earth: the method stays finite but
+  does not converge and raises `IterationDiverge` at `max_iterations`. Use Newton-Raphson there.
+  The iterative current method always starts from the average-source voltage and ignores `calculation_initialization`.
   The start values of the flat and average-source initializations put leg b of a split-phase node opposite to leg a;
   a transformer that is fed *from* a split-phase node still gets a start that assumes 120° between the phases.
 * **Short circuit.** See [Fault](components.md#fault) for the faults that are valid at a node without all phases.
