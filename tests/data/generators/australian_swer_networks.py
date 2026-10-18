@@ -18,6 +18,16 @@ Run from the repository root (opendssdirect.py and openpyxl are not project depe
 <root> is the tests/data directory to write to; the networks (smr8, klo14) default to both. --check-only runs the
 self-checks and the power flow at minimum and maximum demand, prints a summary and writes nothing.
 
+It writes tests/data/power_flow/australian-swer/{smr8,klo14}: a batch power flow with scenario 0 at minimum and
+scenario 1 at maximum demand (input.json holds the minimum demand; update_batch.json sets the asym_load powers of both
+scenarios), the OpenDSS script test.dss, the reference asym_output_batch.json, params.json and a README.md, and a
+.license file per file (MPL-2.0 AND BSD-3-Clause, the upstream data being BSD 3-Clause). test.dss is what was run: the
+script executes it line by line and reads each reference right after the Solve of its scenario. The datasets are
+written in the compact JSON format (a root "attributes" list per component and one list row per line); inputs keep
+exact floats and references are rounded to 12 significant digits. The reference has node (u, u_angle), asym_line,
+single_phase_transformer and transformer (p, q from and to, loading); it has no three-phase line output (the node
+voltages at both ends pin every line, and it keeps the data small).
+
 Modelling choices (derived from backend.py; the deviations are listed):
 
 - IDs: an MV node keeps its AusNet Node_ID; the 66 kV source bus is 1_000_000; the LV busbar of distribution
@@ -60,15 +70,19 @@ Modelling choices (derived from backend.py; the deviations are listed):
   min(1, S_iso / (MAX_DEMAND sum S_tx)). Split per phase: three-phase P / 3 each, split-phase P / 2 on each leg,
   phase-to-earth all on phase a. OpenDSS: one 1-phase wye Load per non-zero phase (model=1, kV = u_rated / sqrt(3))
 - OpenDSS tolerance 1e-11 (1e-12 stalls at round-off on SMR8) and MaxIterations=200
+- impedance floor (both tools): a line with |z1| L below Z_MIN_OHM gets the length Z_MIN_OHM / |z1 per km|, and the
+  zone substation uk is raised to ZONE_SUBSTATION_UK; the near-zero impedances of the data otherwise make the
+  admittance matrix too ill-conditioned for PGM's Newton-Raphson (see Z_MIN_OHM)
 """
 
 import argparse
 import hashlib
+import json
 import math
 import tempfile
 import urllib.request
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -81,6 +95,7 @@ from reduced_phase_opendss_cases import (
     Case,
     Load,
     Transformer1P,
+    bus_voltages,
     check_center_tapped_transformer,
     check_transformer,
     dss_load_elements,
@@ -92,6 +107,16 @@ from reduced_phase_opendss_cases import (
 )
 
 OMEGA = 2.0 * math.pi * FREQ
+
+# REUSE-IgnoreStart
+LICENSE = (
+    "SPDX-FileCopyrightText: Contributors to the Power Grid Model project <powergridmodel@lfenergy.org>\n"
+    "SPDX-FileCopyrightText: 2024 Team Nando - Public Repositories\n"
+    "\n"
+    "SPDX-License-Identifier: MPL-2.0 AND BSD-3-Clause\n"
+)
+UPSTREAM_COPYRIGHT = "Copyright (c) 2024, Team Nando - Public Repositories"
+# REUSE-IgnoreEnd
 
 SOURCE_REPO = "https://github.com/Team-Nando/MV-LV-Networks"
 SOURCE_COMMIT = "8429f8a19f7b95acca2965cc48f2736880e5b31c"
@@ -123,6 +148,48 @@ SOURCE_Z0 = complex(0.59157, 1.7)
 DSS_TOLERANCE = 1e-11
 DSS_MAX_ITERATIONS = 200
 DSS_VOLTAGE_BASES = "[66, 22, 0.433, 0.4157]"
+
+# Tolerances: the rule of reduced_phase_opendss_cases.py. Per case, the smallest round rtol (with atol <= 1e-6), then
+# the smallest round atol, for which the worst |actual - expected| / (atol + rtol |expected|) over all methods and
+# both scenarios is below 0.1 (a 10x margin), as measured by reduced_phase_compare_pgm.py. For these networks the
+# power fields (p and q, from and to) get their own atol of at most 1e-3 (W, var): a branch power is computed from the
+# voltages at its ends, so a short branch (down to the floor of Z_MIN_OHM) amplifies their round-off. Only
+# newton_raphson: iterative_current converges in at most 12 iterations but misses the rule on SMR8 (its error
+# tolerance of 1e-8 on the voltage leaves too large an error on the powers).
+POWER_FIELDS = "[pq]_(from|to)"
+PF_PARAMS = {
+    name: {
+        "calculation_method": "newton_raphson",
+        "rtol": 1e-6,
+        "atol": {"default": 1e-8, POWER_FIELDS: 1e-3},
+        "experimental_features": "enabled",
+    }
+    for name in ("smr8", "klo14")
+}
+# the measured agreement, for the README
+PF_AGREEMENT = {
+    "smr8": (
+        "Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree"
+        " to 1.6e-10 relative and the powers to 1e-2 W absolute, a worst ratio"
+        " of 0.045. iterative_current (8 and 12 iterations) misses the rule (worst ratio 0.103), so it is not run."
+    ),
+    "klo14": (
+        "Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree"
+        " to 2.4e-10 relative and the powers to 1e-2 W absolute, a worst ratio"
+        " of 0.089. iterative_current (7 and 10 iterations) misses the rule (worst ratio 0.108), so it is not run."
+    ),
+}
+
+# Impedance floor. The source data has near-zero impedances: connector lines down to 1.4e-7 ohm (three-phase) and
+# 1.4e-6 ohm (one-phase), and a zone substation with uk = 1.41e-6. They make the admittance matrix so ill-conditioned
+# that PGM's Newton-Raphson stalls at a max deviation of about 3e-7 (error tolerance 1e-8), also on the three-phase
+# part alone (the upstream code path), and PGM agrees with OpenDSS to only about 2e-7. A line whose series impedance
+# |z1| L is below Z_MIN_OHM gets the length L' = Z_MIN_OHM / |z1 per km| in both tools (the LineCode is unchanged, so
+# its capacitance scales with it), and the zone substation gets ZONE_SUBSTATION_UK (r / x kept). The smallest values
+# of the grid {1e-4, 1e-3, 1e-2} ohm and {1e-5, 1e-4} for which PGM's Newton-Raphson converges and the tolerance
+# rule passes.
+Z_MIN_OHM = 1e-2
+ZONE_SUBSTATION_UK = 1e-5
 
 # PGM's transformer_low_susceptance_ratio and the regularisation of the mirror Reactor
 LOW_SUSCEPTANCE_RATIO = 1e-8
@@ -409,7 +476,8 @@ class LineSection:
     from_node: int
     to_node: int
     phases: int  # 3 or 1
-    length: float  # km
+    length: float  # km, after the impedance floor
+    sheet_length: float  # km, as in the source data
     code: str  # the LineCode key, e.g. "46-3ph"
 
 
@@ -418,6 +486,7 @@ class Network:
     spec: NetworkSpec
     linecodes: dict[str, dict]  # the used LineCodes by key
     lines: list[LineSection]
+    zone_sheet_uk: float
     node_class: dict[int, str]
     node_u_rated: dict[int, float]
     zone: ThreePhaseTransformer
@@ -520,10 +589,24 @@ def parse_lines(sheets) -> list[LineSection]:
                 to_node=row["End_Node"],
                 phases=phases,
                 length=row["Length"],
+                sheet_length=row["Length"],
                 code=f"{row['Linecode']}-{phases}ph",
             )
         )
     return sorted(lines, key=lambda line: line.id)
+
+
+def line_impedance_per_km(code: dict) -> float:
+    return math.hypot(code["r1"], code["x1"])
+
+
+def apply_impedance_floor(lines: list[LineSection], linecodes: dict[str, dict]):
+    """the impedance floor: a line whose |z1| L is below Z_MIN_OHM gets the length Z_MIN_OHM / |z1 per km|"""
+    for line in lines:
+        z_per_km = line_impedance_per_km(linecodes[line.code])
+        assert z_per_km > 0.0, f"LineCode {line.code} has no series impedance"
+        if z_per_km * line.length < Z_MIN_OHM:
+            line.length = Z_MIN_OHM / z_per_km
 
 
 def cycle_edges(adjacency: dict[int, list[tuple[int, int]]], root: int) -> set[int]:
@@ -562,6 +645,7 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
     check_unique_element_ids(sheets)
     lines = parse_lines(sheets)
     linecodes = used_linecodes(sheets, lines)
+    apply_impedance_floor(lines, linecodes)
     n_three = sum(1 for line in lines if line.phases == 3)
     n_one = len(lines) - n_three
     assert (n_three, n_one) == (spec.lines_three_phase, spec.lines_one_phase), (n_three, n_one)
@@ -573,6 +657,11 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
     assert zone_row["kvas_primary"] == zone_row["kvas_secondary"]
     zone_sn = scaled(zone_row["kvas_primary"], 1000)
     zone_uk, zone_pk = sheet_uk_pk(zone_row, zone_sn)
+    zone_sheet_uk = zone_uk
+    if zone_uk < ZONE_SUBSTATION_UK:
+        # the impedance floor of the zone substation: uk and pk scaled together (r / x kept)
+        zone_pk *= ZONE_SUBSTATION_UK / zone_uk
+        zone_uk = ZONE_SUBSTATION_UK
     zone = ThreePhaseTransformer(
         id=BRANCH_OFFSET + zone_row["Element_ID"],
         from_node=SOURCE_NODE,
@@ -823,6 +912,7 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
         spec=spec,
         linecodes=linecodes,
         lines=lines,
+        zone_sheet_uk=zone_sheet_uk,
         node_class=node_class,
         node_u_rated=node_u_rated,
         zone=zone,
@@ -849,6 +939,7 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
         f" three-phase lines), {len(isos)} ISOs each feeding its own SWER network, {len(regulators)} regulators,"
         f" distribution transformers {dict(sorted(counts.items()))}"
     )
+    print(f"  impedance floor: {impedance_floor_text(network)}")
     return network
 
 
@@ -873,6 +964,22 @@ def demand(network: Network, fraction: float, with_iso_factor: bool) -> list[Loa
             p_phase, q_phase = [p, 0.0, 0.0], [q, 0.0, 0.0]
         loads.append(Load(load_id, t.to_node, "asym_load", "const_pq", p_phase, q_phase))
     return loads
+
+
+def impedance_floor_text(network: Network) -> str:
+    """what the impedance floor changed, for the summary and the README"""
+    raised = [line for line in network.lines if line.length != line.sheet_length]
+    counts = Counter(line.phases for line in raised)
+    z_min = min(line_impedance_per_km(network.linecodes[line.code]) * line.sheet_length for line in raised)
+    added = max(line.length - line.sheet_length for line in raised)
+    zone_z = network.zone.uk * network.zone.u2**2 / network.zone.sn
+    return (
+        f"{len(raised)} lines raised to |z1| = {Z_MIN_OHM:g} ohm ({counts[3]} three-phase, {counts[1]} one-phase);"
+        f" the smallest |z1| of the data is {z_min:.3g} ohm and the largest length added {added:.3g} km."
+        f" {Z_MIN_OHM:g} ohm is {Z_MIN_OHM / (U_MV**2 / 1e6):.2g} pu on the 22 kV base of 484 ohm (1 MVA). The zone"
+        f" substation uk is raised from {network.zone_sheet_uk:.3g} to {network.zone.uk:g} ({zone_z:.2g} ohm on the"
+        f" {network.zone.u2 / 1e3:g} kV side)"
+    )
 
 
 def check_unique_pgm_ids(network: Network):
@@ -1289,67 +1396,544 @@ def voltage_extremes(network: Network) -> dict[str, tuple[float, int, float, int
     return result
 
 
-def three_phase_loading(t: ThreePhaseTransformer) -> float:
-    """PGM's loading of a transformer: max(sum_k |S_from,k|, sum_k |S_to,k|) / sn, with the mirror Reactor's power on
-    the from side"""
+def three_phase_pf_reference(t: ThreePhaseTransformer) -> dict:
+    """per-phase powers of both sides of a PGM transformer (the neutral conductors dropped), with the mirror Reactor's
+    power on the from side, and PGM's loading max(sum_k |S_from,k|, sum_k |S_to,k|) / sn"""
     s_from, s_to = terminal_values(f"Transformer.t{t.id}", dss.CktElement.Powers, 4)
     if t.low_susceptance() is not None:
         s_low, _ = terminal_values(f"Reactor.lo{t.id}n{t.from_node}", dss.CktElement.Powers, 3)
         s_from = s_from + s_low
-    return float(max(np.sum(np.abs(s_from)), np.sum(np.abs(s_to))) * 1e3 / t.sn)
+    s_from = s_from * 1e3
+    s_to = s_to * 1e3
+    return {
+        "id": t.id,
+        "p_from": [float(v.real) for v in s_from],
+        "q_from": [float(v.imag) for v in s_from],
+        "p_to": [float(v.real) for v in s_to],
+        "q_to": [float(v.imag) for v in s_to],
+        "loading": float(max(np.sum(np.abs(s_from)), np.sum(np.abs(s_to))) / t.sn),
+    }
 
 
-def power_flow_summary(network: Network, label: str, iterations: int, loads: list[Load]):
+def three_phase_loading(t: ThreePhaseTransformer) -> float:
+    return three_phase_pf_reference(t)["loading"]
+
+
+@dataclass
+class PowerFlowSummary:
+    label: str
+    iterations: int
+    feeder_p: float  # W
+    feeder_q: float  # var
+    losses: float  # W
+    load_p: float  # W
+    extremes: dict[str, tuple[float, int, float, int]]
+    iso_loading: dict[int, float]
+    regulator_loading: dict[int, float]
+    zone_loading: float
+
+
+def power_flow_summary(network: Network, label: str, iterations: int, loads: list[Load]) -> PowerFlowSummary:
     """self-check 5 (convergence, constant-power loads, minimum voltage per class) and the printed summary"""
     load_dev = check_load_powers(network, loads)
-    extremes = voltage_extremes(network)
     total = dss.Circuit.TotalPower()
     losses = dss.Circuit.Losses()
+    summary = PowerFlowSummary(
+        label=label,
+        iterations=iterations,
+        feeder_p=-total[0] * 1e3,
+        feeder_q=-total[1] * 1e3,
+        losses=losses[0],
+        load_p=sum(sum(load.p) for load in loads),
+        extremes=voltage_extremes(network),
+        iso_loading={t.id: transformer_pf_reference(t)["loading"] for t in network.isos},
+        regulator_loading={t.id: three_phase_loading(t) for t in network.regulators},
+        zone_loading=three_phase_loading(network.zone),
+    )
     print(f"  {label}: converged in {iterations} iterations; loads draw their kW + j kvar (max dev {load_dev:.1e})")
     print(
-        f"    feeder P = {-total[0] / 1e3:.4f} MW, Q = {-total[1] / 1e3:.4f} Mvar; losses {losses[0] / 1e3:.2f} kW;"
-        f" load P = {sum(sum(load.p) for load in loads) / 1e6:.4f} MW"
+        f"    feeder P = {summary.feeder_p / 1e6:.4f} MW, Q = {summary.feeder_q / 1e6:.4f} Mvar; losses"
+        f" {summary.losses / 1e3:.2f} kW; load P = {summary.load_p / 1e6:.4f} MW"
     )
     for node_class in NOMINAL_VOLTAGE:
-        if node_class not in extremes:
+        if node_class not in summary.extremes:
             continue
-        low, low_node, high, high_node = extremes[node_class]
+        low, low_node, high, high_node = summary.extremes[node_class]
         print(f"    {node_class:30s} min {low:.4f} pu (node {low_node}), max {high:.4f} pu (node {high_node})")
-    iso_loading = ", ".join(
-        f"{network.iso_names[t.id]} {transformer_pf_reference(t)['loading']:.1%}" for t in network.isos
-    )
+    iso_loading = ", ".join(f"{network.iso_names[i]} {v:.1%}" for i, v in summary.iso_loading.items())
     print(f"    ISO loading: {iso_loading}")
-    regulator_loading = ", ".join(
-        f"{network.regulator_names[t.id]} {three_phase_loading(t):.1%}" for t in network.regulators
-    )
-    print(f"    regulator loading: {regulator_loading}; zone substation {three_phase_loading(network.zone):.1%}")
-    failed = [node_class for node_class, (low, *_) in extremes.items() if low < MIN_VOLTAGE_PU]
+    regulator_loading = ", ".join(f"{network.regulator_names[i]} {v:.1%}" for i, v in summary.regulator_loading.items())
+    print(f"    regulator loading: {regulator_loading}; zone substation {summary.zone_loading:.1%}")
+    failed = [node_class for node_class, (low, *_) in summary.extremes.items() if low < MIN_VOLTAGE_PU]
     if failed:
         message = D_M10_1_MESSAGE.format(max_demand=MAX_DEMAND, network=network.spec.name)
         raise SystemExit(f"{label}: node voltage below {MIN_VOLTAGE_PU} pu in {', '.join(failed)}: {message}")
+    return summary
 
 
-def check_network(network: Network):
-    """self-checks 1 to 5 and the dry power flow at minimum and maximum demand"""
-    name = network.spec.name
+# ---------------------------------------------------------------------------------------------------------------
+# reference output
+
+
+def rounded(value):
+    """a reference value rounded to 12 significant digits (an error of at most 5e-13 relative)"""
+    if isinstance(value, float):
+        return float(f"{value:.12g}")
+    if isinstance(value, list):
+        return [rounded(v) for v in value]
+    if isinstance(value, dict):
+        return {k: rounded(v) for k, v in value.items()}
+    return value
+
+
+def pf_reference(network: Network) -> dict[str, list[dict]]:
+    """the reference of the solved power flow: node, asym_line, single_phase_transformer and transformer (no
+    three-phase line), each sorted by id and rounded to 12 significant digits"""
+    nodes = []
+    for node in sorted(network.node_u_rated):
+        u, angle = bus_voltages(node)
+        nodes.append({"id": node, "u": u, "u_angle": angle})
+    asym_lines = []
+    for line in network.lines:
+        if line.phases != 1:
+            continue
+        s_from, s_to = terminal_values(f"Line.l{line.id}", dss.CktElement.Powers, 1)
+        s_from = s_from * 1e3
+        s_to = s_to * 1e3
+        asym_lines.append(
+            {
+                "id": line.id,
+                "p_from": [float(v.real) for v in s_from],
+                "q_from": [float(v.imag) for v in s_from],
+                "p_to": [float(v.real) for v in s_to],
+                "q_to": [float(v.imag) for v in s_to],
+            }
+        )
+    return rounded(
+        {
+            "node": nodes,
+            "asym_line": asym_lines,
+            "single_phase_transformer": [
+                transformer_pf_reference(t) for t in sorted(network.single_phase_transformers(), key=lambda t: t.id)
+            ],
+            "transformer": [
+                three_phase_pf_reference(t) for t in sorted(network.three_phase_transformers(), key=lambda t: t.id)
+            ],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# self-checks and the power flow
+
+
+def check_elements(network: Network):
+    """self-checks 1 to 4 and the ISO factors"""
     check_linecodes(network)
     check_single_phase_transformers(network)
     check_three_phase_transformers(network)
     check_capacitors(network)
-    pgm_rows(network, network.loads_min)
     factors = ", ".join(
         f"{network.iso_names[iso.id]} {network.iso_factor[iso.id]:.4g}"
         f" ({iso.sn / 1e3:g} kVA for {network.iso_swer_kva[iso.id]:g} kVA)"
         for iso in network.isos
     )
     print(f"  ISO factors at maximum demand ({MAX_DEMAND:g}): {factors}")
+
+
+@dataclass
+class PowerFlowRun:
+    script: list[str]  # test.dss: exactly the commands that were run
+    references: list[dict]  # per scenario
+    summaries: list[PowerFlowSummary]  # per scenario
+    floor_effect: str = ""  # what the impedance floor changes (OpenDSS, both scenarios)
+
+
+def without_floor(network: Network) -> Network:
+    """the network as in the source data: the sheet line lengths and the sheet uk of the zone substation"""
+    factor = network.zone_sheet_uk / network.zone.uk
+    return replace(
+        network,
+        lines=[replace(line, length=line.sheet_length) for line in network.lines],
+        zone=replace(network.zone, uk=network.zone.uk * factor, pk=network.zone.pk * factor),
+    )
+
+
+def floor_effect(network: Network) -> str:
+    """the effect of the impedance floor in OpenDSS: the largest relative change of a node voltage magnitude and the
+    feeder losses, with and without the floor, per scenario"""
+    states = []
+    for net in (network, without_floor(network)):
+        dss.Basic.ClearAll()
+        state = []
+        for commands in (
+            [*dss_network(net), *dss_loads(net, net.loads_min), *dss_solve()],
+            [*dss_load_edits(net, net.loads_max), "Solve"],
+        ):
+            run_commands(commands)
+            assert dss.Solution.Converged()
+            state.append((dict(zip(dss.Circuit.AllNodeNames(), dss.Circuit.AllBusVMag())), dss.Circuit.Losses()[0]))
+        states.append(state)
+    parts = []
+    for k, kind in enumerate(("minimum", "maximum")):
+        (v_floor, loss_floor), (v_sheet, loss_sheet) = states[0][k], states[1][k]
+        assert v_floor.keys() == v_sheet.keys()
+        dv = max(abs(v_floor[name] - v_sheet[name]) / v_sheet[name] for name in v_sheet)
+        parts.append(
+            f"at {kind} demand the largest change of a node voltage magnitude is {dv:.2%} and the losses change from"
+            f" {loss_sheet / 1e3:.1f} to {loss_floor / 1e3:.1f} kW"
+        )
+    text = "Its effect in OpenDSS: " + "; ".join(parts) + "."
+    print(f"  {text}")
+    return text
+
+
+def run_power_flow(network: Network) -> PowerFlowRun:
+    """the batch power flow, as test.dss runs it: the network and the minimum-demand Loads, Solve (scenario 0), then
+    Edit of every Load to its maximum demand, Solve (scenario 1); each reference is read right after its Solve, and
+    self-check 5 runs on each scenario"""
+    name = network.spec.name
     dss.Basic.ClearAll()
-    commands = [*dss_network(network), *dss_loads(network, network.loads_min), *dss_solve()]
-    iterations = solve(network, commands, f"{name} minimum demand ({MIN_DEMAND:g})")
-    power_flow_summary(network, f"minimum demand ({MIN_DEMAND:g})", iterations, network.loads_min)
-    commands = [*dss_load_edits(network, network.loads_max), "Solve"]
-    iterations = solve(network, commands, f"{name} maximum demand ({MAX_DEMAND:g})")
-    power_flow_summary(network, f"maximum demand ({MAX_DEMAND:g})", iterations, network.loads_max)
+    run = PowerFlowRun(
+        script=[
+            (
+                f"! power flow on the Australian SWER network {name}; written by tests/data/generators/"
+                "australian_swer_networks.py, which runs these commands line by line"
+            ),
+            "! scenario 0 is minimum demand, scenario 1 maximum demand (see README.md)",
+        ],
+        references=[],
+        summaries=[],
+    )
+    scenarios = ((MIN_DEMAND, "minimum", network.loads_min), (MAX_DEMAND, "maximum", network.loads_max))
+    for k, (fraction, kind, loads) in enumerate(scenarios):
+        label = f"{kind} demand ({fraction:g})"
+        if k == 0:
+            commands = [*dss_network(network), f"! scenario {k}: {label}", *dss_loads(network, loads), *dss_solve()]
+        else:
+            commands = [f"! scenario {k}: {label}", *dss_load_edits(network, loads), "Solve"]
+        if k == 0:
+            run_commands(run.script)
+        iterations = solve(network, commands, f"{name} {label}")
+        run.script += commands
+        run.summaries.append(power_flow_summary(network, label, iterations, loads))
+        run.references.append(pf_reference(network))
+    return run
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# writing
+
+
+def compact_dataset(dataset_type: str, data, *, is_batch: bool) -> str:
+    """a PGM dataset in the compact JSON format: the root "attributes" lists the attributes of each component (the
+    keys of its rows in the order of their first appearance; a row without one of them gets null, the absent value)
+    and each row is a list, written one per line"""
+    scenarios = data if is_batch else [data]
+    attributes: dict[str, list[str]] = {}
+    for scenario in scenarios:
+        for component, rows in scenario.items():
+            names = attributes.setdefault(component, [])
+            for row in rows:
+                names += [name for name in row if name not in names]
+    attributes = {component: names for component, names in attributes.items() if names}
+
+    def scenario_text(scenario) -> str:
+        blocks = []
+        for component, rows in scenario.items():
+            if not rows:
+                continue
+            body = ",\n".join(
+                json.dumps([row.get(name) for name in attributes[component]], separators=(",", ":")) for row in rows
+            )
+            blocks.append(f"{json.dumps(component)}:[\n{body}\n]")
+        return "{\n" + ",\n".join(blocks) + "\n}"
+
+    header = json.dumps(
+        {"version": "1.0", "type": dataset_type, "is_batch": is_batch, "attributes": attributes},
+        separators=(",", ":"),
+    )
+    if is_batch:
+        body = "[\n" + ",\n".join(scenario_text(scenario) for scenario in scenarios) + "\n]"
+    else:
+        body = scenario_text(data)
+    return f'{header[:-1]},\n"data":{body}}}\n'
+
+
+def write_licensed(path: Path, text: str):
+    path.write_text(text, encoding="utf-8")
+    Path(f"{path}.license").write_text(LICENSE, encoding="utf-8")
+
+
+def load_update(loads: list[Load]) -> dict[str, list[dict]]:
+    return {
+        "asym_load": [
+            {"id": load.id, "p_specified": list(load.p), "q_specified": list(load.q)}
+            for load in sorted(loads, key=lambda load: load.id)
+        ]
+    }
+
+
+def count_table(network: Network) -> list[str]:
+    mv = sum(1 for node_class in network.node_class.values() if node_class == CLASS_MV)
+    swer = sum(1 for node_class in network.node_class.values() if node_class == CLASS_SWER)
+    n_three = sum(1 for line in network.lines if line.phases == 3)
+    kinds = Counter(network.distribution_kind.values())
+    regulators = ", ".join(
+        f"{network.regulator_names[t.id]} ({t.sn / 1e3:g} kVA)" for t in sorted(network.regulators, key=lambda t: t.id)
+    )
+    isos = ", ".join(
+        f"{network.iso_names[t.id]} ({t.sn / 1e3:g} kVA)" for t in sorted(network.isos, key=lambda t: t.id)
+    )
+    rows = [
+        (
+            "nodes",
+            (
+                f"{len(network.node_u_rated)}: the 66 kV source bus, {mv} 22 kV, {swer} SWER and"
+                f" {len(network.distribution)} LV busbars"
+            ),
+        ),
+        ("`line` (three-phase, 22 kV)", f"{n_three}"),
+        ("`asym_line` (one-phase SWER, phase a)", f"{len(network.lines) - n_three}"),
+        ("zone substation (`transformer`)", f"66/{network.zone.u2 / 1e3:g} kV, {network.zone.sn / 1e6:g} MVA, Dyn1"),
+        ("voltage regulators (`transformer`, YNyn0)", f"{len(network.regulators)}: {regulators}"),
+        ("ISO transformers (`single_phase_transformer`)", f"{len(network.isos)}: {isos}"),
+        ("three-phase distribution transformers (`transformer`, 22/0.433 kV Dyn1)", f"{kinds[KIND_3PH]}"),
+        (
+            "split-phase distribution transformers (`single_phase_transformer`, 22 kV / 250-0-250 V)",
+            f"{kinds[KIND_SPLIT]}",
+        ),
+        ("SWER distribution transformers (`single_phase_transformer`, 12.7/0.24 kV)", f"{kinds[KIND_SWER]}"),
+        (
+            "22 kV phase-to-earth distribution transformers (`single_phase_transformer`, 12.7/0.25 kV)",
+            f"{kinds[KIND_1PH_22KV]}",
+        ),
+        ("capacitors (`shunt`, 900 kvar)", f"{len(network.capacitors)}"),
+        ("loads (`asym_load`, const_pq)", f"{len(network.loads_min)}"),
+    ]
+    return [
+        "| Element | Count |",
+        "|---|---|",
+        *(f"| {element} | {count} |" for element, count in rows if count != "0"),
+    ]
+
+
+def results_table(network: Network, summaries: list[PowerFlowSummary]) -> list[str]:
+    header = "| | " + " | ".join(f"scenario {k}: {s.label}" for k, s in enumerate(summaries)) + " |"
+    lines = [header, "|---" * (len(summaries) + 1) + "|"]
+
+    def row(name, values):
+        lines.append(f"| {name} | " + " | ".join(values) + " |")
+
+    row("OpenDSS iterations", [str(s.iterations) for s in summaries])
+    row("feeder P, Q", [f"{s.feeder_p / 1e6:.3f} MW, {s.feeder_q / 1e6:.3f} Mvar" for s in summaries])
+    row("load P", [f"{s.load_p / 1e6:.3f} MW" for s in summaries])
+    row("losses", [f"{s.losses / 1e3:.1f} kW" for s in summaries])
+    for node_class, nominal in NOMINAL_VOLTAGE.items():
+        if node_class in summaries[0].extremes:
+            row(
+                f"{node_class} (pu of {nominal:.1f} V)",
+                [f"{s.extremes[node_class][0]:.4f} to {s.extremes[node_class][2]:.4f}" for s in summaries],
+            )
+    row(
+        "highest ISO loading",
+        [
+            "{1:.1%} ({0})".format(
+                *max(((network.iso_names[i], v) for i, v in s.iso_loading.items()), key=lambda x: x[1])
+            )
+            for s in summaries
+        ],
+    )
+    row(
+        "highest regulator loading",
+        [
+            "{1:.1%} ({0})".format(
+                *max(((network.regulator_names[i], v) for i, v in s.regulator_loading.items()), key=lambda x: x[1])
+            )
+            for s in summaries
+        ],
+    )
+    return lines
+
+
+README_TEMPLATE = """\
+<!--
+{license}-->
+
+# Validation case: power flow on the Australian rural SWER network {title}
+
+Asymmetric power flow ({methods}) on the medium-voltage part of the rural 22 kV feeder {title} of AusNet Services
+(Victoria, Australia), with its SWER (single-wire earth return) networks, with OpenDSS as the reference solver. It is a
+batch of two scenarios: scenario 0 at minimum and scenario 1 at maximum demand. `input.json` holds the minimum demand
+and `update_batch.json` sets the `asym_load` powers of both scenarios. There is no single-calculation output
+(`asym_output.json`).
+
+## Source data
+
+- Repository: {repo}, commit `{commit}`
+- File: `{file}`, sha256 `{sha256}`
+- Licence: BSD 3-Clause, {copyright} (`LICENSES/BSD-3-Clause.txt`). The files of this case are
+  derived from it and are licensed `MPL-2.0 AND BSD-3-Clause` (see the `.license` files).
+- The model is derived from the repository's `backend.py` (its OpenDSS model of the network), with the deviations
+  listed below. The workbook is not part of this repository.
+
+## Network
+
+{counts}
+
+## Modelling and deviations from backend.py
+
+- The LV networks are replaced by one lumped load per distribution transformer on a new LV busbar. The medium-voltage
+  network, the SWER networks and every transformer of the source data are kept.
+- Voltage regulators are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl and %loadloss.
+  backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0; at the neutral
+  tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as YNyn0 (in positive
+  and zero sequence).
+- ISO transformers (22/12.7 kV) are two-winding single-phase transformers from the phase pair of `Conn_Type` (R, W, B =
+  a, b, c) to phase a of the SWER network, with clock 6 if `Conn_Type` lists the pair in reverse order; backend's open
+  third winding is dropped. The OpenDSS buses are written literally from `Conn_Type`, so OpenDSS independently checks
+  the clock-6 mapping.
+- Split-phase distribution transformers (22 kV phase-to-phase, 250-0-250 V) are centre-tapped single-phase
+  transformers (u2 = 500 V) with the Kersting default split of uk and pk; OpenDSS gets the matching XHL = XHT and XLT
+  instead of backend's default XHT = 35 % and XLT = 30 %.
+- Three-phase distribution transformers (22/0.433 kV) are Dyn1, OpenDSS's default delta-wye (the `Conn_Type` rotation
+  is ignored, as in backend).
+- KLO14 has 44 distribution transformers with a 22/0.433 kV rating that are wired from phase R to earth. They are
+  12.7/0.25 kV single-phase transformers here (both ratings taken phase-to-earth, which keeps the data's turns ratio).
+- Every transformer has i0 = p0 = 0 (the no-load losses and the magnetising current are dropped): PGM places the
+  magnetising branch as a pi, OpenDSS at winding 1. uk and pk come from the sheet's xhl and loadloss, and OpenDSS gets
+  XHL and %loadloss computed back from them.
+- Distribution transformer taps are written explicitly (tap_pos = (wdg1_tap - 1) / 0.025 on the from side, tap_size =
+  u1 / 40, limits -2 to 2). backend's maxtap = 1.137 and mintap = 1.028 are ignored, as in backend, where the tap stays
+  at wdg1_tap.
+- PGM adds a low susceptance (1e-8 sn / uk) to the zero sequence of a delta winding and to the common mode of a
+  phase-to-phase single-phase winding. OpenDSS gets matching shunt Reactors (`Reactor.lo{{id}}n{{node}}`), whose powers
+  are added to the from side of the transformer in the reference.
+- The source has Z1 = 0.52824 + j2.113 ohm and Z0 with the magnitude of backend's 0.59157 + j1.7 ohm but Z1's angle
+  (PGM has a real `z01_ratio`). This is irrelevant: the zone substation primary is delta, so the 66 kV source carries
+  no zero-sequence current.
+- Line rows named `Delete` are dropped. One-phase SWER lines use Z1 and C1 of their LineCode only, as OpenDSS solves
+  backend's 1-phase LineCodes (r0, x0 and b0 are ignored), so they have no earth-return reactance in either tool. All
+  22 kV and 12.7 kV SWER nodes have `u_rated` 22 kV (the SWER convention of power-grid-model).
+- Capacitors are grounded-wye shunts with b1 = b0 = kvar / kV^2.
+- Impedance floor (in both tools): a line whose series impedance |z1| L is below {z_min} ohm gets the length
+  {z_min} ohm / |z1 per km| (the LineCode is unchanged, so its capacitance scales with it), and the zone substation
+  uk is raised (r / x kept). Here: {floor}. The source data has connector lines down to 1.4e-7 ohm and a zone
+  substation with uk = 1.41e-6, which make the admittance matrix so ill-conditioned that PGM's Newton-Raphson stalls
+  at a max deviation of about 3e-7 (error tolerance 1e-8) and PGM and OpenDSS agree to only about 2e-7. This is not
+  caused by the reduced-phase or SWER parts: the three-phase part of the network on its own (the upstream code path)
+  stalls at the same level. The network, its topology and every element are kept, and both tools solve the same
+  floored network. {floor_effect}
+- OpenDSS runs with tolerance {dss_tolerance} (1e-12 stalls at round-off on SMR8) and MaxIterations
+  {dss_max_iterations}.
+
+## Demand
+
+One const_pq `asym_load` per distribution transformer at power factor {power_factor} lagging, a fraction of its kVA:
+{min_demand} at minimum and {max_demand} at maximum demand. Three-phase loads are split equally over the phases,
+split-phase loads over the two legs (to the centre tap), and phase-to-earth loads are on phase a. At maximum demand the
+SWER loads behind an ISO get the coincidence factor min(1, S_iso / ({max_demand} x the kVA of the SWER transformers
+behind it)); applied here: {factors}. A higher maximum (the 0.60 of the original plan) does not converge in OpenDSS:
+the voltage collapses on both networks.
+
+## OpenDSS results
+
+{results}
+
+## Reference output
+
+`asym_output_batch.json` has, per scenario, `node` (u, u_angle; 0 on absent phases), `asym_line` (p and q, from and
+to), `single_phase_transformer` and `transformer` (p and q, from and to, and the loading), rounded to 12 significant
+digits. It has no three-phase `line` output: the node voltages at both ends pin every line, and it keeps the data small.
+All datasets are written in the compact JSON format (a root `attributes` list per component and list rows).
+
+Tolerances: rtol {rtol} and atol {atol}, the smallest round values with a 10x margin over both scenarios (the power
+fields have their own atol: a branch power is computed from the voltages at its ends, so a short branch amplifies
+their round-off). {agreement}
+
+## IDs
+
+An MV node keeps its AusNet Node_ID; the 66 kV source bus is 1000000; the LV busbar of distribution transformer E is
+2000000 + E; a line, transformer, capacitor or the zone substation (Element_ID E) is 3000000 + E; the load of
+distribution transformer E is 4000000 + E; the source is 5000000. In OpenDSS every bus is `n{{node id}}`, and the
+elements are `Line.l{{id}}`, `Transformer.t{{id}}`, `Capacitor.c{{id}}` and `Load.ld{{id}}_{{a,b,c}}`.
+
+## Generation
+
+The files are generated by `tests/data/generators/australian_swer_networks.py` with OpenDSS (opendssdirect.py
+{opendss_version}) as the reference solver; do not edit them by hand. `test.dss` is exactly the script that was run:
+the generator runs it line by line and reads each reference right after the `Solve` of its scenario. From the
+repository root (the workbooks are downloaded from the pinned commit, or read from a local directory with
+`--source-dir`):
+
+```sh
+uv run --no-project --with opendssdirect.py --with numpy --with openpyxl \\
+    python tests/data/generators/australian_swer_networks.py tests/data {name}
+```
+"""
+
+
+def atol_text(atol) -> str:
+    if not isinstance(atol, dict):
+        return f"{atol:g}"
+    others = ", ".join(f"{value:g} on `{pattern}`" for pattern, value in atol.items() if pattern != "default")
+    return f"{atol['default']:g} ({others})"
+
+
+def readme_text(network: Network, run: PowerFlowRun, params: dict) -> str:
+    spec = network.spec
+    methods = params["calculation_method"]
+    methods = methods if isinstance(methods, list) else [methods]
+    factors = [
+        f"{network.iso_names[iso.id]} {network.iso_factor[iso.id]:.4g} ({iso.sn / 1e3:g} kVA for"
+        f" {network.iso_swer_kva[iso.id]:g} kVA of SWER transformers)"
+        for iso in sorted(network.isos, key=lambda t: t.id)
+        if network.iso_factor[iso.id] < 1.0
+    ]
+    return README_TEMPLATE.format(
+        license=LICENSE,
+        title=spec.name.upper(),
+        name=spec.name,
+        methods=", ".join(f"`{m}`" for m in methods),
+        repo=SOURCE_REPO,
+        commit=SOURCE_COMMIT,
+        file=spec.file,
+        sha256=spec.sha256,
+        copyright=UPSTREAM_COPYRIGHT,
+        counts="\n".join(count_table(network)),
+        dss_tolerance=f"{DSS_TOLERANCE:g}",
+        z_min=f"{Z_MIN_OHM:g}",
+        floor=impedance_floor_text(network),
+        floor_effect=run.floor_effect,
+        dss_max_iterations=DSS_MAX_ITERATIONS,
+        power_factor=POWER_FACTOR,
+        min_demand=f"{MIN_DEMAND:g}",
+        max_demand=f"{MAX_DEMAND:g}",
+        factors="; ".join(factors) if factors else "none (no ISO is above its rating)",
+        results="\n".join(results_table(network, run.summaries)),
+        rtol=f"{params['rtol']:g}",
+        atol=atol_text(params["atol"]),
+        agreement=PF_AGREEMENT[spec.name],
+        opendss_version=dss.__version__,
+    )
+
+
+def write_power_flow_case(network: Network, run: PowerFlowRun, root: Path):
+    target = root / "power_flow" / "australian-swer" / network.spec.name
+    target.mkdir(parents=True, exist_ok=True)
+    params = PF_PARAMS[network.spec.name]
+    write_licensed(
+        target / "input.json", compact_dataset("input", pgm_rows(network, network.loads_min), is_batch=False)
+    )
+    write_licensed(
+        target / "update_batch.json",
+        compact_dataset("update", [load_update(network.loads_min), load_update(network.loads_max)], is_batch=True),
+    )
+    write_licensed(target / "asym_output_batch.json", compact_dataset("asym_output", run.references, is_batch=True))
+    write_licensed(target / "params.json", json.dumps(params, indent=2) + "\n")
+    write_licensed(target / "test.dss", "\n".join(run.script) + "\n")
+    (target / "README.md").write_text(readme_text(network, run, params), encoding="utf-8")
+    print(f"  wrote {target}")
 
 
 def main():
@@ -1362,8 +1946,6 @@ def main():
     unknown = set(args.networks) - {spec.name for spec in NETWORKS}
     if unknown:
         parser.error(f"unknown networks {sorted(unknown)}")
-    if not args.check_only:
-        parser.error("writing the cases is not implemented yet (M10b); use --check-only")
     specs = [spec for spec in NETWORKS if not args.networks or spec.name in args.networks]
     print(f"opendssdirect.py {dss.__version__}; MAX_DEMAND = {MAX_DEMAND:g}, MIN_DEMAND = {MIN_DEMAND:g}")
     with tempfile.TemporaryDirectory() as download_dir:
@@ -1371,7 +1953,11 @@ def main():
         sheets = {spec.name: read_workbook(paths[spec.name]) for spec in specs}
     for spec in specs:
         network = build_network(spec, sheets[spec.name])
-        check_network(network)
+        check_elements(network)
+        run = run_power_flow(network)
+        run.floor_effect = floor_effect(network)
+        if not args.check_only:
+            write_power_flow_case(network, run, args.root)
 
 
 if __name__ == "__main__":

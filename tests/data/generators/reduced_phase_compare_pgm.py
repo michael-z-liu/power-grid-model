@@ -9,6 +9,11 @@ For every case and method it prints, per field, the max absolute and relative de
 The fields are transformed exactly like tests/unit/utils.py compare_result does (angles as phasors, u_angle
 normalised on the first entry). A ratio below 0.1 means the tolerance passes with a 10x margin.
 
+If no candidate of the standard grid (rtol up to 1e-6, atol up to 1e-4) passes, it also prints the passing
+candidates of a wider grid (rtol up to 1e-5, atol up to 1e-2). Reference rows may be in the compact format (lists, with
+the root "attributes"). It handles single power flows and short circuits, and batches of both (update_batch.json with
+asym_output_batch.json or sc_output_batch.json).
+
 The root must contain only cases that this report understands, so generate the cases into a scratch directory first
 and compare there (tests/data itself also holds other validation cases). Run from the repository root with the
 installed package:
@@ -30,6 +35,24 @@ from power_grid_model.enum import CalculationMethod, ShortCircuitVoltageScaling,
 from power_grid_model.utils import json_deserialize_from_file
 
 CANDIDATES = [(r, a) for r in (1e-10, 1e-9, 1e-8, 1e-7, 1e-6) for a in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4)]
+WIDER_CANDIDATES = [
+    (r, a) for r in (1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5) for a in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2)
+]
+
+
+def reference_data(path):
+    """the data of a reference dataset (a list of scenarios for a batch), with compact rows (lists) mapped to dicts
+    by the root "attributes\""""
+    raw = json.loads(path.read_text())
+    attributes = raw.get("attributes", {})
+
+    def scenario(data):
+        return {
+            component: [dict(zip(attributes[component], row)) if isinstance(row, list) else row for row in rows]
+            for component, rows in data.items()
+        }
+
+    return [scenario(data) for data in raw["data"]] if raw["is_batch"] else scenario(raw["data"])
 
 
 def fields(actual, reference):
@@ -74,16 +97,27 @@ def run(case, params, method):
             calculation_initialization=params.get("calculation_initialization", "default"),
             experimental_features=enabled,
         )
-        return [(result, json.loads((case / "asym_output.json").read_text())["data"])]
+        return [(result, reference_data(case / "asym_output.json"))]
+    if (case / "asym_output_batch.json").exists():
+        update = json_deserialize_from_file(case / "update_batch.json")
+        result = model._calculate_power_flow(
+            symmetric=False,
+            calculation_method=CalculationMethod[method],
+            calculation_initialization=params.get("calculation_initialization", "default"),
+            update_data=update,
+            experimental_features=enabled,
+        )
+        references = reference_data(case / "asym_output_batch.json")
+        return [({k: v[s] for k, v in result.items()}, ref) for s, ref in enumerate(references)]
     scaling = ShortCircuitVoltageScaling[params["short_circuit_voltage_scaling"]]
     if (case / "sc_output.json").exists():
         result = model._calculate_short_circuit(short_circuit_voltage_scaling=scaling, experimental_features=enabled)
-        return [(result, json.loads((case / "sc_output.json").read_text())["data"])]
+        return [(result, reference_data(case / "sc_output.json"))]
     update = json_deserialize_from_file(case / "update_batch.json")
     result = model._calculate_short_circuit(
         update_data=update, short_circuit_voltage_scaling=scaling, experimental_features=enabled
     )
-    references = json.loads((case / "sc_output_batch.json").read_text())["data"]
+    references = reference_data(case / "sc_output_batch.json")
     return [({k: v[s] for k, v in result.items()}, ref) for s, ref in enumerate(references)]
 
 
@@ -112,6 +146,12 @@ def main():
         print(f"  overall ratio with params: {worst_ratio(all_items, params['rtol'], params['atol']):.3f}")
         passing = [(r, a) for r, a in CANDIDATES if worst_ratio(all_items, r, a) < 0.1]
         print("  candidates with 10x margin (rtol, atol):", ", ".join(f"({r:.0e}, {a:.0e})" for r, a in passing[:8]))
+        if not passing:
+            wider = [(r, a) for r, a in WIDER_CANDIDATES if worst_ratio(all_items, r, a) < 0.1]
+            print(
+                "  wider candidates with 10x margin (rtol, atol):",
+                ", ".join(f"({r:.0e}, {a:.0e})" for r, a in wider[:8]) or "none",
+            )
 
 
 if __name__ == "__main__":

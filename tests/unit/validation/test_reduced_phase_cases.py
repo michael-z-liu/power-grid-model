@@ -26,7 +26,7 @@ from power_grid_model.utils import json_deserialize_from_file
 from power_grid_model.validation import ValidationWarning, validate_batch_data, validate_input_data
 
 DATA_PATH = Path(__file__).parents[2] / "data"
-MIN_CASE_COUNT = 33
+MIN_CASE_COUNT = 35
 
 
 def _reduced_phase_cases():
