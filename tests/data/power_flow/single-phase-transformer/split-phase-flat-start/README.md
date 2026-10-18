@@ -6,7 +6,7 @@ SPDX-License-Identifier: MPL-2.0
 
 # Validation case: centre-tapped (split-phase) single-phase transformers, flat start
 
-The network of `split-phase`, calculated with Newton-Raphson from a flat start, whose start values of the split-phase nodes come from the split-phase slot pattern (slot b at 180° from slot a).
+The network of `split-phase`, calculated with Newton-Raphson from a flat start, whose start values of the split-phase nodes come from the split-phase slot pattern (slot b at 180° from slot a). Iterative current is checked as well; it ignores `calculation_initialization` and always starts from the average-source start, which here equals the flat start (one source with `u_ref` 1.0).
 
 ## Generation
 

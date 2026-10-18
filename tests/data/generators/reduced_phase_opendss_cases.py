@@ -1493,8 +1493,10 @@ def generate(case: Case, root: Path):
 
 # Tolerances: per case, the smallest round rtol (with atol <= 1e-6), then the smallest round atol, for which the worst
 # |actual - expected| / (atol + rtol |expected|) is below 0.1 (a 10x margin); see reduced_phase_compare_pgm.py.
-# PGM and OpenDSS agree to about 3.4e-10 relative everywhere; the cases with iterative_current are limited by its
-# convergence criterion (error_tolerance 1e-8 on the voltage gives up to 2e-8 relative on the power).
+# PGM and OpenDSS agree to about 3.4e-10 relative everywhere. iterative_current runs with IC_ERROR_TOLERANCE (below), so
+# it is no longer limited by its convergence criterion and every method agrees about equally well; the cases that need
+# more than (1e-8, 1e-8) need it for newton_raphson as well: near-zero line powers (reduced-phase-feeder, swer-a and
+# swer-chain: atol) and the nearly cancelling reactive power of the lines (delta two-phase: rtol).
 SC_PARAMS = {
     "calculation_method": "iec60909",
     "rtol": 1e-8,
@@ -1508,8 +1510,20 @@ def sc_raises_params(raises, reason):
     return dict(SC_PARAMS, raises={"raises": raises, "reason": reason})
 
 
+# error_tolerance of iterative_current only (extra_params), two orders below the default 1e-8: at 1e-8 iterative_current
+# stops on its convergence residual (about error_tolerance * rho / (1 - rho) on the voltage), e.g. both
+# split-phase-flat-start cases missed (1e-8, 1e-8) with a worst ratio of up to 2.645; at 1e-10 it agrees with OpenDSS as
+# closely as newton_raphson does (ratio 0.034 there, in 8 and 9 iterations; at most 11 iterations in any case,
+# phase-to-phase). It is per method, because newton_raphson stalls at about 5e-11 on the M10 networks and does not
+# converge for an error_tolerance of 1e-11 or less.
+IC_ERROR_TOLERANCE = 1e-10
+
+
 def pf_params(methods, rtol, atol):
-    return {"calculation_method": methods, "rtol": rtol, "atol": atol, "experimental_features": "enabled"}
+    params = {"calculation_method": methods, "rtol": rtol, "atol": atol, "experimental_features": "enabled"}
+    if "iterative_current" in methods:
+        params["extra_params"] = {"iterative_current": {"error_tolerance": IC_ERROR_TOLERANCE}}
+    return params
 
 
 def feeder_lines():
@@ -1597,9 +1611,7 @@ def swer_chain_case():
             Load(305, 6, "asym_load", "const_pq", [5e3, 0.0, 0.0], [1.5e3, 0.0, 0.0]),
             Load(306, 6, "asym_load", "const_y", [3e3, 0.0, 0.0], [1e3, 0.0, 0.0]),
         ],
-        # limited by the iterative_current convergence and by near-zero powers of phase c of line 101; no tolerance with
-        # atol <= 1e-6 passes with a 10x margin (rtol 1e-7, atol 1e-6 gives 0.103)
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-5),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-6),
     )
 
 
@@ -1896,9 +1908,9 @@ def small_delta_case(path, raises_only, params):
 
 
 def delta_cases():
-    """the delta-load cases (M7); the tolerances follow the rule above: newton_raphson and the linear methods agree to
-    about 3.4e-10 relative, two-phase and split-phase are limited by the iterative_current convergence, and
-    two-phase-linear by the reactive power of the lines, which nearly cancels (6e-6 var on a few kvar)"""
+    """the delta-load cases (M7); the tolerances follow the rule above: all methods agree to about 3.4e-10 relative
+    (iterative_current with IC_ERROR_TOLERANCE), except that two-phase and two-phase-linear are limited by the
+    reactive power of the lines, which nearly cancels (6e-6 var on a few kvar)"""
     return [
         delta_three_phase_case(
             DELTA_PATH + "three-phase",
@@ -1913,7 +1925,7 @@ def delta_cases():
         delta_two_phase_case(
             DELTA_PATH + "two-phase",
             all_const_y=False,
-            params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+            params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-8),
         ),
         delta_two_phase_case(
             DELTA_PATH + "two-phase-linear",
@@ -1923,12 +1935,16 @@ def delta_cases():
         delta_split_phase_case(
             DELTA_PATH + "split-phase",
             all_const_y=False,
-            params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+            params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8),
         ),
+        # iterative_current ignores calculation_initialization and always uses the average-source start, which
+        # equals the flat start here (one source, u_ref 1.0); the flat start itself is exercised by newton_raphson
         delta_split_phase_case(
             DELTA_PATH + "split-phase-flat-start",
             all_const_y=False,
-            params=dict(pf_params("newton_raphson", 1e-8, 1e-8), calculation_initialization="flat"),
+            params=dict(
+                pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8), calculation_initialization="flat"
+            ),
         ),
         delta_split_phase_case(
             DELTA_PATH + "split-phase-linear",
@@ -1939,7 +1955,7 @@ def delta_cases():
             DELTA_PATH + "symmetric-not-supported",
             ("sym_output", "ReducedPhaseNotSupported"),
             raises_params(
-                "newton_raphson",
+                ["newton_raphson", "iterative_current"],
                 "ReducedPhaseNotSupported",
                 "Symmetric power flow is not supported in a network with delta-connected loads or generators.",
             ),
@@ -1951,7 +1967,7 @@ def delta_cases():
             lines=[Line(101, 1, 2, "abc", 2.0), Line(102, 2, 3, "ab", 3.0)],
             loads=[Load(301, 3, "asym_load", "const_pq", [0.0, 50e3, 0.0], [0.0, 10e3, 0.0], connection="delta")],
             params=raises_params(
-                "newton_raphson",
+                ["newton_raphson", "iterative_current"],
                 "LoadGenOnAbsentPhase",
                 "Load or generator 301 has a non-zero specified power on phases (c) that are not present at its"
                 " node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and"
@@ -1990,7 +2006,7 @@ CASES = [
         nodes=[1, 2],
         lines=[Line(101, 1, 2, "a", 5.0)],
         loads=[Load(301, 2, "asym_load", "const_pq", [200e3, 0.0, 0.0], [50e3, 0.0, 0.0])],
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8),
     ),
     Case(
         path="power_flow/asym-line/two-phase-ab",
@@ -2007,7 +2023,7 @@ CASES = [
         nodes=[1, 2],
         lines=[Line(101, 1, 2, "bc", 4.0, neutral=True, opendss_kron=True)],
         loads=[Load(301, 2, "asym_load", "const_pq", [0.0, 180e3, 90e3], [0.0, 50e3, 20e3])],
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-8),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8),
     ),
     Case(
         path="power_flow/asym-line/swer-a",
@@ -2018,7 +2034,7 @@ CASES = [
             Load(301, 2, "asym_load", "const_pq", [30e3, 0.0, 0.0], [10e3, 0.0, 0.0]),
             Load(302, 3, "asym_load", "const_pq", [20e3, 0.0, 0.0], [5e3, 0.0, 0.0]),
         ],
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-7, 1e-7),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-7),
     ),
     Case(
         path="power_flow/asym-line/reduced-phase-feeder",
@@ -2026,7 +2042,7 @@ CASES = [
         nodes=FEEDER_NODES,
         lines=feeder_lines(),
         loads=feeder_loads(all_const_y=False),
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-6),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-6),
     ),
     Case(
         path="power_flow/asym-line/reduced-phase-feeder-linear",
@@ -2040,7 +2056,7 @@ CASES = [
         "power_flow/asym-line/reduced-phase-symmetric-not-supported",
         ("sym_output", "ReducedPhaseNotSupported"),
         {
-            "calculation_method": "newton_raphson",
+            "calculation_method": ["newton_raphson", "iterative_current"],
             "rtol": 1e-6,
             "atol": 1e-4,
             "experimental_features": "enabled",
@@ -2090,9 +2106,13 @@ CASES = [
     swer_chain_case(),
     swer_chain_short_circuit_case(),
     *swer_short_circuit_cases(),
-    # the floating common mode of n3 makes iterative_current diverge with const_pq loads, so only newton_raphson
+    # the common mode of n3 is held to earth only by its loads (and the 1e-8 low susceptance); iterative_current
+    # converges because, in a network with an absent phase, it puts the const_y loads into its matrix (M11c), which
+    # anchors the common mode; only the small const_pq part stays explicit (11 iterations at IC_ERROR_TOLERANCE)
     phase_to_phase_case(
-        "power_flow/single-phase-transformer/phase-to-phase", all_const_y=False, methods="newton_raphson"
+        "power_flow/single-phase-transformer/phase-to-phase",
+        all_const_y=False,
+        methods=["newton_raphson", "iterative_current"],
     ),
     phase_to_phase_case(
         "power_flow/single-phase-transformer/phase-to-phase-linear",
@@ -2104,13 +2124,14 @@ CASES = [
     split_phase_case(
         "power_flow/single-phase-transformer/split-phase",
         all_const_y=False,
-        # limited by the iterative_current convergence (newton_raphson alone agrees with (1e-8, 1e-8))
-        params=pf_params(["newton_raphson", "iterative_current"], 1e-6, 1e-8),
+        params=pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8),
     ),
+    # iterative_current ignores calculation_initialization and always uses the average-source start, which equals the
+    # flat start here (one source, u_ref 1.0); the flat start itself is exercised by newton_raphson
     split_phase_case(
         "power_flow/single-phase-transformer/split-phase-flat-start",
         all_const_y=False,
-        params=dict(pf_params("newton_raphson", 1e-8, 1e-8), calculation_initialization="flat"),
+        params=dict(pf_params(["newton_raphson", "iterative_current"], 1e-8, 1e-8), calculation_initialization="flat"),
     ),
     split_phase_case(
         "power_flow/single-phase-transformer/split-phase-linear",
@@ -2125,7 +2146,7 @@ CASES = [
         lines=[Line(101, 1, 2, "a", 5.0)],
         transformers=[Transformer1P(151, 2, 3, "ab", "a", 22e3, 12.7e3, 200e3, 0.05, 2000.0)],
         params={
-            "calculation_method": "newton_raphson",
+            "calculation_method": ["newton_raphson", "iterative_current"],
             "rtol": 1e-6,
             "atol": 1e-4,
             "experimental_features": "enabled",

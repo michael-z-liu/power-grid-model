@@ -6,7 +6,7 @@ SPDX-License-Identifier: MPL-2.0
 
 # Validation case: single-phase transformers on phase-to-phase windings
 
-Asymmetric power flow (Newton-Raphson) in an 11 kV three-phase network with a single-phase transformer `ab` → `ab` (11 kV / 415 V) and a single-phase transformer `bc` → `a` with clock 6 (11 kV / 240 V, reversed polarity). The common-mode voltage of the `ab` secondary is set only by its loads to earth (mostly const_y, with a small const_pq part); the 240 V node has a const_pq load. The iterative current method diverges on this floating common mode, so it is not used. All transformers have i0 = p0 = 0.
+Asymmetric power flow (Newton-Raphson and iterative current) in an 11 kV three-phase network with a single-phase transformer `ab` → `ab` (11 kV / 415 V) and a single-phase transformer `bc` → `a` with clock 6 (11 kV / 240 V, reversed polarity). The common-mode voltage of the `ab` secondary is set only by its loads to earth (mostly const_y, with a small const_pq part); the 240 V node has a const_pq load. Iterative current converges on this floating common mode because, in a network with an absent phase, it puts the const_y loads into its matrix, which holds the common mode to earth; only the small const_pq part stays explicit. All transformers have i0 = p0 = 0.
 
 ## Generation
 

@@ -3,7 +3,12 @@
     "newton_raphson",
     "iterative_current"
   ],
-  "rtol": 1e-07,
+  "rtol": 1e-08,
   "atol": 1e-07,
-  "experimental_features": "enabled"
+  "experimental_features": "enabled",
+  "extra_params": {
+    "iterative_current": {
+      "error_tolerance": 1e-10
+    }
+  }
 }
