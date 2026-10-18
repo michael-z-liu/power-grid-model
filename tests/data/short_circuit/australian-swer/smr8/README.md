@@ -42,10 +42,11 @@ no single-calculation output (`sc_output.json`).
 
 - The LV networks are replaced by one lumped load per distribution transformer on a new LV busbar. The medium-voltage
   network, the SWER networks and every transformer of the source data are kept.
-- Voltage regulators are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl and %loadloss.
-  backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0; at the neutral
-  tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as YNyn0 (in positive
-  and zero sequence).
+- Voltage regulators (every `mvtx` row with equal primary and secondary kV, as in backend; on KLO14 this includes
+  PLENTY_VLY_RISE, 22/22 kV and 200 kVA) are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl
+  and %loadloss. backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0;
+  at the neutral tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as
+  YNyn0 (in positive and zero sequence).
 - ISO transformers (22/12.7 kV) are two-winding single-phase transformers from the phase pair of `Conn_Type` (R, W, B =
   a, b, c) to phase a of the SWER network, with clock 6 if `Conn_Type` lists the pair in reverse order; backend's open
   third winding is dropped. The OpenDSS buses are written literally from `Conn_Type`, so OpenDSS independently checks
@@ -142,7 +143,7 @@ and i_angle, from and to; the current of a low-susceptance Reactor is added to t
 significant digits. It has no `node`, `line` or `asym_line` output: the transformer currents pin the network around each fault, and the data of the four cases on both networks has a size budget of 10 MB (it is 9.0 MB; the asym_line output would add 1.05 MB and the node output 5 MB). All datasets are written in the
 compact JSON format (a root `attributes` list per component and list rows).
 
-Tolerances: rtol 1e-08 and atol 1e-08 (1e-06 on `i_(from|to)(_angle)?`), the smallest round values with a 10x margin over all scenarios. Measured: the fault currents agree to 6.7e-11 relative (as phasors, so the angles too), the branch currents above 1 A to 5.4e-9 relative and those up to 10 A to 3.6e-8 A absolute, a worst ratio of 0.033 (the 66 kV current of the zone substation in scenario 4, 9.7 A).
+Tolerances: rtol 1e-08 and atol 1e-08 (1e-06 on `i_(from|to)(_angle)?`), the smallest round values with a 10x margin over all scenarios. Measured: the fault current magnitudes agree to 6.7e-11 relative and the phasors to 3.0e-10, the branch current magnitudes above 1 A to 5.4e-9 relative and the currents up to 10 A to 3.6e-8 A absolute (as phasors), a worst ratio of 0.033 (the 66 kV current of the zone substation in scenario 4, 9.7 A).
 
 ## IDs
 

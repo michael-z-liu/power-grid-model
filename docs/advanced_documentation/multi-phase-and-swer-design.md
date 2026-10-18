@@ -692,9 +692,9 @@ reported to him, because it changes the approved plan):
   approved does not work: OpenDSS does not converge on either network and the voltages collapse (SMR8 down to 0.29
   pu, KLO14 to 0.53 pu), because 60 % of the installed transformers (40 MVA and 35 MVA) is 24 to 26 MW on rural 22 kV
   feeders, and the regulators would run at 153 % to 281 % of their rating. At 20 % every regulator is within its
-  rating, the feeder peaks are 8.1 MW (SMR8) and 7.0 MW (KLO14), and the lowest voltage is 0.845 pu (SMR8, SWER) and 0.933 pu
-  (KLO14). The generator has a voltage gate of 0.8 pu and stops with a message that names this decision when the
-  loads are too high. `MAX_DEMAND` and `MIN_DEMAND` are constants in the generator.
+  rating, the feeder peaks are 8.1 MW (SMR8) and 7.0 MW (KLO14), and the lowest node voltage is 0.845 pu (SMR8, on a SWER
+  node) and 0.910 pu (KLO14, on a split-phase LV busbar; its lowest SWER node is at 0.933 pu). The generator has a
+  voltage gate of 0.8 pu and stops with a message that names this decision when the loads are too high. `MAX_DEMAND` and `MIN_DEMAND` are constants in the generator.
 * **D48. The ISO coincidence factor applies at maximum demand only.** The SWER loads behind an isolating transformer
   (ISO) get $\min(1, S_{ISO} / (0.2 \sum S_{tx}))$, with $S_{tx}$ the rating of the SWER distribution transformers behind it. The
   factor models the diversity of the peak. Minimum demand is base load, and every ISO is within its rating without it. At 20 %
@@ -749,14 +749,15 @@ reported to him, because it changes the approved plan):
   `node` output about 5 MB. The datasets use the compact JSON format (a root `attributes` list, one list row per line), and references
   are rounded to 12 significant digits.
 * **D56. Tolerances.** The rule is that of the earlier cases: the smallest round values with at least 10x margin over all
-  scenarios, with a `dict` for `atol` where one field needs its own value.
+  scenarios, with a `dict` for `atol` where one field needs its own value. The power `atol` is capped at 1e-3 W (var),
+  so the power flow gets rtol 1e-6; rtol 1e-7 would need 1e-2 W.
   * **Power flow:** rtol 1e-6, atol 1e-8, and 1e-3 on `[pq]_(from|to)`. Node voltages agree to 1.1e-10 (SMR8) and 9.8e-11 (KLO14)
     relative, the branch powers to 1.6e-3 W and 1.2e-3 W absolute. A branch power is computed from the voltages at its ends, so a branch
     with a small impedance (down to 1e-3 ohm) amplifies their round-off to an absolute error that no relative tolerance covers; the
     dict `atol` is limited to the power fields. The worst ratio of measured deviation to tolerance is 0.066 and 0.069. `newton_raphson` runs on both networks (3 and 4
     iterations), `iterative_current` on SMR8 only (8 and 12 iterations); on KLO14 it misses the rule (ratio 0.207, on the power of
     the regulator PLENTY_VLY_RISE).
-  * **Short circuit:** rtol 1e-8, atol 1e-8, and 1e-6 on `i_(from|to)` and its angle. Fault currents agree to 6.7e-11 and 9.2e-11 relative, and
+  * **Short circuit:** rtol 1e-8, atol 1e-8, and 1e-6 on `i_(from|to)` and its angle. Fault current magnitudes agree to 6.7e-11 and 9.2e-11 relative, and
     branch currents above 1 A to 6.0e-9 relative. Currents up to 10 A agree to 3.6e-8 A absolute: they are small currents through low-impedance branches,
     driven by small voltage differences, which have the same round-off amplification. rtol 1e-9 is not enough (the fault angles agree to 3e-10 only). The worst ratio is 0.033 and 0.030
     (the 66 kV current of the zone substation for a remote SWER fault).
@@ -774,8 +775,8 @@ reported to him, because it changes the approved plan):
     1e-12; the README of each case states the change.
   * **Taps are written explicitly** (`taps=[t 1]`), because the `mintap`/`maxtap` of `backend.py` do not clamp. The unreduced source network is also solved, for the
     README table of D54.
-  * **The generator checks before it writes anything:** the LineCodes against the $(2Z_1 + Z_0)/3$ form, the YPrim of every distinct single-
-    and three-phase transformer set against the numpy PGM model, the mirror reactors, the capacitors, the convergence, that the loads draw their kW + jkvar,
+  * **The generator checks before it writes anything:** the LineCodes against the PGM line rows (the $(2Z_1 + Z_0)/3$
+    form), the YPrim of every distinct single- and three-phase transformer set against the numpy PGM model, the mirror reactors, the capacitors, the convergence, that the loads draw their kW + jkvar,
     the 0.8 pu voltage gate (D47) and the topology and counts.
 * **D59. Runtime cost in the debug test run.** In the debug `ctest` (clang with the sanitizers), `Validation test batch - power flow` goes from 98.8 s to
   235 s (the two cases take 79 s and 58 s, of which `iterative_current` on SMR8 is 19 s), and `Validation test batch - short circuit` from 24.8 s to

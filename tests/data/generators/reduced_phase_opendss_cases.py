@@ -709,6 +709,12 @@ def fault_update(case: Case, scenario: tuple[Fault, ...]):
 # OpenDSS model
 
 
+def set_active_element(name):
+    """make an OpenDSS element the active one; OpenDSS keeps the previous element active for an unknown name, which
+    would silently read the wrong element, so that is an error"""
+    assert dss.Circuit.SetActiveElement(name) >= 0, f"OpenDSS has no element {name}"
+
+
 def fmt_matrix(m):
     """lower triangle in OpenDSS notation"""
     rows = [" ".join(repr(float(m[row, col])) for col in range(row + 1)) for row in range(m.shape[0])]
@@ -872,14 +878,14 @@ def check_opendss_kron_lines(case: Case):
         if not line.opendss_kron:
             continue
         n = len(line.phases)
-        dss.Circuit.SetActiveElement(f"Line.l{line.id}")
+        set_active_element(f"Line.l{line.id}")
         assert dss.CktElement.NumPhases() == n, f"OpenDSS line {line.id} has {dss.CktElement.NumPhases()} phases"
         assert dss.CktElement.NumConductors() == n, f"OpenDSS line {line.id} still has a neutral conductor"
         assert dss.CktElement.NumTerminals() == 2
         assert dss.Lines.Phases() == n
         dss.LineCodes.Name(f"lc{line.id}")
         assert dss.LineCodes.Phases() == n, f"OpenDSS did not Kron-reduce the LineCode of line {line.id}"
-        dss.Circuit.SetActiveElement(f"Line.l{line.id}")
+        set_active_element(f"Line.l{line.id}")
         r = np.array(dss.Lines.RMatrix()).reshape(n, n) * line.length
         x = np.array(dss.Lines.XMatrix()).reshape(n, n) * line.length
         expected = line.z_phase()
@@ -912,7 +918,7 @@ def check_delta_load_bases(case: Case):
         kv = delta_kv(case, load.node)
         v = bus_phasors(load.node)
         for name, _, branches in dss_load_elements(case, load):
-            dss.Circuit.SetActiveElement(f"Load.{name}")
+            set_active_element(f"Load.{name}")
             raw = np.array(dss.CktElement.Powers()).reshape(-1, 2)
             total = complex(*raw.sum(axis=0)) * 1e3
             expected = sum(s * (abs(v[a] - v[b]) / (kv * 1e3)) ** exponent[load.type] for a, b, s in branches)
@@ -1028,7 +1034,7 @@ def check_transformer(transformer: Transformer1P):
         v1 = complex(*dss.Bus.Voltages()[:2])
         dss.Circuit.SetActiveBus("sec")
         v2 = complex(*dss.Bus.Voltages()[:2])
-        dss.Circuit.SetActiveElement("Transformer.t")
+        set_active_element("Transformer.t")
         i1 = complex(*dss.CktElement.Currents()[:2])
         results[test] = (v1, v2, i1)
     v1, v2, _ = results["open"]
@@ -1073,7 +1079,7 @@ def check_center_tapped_transformer(transformer: Transformer1P):
     ):
         dss.Text.Command(command)
     assert dss.Solution.Converged()
-    dss.Circuit.SetActiveElement("Transformer.t")
+    set_active_element("Transformer.t")
     assert dss.CktElement.NumTerminals() == 3
     assert dss.CktElement.NumConductors() == 2
     raw = np.array(dss.CktElement.YPrim())
@@ -1123,7 +1129,7 @@ def terminal_values(name, values_getter, n_cond):
     """per side, per phase complex values of the active element: the first terminal is the from side, and the other
     terminals (one for a line or a two-winding transformer; the two halves of a centre-tapped transformer) are summed
     per node into the to side; nodes 0 and 4 are dropped"""
-    dss.Circuit.SetActiveElement(name)
+    set_active_element(name)
     raw = values_getter()
     order = dss.CktElement.NodeOrder()
     n_terminals = dss.CktElement.NumTerminals()
@@ -1207,7 +1213,7 @@ def load_pf_reference(case: Case, load: Load):
     s = np.zeros(3, dtype=complex)
     current = np.zeros(3, dtype=complex)
     for name, _, _ in dss_load_elements(case, load):
-        dss.Circuit.SetActiveElement(f"Load.{name}")
+        set_active_element(f"Load.{name}")
         n_cond = dss.CktElement.NumConductors()
         s += terminal_values(f"Load.{name}", dss.CktElement.Powers, n_cond)[0]
         current += terminal_values(f"Load.{name}", dss.CktElement.Currents, n_cond)[0]
@@ -1294,7 +1300,7 @@ def fault_currents(fault: Fault):
     i_f = np.zeros(3, dtype=complex)
     assigned = set()
     for element, _ in fault.dss_elements():
-        dss.Circuit.SetActiveElement(element)
+        set_active_element(element)
         raw = dss.CktElement.Currents()
         order = dss.CktElement.NodeOrder()
         for idx, number in enumerate(order):
@@ -1349,12 +1355,12 @@ def check_electrodes(transformer: Transformer1P, i_f=None):
         if side == "to" and transformer.center_tapped():
             check_center_tap_electrode(transformer, i_f)
             continue
-        dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
+        set_active_element(f"Transformer.t{transformer.id}")
         raw = dss.CktElement.Currents()
         order = dss.CktElement.NodeOrder()
         winding = {order[idx]: complex(raw[2 * idx], raw[2 * idx + 1]) for idx in range(2 * terminal, 2 * terminal + 2)}
         phase = "abc".index(transformer.from_conn if side == "from" else transformer.to_conn) + 1
-        dss.Circuit.SetActiveElement(f"Reactor.g{transformer.id}{side}")
+        set_active_element(f"Reactor.g{transformer.id}{side}")
         i_electrode = complex(*dss.CktElement.Currents()[:2])
         dev = abs(i_electrode - winding[phase])
         assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"electrode of transformer {transformer.id} {side}: {dev}"
@@ -1369,7 +1375,7 @@ def check_electrodes(transformer: Transformer1P, i_f=None):
 def check_center_tap_electrode(transformer: Transformer1P, i_f=None):
     """KCL at node 4, the centre tap: the electrode current equals I_a + I_b, the currents into the two halves at the
     legs (nodes 1 and 2; the terminals 2 and 3 of the transformer); i_f is the fault current, if any"""
-    dss.Circuit.SetActiveElement(f"Transformer.t{transformer.id}")
+    set_active_element(f"Transformer.t{transformer.id}")
     raw = dss.CktElement.Currents()
     order = dss.CktElement.NodeOrder()
     legs = 0j
@@ -1381,7 +1387,7 @@ def check_center_tap_electrode(transformer: Transformer1P, i_f=None):
         else:
             assert order[idx] == 4
             centre += value
-    dss.Circuit.SetActiveElement(f"Reactor.g{transformer.id}to")
+    set_active_element(f"Reactor.g{transformer.id}to")
     i_electrode = complex(*dss.CktElement.Currents()[:2])
     dev = abs(i_electrode - legs)
     assert dev < 1e-9 * abs(i_electrode) + 1e-9, f"centre-tap electrode of transformer {transformer.id}: {dev}"

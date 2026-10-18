@@ -42,10 +42,11 @@ and `update_batch.json` sets the `asym_load` powers of both scenarios. There is 
 
 - The LV networks are replaced by one lumped load per distribution transformer on a new LV busbar. The medium-voltage
   network, the SWER networks and every transformer of the source data are kept.
-- Voltage regulators are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl and %loadloss.
-  backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0; at the neutral
-  tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as YNyn0 (in positive
-  and zero sequence).
+- Voltage regulators (every `mvtx` row with equal primary and secondary kV, as in backend; on KLO14 this includes
+  PLENTY_VLY_RISE, 22/22 kV and 200 kVA) are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl
+  and %loadloss. backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0;
+  at the neutral tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as
+  YNyn0 (in positive and zero sequence).
 - ISO transformers (22/12.7 kV) are two-winding single-phase transformers from the phase pair of `Conn_Type` (R, W, B =
   a, b, c) to phase a of the SWER network, with clock 6 if `Conn_Type` lists the pair in reverse order; backend's open
   third winding is dropped. The OpenDSS buses are written literally from `Conn_Type`, so OpenDSS independently checks
@@ -144,9 +145,9 @@ to), `single_phase_transformer` and `transformer` (p and q, from and to, and the
 digits. It has no three-phase `line` output: the node voltages at both ends pin every line, and it keeps the data small.
 All datasets are written in the compact JSON format (a root `attributes` list per component and list rows).
 
-Tolerances: rtol 1e-06 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios (the power
-fields have their own atol: a branch power is computed from the voltages at its ends, so a short branch amplifies
-their round-off). Measured: newton_raphson converges in 3 and 4 iterations and iterative_current in 8 and 12 (minimum, maximum demand); the node voltages agree to 1.1e-10 (newton_raphson) and 4.4e-10 (iterative_current) relative and the powers to 1.6e-3 W absolute, a worst ratio of 0.066.
+Tolerances: rtol 1e-06 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios, with the
+atol of the power fields at most 1e-3 (W, var). The power fields have their own atol: a branch power is computed from
+the voltages at its ends, so a short branch amplifies their round-off. Measured: newton_raphson converges in 3 and 4 iterations and iterative_current in 8 and 12 (minimum, maximum demand); the node voltages agree to 1.1e-10 (newton_raphson) and 4.4e-10 (iterative_current) relative and the powers to 1.6e-3 W absolute, a worst ratio of 0.066.
 
 ## IDs
 

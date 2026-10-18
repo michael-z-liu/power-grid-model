@@ -16,7 +16,8 @@ Run from the repository root (opendssdirect.py and openpyxl are not project depe
         python tests/data/generators/australian_swer_networks.py <root> [--source-dir DIR] [--check-only] [networks]
 
 <root> is the tests/data directory to write to; the networks (smr8, klo14) default to both. --check-only runs the
-self-checks and the power flow at minimum and maximum demand, prints a summary and writes nothing.
+self-checks, the power flow at minimum and maximum demand and the short-circuit scenarios, prints a summary and writes
+nothing.
 
 It writes tests/data/power_flow/australian-swer/{smr8,klo14}: a batch power flow with scenario 0 at minimum and
 scenario 1 at maximum demand (input.json holds the minimum demand; update_batch.json sets the asym_load powers of both
@@ -120,6 +121,7 @@ from reduced_phase_opendss_cases import (
     fmt_matrix,
     mag_angle,
     pgm_fault,
+    set_active_element,
     short_circuit_impedance,
     source_z,
     terminal_values,
@@ -146,10 +148,11 @@ RAW_URL = "https://raw.githubusercontent.com/Team-Nando/MV-LV-Networks/{commit}/
 # demand as a fraction of the transformer kVA, at pf 0.95 lagging
 POWER_FACTOR = 0.95
 MIN_DEMAND = 0.10
-# pending decision D-M10-1: the 0.60 of the approved plan is infeasible (OpenDSS does not converge and the voltage
-# collapses to 0.29 pu on SMR8 and 0.53 pu on KLO14, see the README); 0.20 keeps every regulator within its rating
+# decision D47 (docs/advanced_documentation/multi-phase-and-swer-design.md): the 0.60 first approved is infeasible
+# (OpenDSS does not converge and the voltage collapses to 0.29 pu on SMR8 and 0.53 pu on KLO14); 0.20 keeps every
+# regulator within its rating
 MAX_DEMAND = 0.20
-# self-check 5: the lowest node voltage of every class at either demand
+# self-check 5: the lowest node voltage of every class at either demand (below it: the D47 message)
 MIN_VOLTAGE_PU = 0.8
 
 # the ID scheme (see the module docstring)
@@ -219,14 +222,14 @@ SC_CASE_PARAMS = {
 # the measured agreement, for the README
 SC_AGREEMENT = {
     "smr8": (
-        "Measured: the fault currents agree to 6.7e-11 relative (as phasors, so the angles too), the branch currents"
-        " above 1 A to 5.4e-9 relative and those up to 10 A to 3.6e-8 A absolute, a worst ratio of 0.033 (the 66 kV"
-        " current of the zone substation in scenario 4, 9.7 A)."
+        "Measured: the fault current magnitudes agree to 6.7e-11 relative and the phasors to 3.0e-10, the branch"
+        " current magnitudes above 1 A to 5.4e-9 relative and the currents up to 10 A to 3.6e-8 A absolute (as"
+        " phasors), a worst ratio of 0.033 (the 66 kV current of the zone substation in scenario 4, 9.7 A)."
     ),
     "klo14": (
-        "Measured: the fault currents agree to 9.2e-11 relative (as phasors, so the angles too), the branch currents"
-        " above 1 A to 6.0e-9 relative and those up to 10 A to 3.2e-8 A absolute, a worst ratio of 0.030 (the 66 kV"
-        " current of the zone substation in scenario 3, 3.8 A)."
+        "Measured: the fault current magnitudes agree to 9.2e-11 relative and the phasors to 2.9e-10, the branch"
+        " current magnitudes above 1 A to 6.0e-9 relative and the currents up to 10 A to 3.2e-8 A absolute (as"
+        " phasors), a worst ratio of 0.030 (the 66 kV current of the zone substation in scenario 3, 3.8 A)."
     ),
 }
 
@@ -281,10 +284,10 @@ KIND_SPLIT = "split-phase"
 KIND_SWER = "SWER"
 KIND_1PH_22KV = "22 kV phase-to-earth"
 
-D_M10_1_MESSAGE = (
-    "maximum demand MAX_DEMAND = {max_demand} of the transformer kVA is infeasible on {network} (decision D-M10-1 of"
-    " the M10 plan: the approved 0.60 does not converge in OpenDSS and collapses the voltage; 0.20 is the recommended"
-    " maximum)"
+D47_MESSAGE = (
+    "maximum demand MAX_DEMAND = {max_demand} of the transformer kVA is infeasible on {network} (decision D47 in"
+    " docs/advanced_documentation/multi-phase-and-swer-design.md: 0.60 does not converge in OpenDSS and collapses the"
+    " voltage; 0.20 is the chosen maximum)"
 )
 
 
@@ -941,7 +944,7 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
                 else:
                     assert kv == (22, 0.433)
                     assert not on_swer
-                    # decision D-M10-3: both data ratings taken phase-to-earth (the data's turns ratio)
+                    # decision D52: both data ratings taken phase-to-earth (the data's turns ratio)
                     kind = KIND_1PH_22KV
                     node_class[lv], u2 = CLASS_LV_1PH, 250.0
                 node_u_rated[lv] = u2 * math.sqrt(3.0)
@@ -955,7 +958,7 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
     counts = Counter(distribution_kind.values())
     assert {kind: counts[kind] for kind in spec.distribution_transformers} == spec.distribution_transformers, counts
 
-    # demand (decisions D-M10-1 and D-M10-2)
+    # demand (decisions D47 and D48)
     iso_swer_kva = {iso.id: 0.0 for iso in isos}
     iso_of_load = {}
     for t in distribution:
@@ -1205,49 +1208,52 @@ def check_unique_pgm_ids(network: Network):
 # PGM input rows
 
 
+def pgm_line(line: LineSection, code: dict) -> dict[str, int | float]:
+    """the PGM row of a line (b of the LineCode in uS/km): a three-phase line is a line with the sequence values of its
+    LineCode, a one-phase line an asym_line on phase a with Z1 and C1 only (as OpenDSS solves a 1-phase LineCode)"""
+    length = line.length
+    row: dict[str, int | float] = {
+        "id": line.id,
+        "from_node": line.from_node,
+        "to_node": line.to_node,
+        "from_status": 1,
+        "to_status": 1,
+    }
+    i_n = float(min(code["Ampacity1"], code["Ampacity2"]))
+    if line.phases == 3:
+        row.update(
+            {
+                "r1": code["r1"] * length,
+                "x1": code["x1"] * length,
+                "c1": code["b1"] * 1e-6 / OMEGA * length,
+                "tan1": 0.0,
+                "r0": code["r0"] * length,
+                "x0": code["x0"] * length,
+                "c0": code["b0"] * 1e-6 / OMEGA * length,
+                "tan0": 0.0,
+                "i_n": i_n,
+            }
+        )
+    else:
+        row.update(
+            {
+                "phases": 1,
+                "r_aa": code["r1"] * length,
+                "x_aa": code["x1"] * length,
+                "c_aa": code["b1"] * 1e-6 / OMEGA * length,
+                "i_n": i_n,
+            }
+        )
+    return row
+
+
 def pgm_rows(network: Network, loads: list[Load]) -> dict[str, list[dict]]:
     """the PGM input of the network with the given loads, per component, sorted by id"""
     case = network.case()
-    lines = []
-    asym_lines = []
+    rows: dict[int, list[dict]] = {3: [], 1: []}
     for line in network.lines:
-        code = network.linecodes[line.code]
-        length = line.length
-        row: dict[str, int | float] = {
-            "id": line.id,
-            "from_node": line.from_node,
-            "to_node": line.to_node,
-            "from_status": 1,
-            "to_status": 1,
-        }
-        i_n = float(min(code["Ampacity1"], code["Ampacity2"]))
-        if line.phases == 3:
-            row.update(
-                {
-                    "r1": code["r1"] * length,
-                    "x1": code["x1"] * length,
-                    "c1": code["b1"] * 1e-6 / OMEGA * length,
-                    "tan1": 0.0,
-                    "r0": code["r0"] * length,
-                    "x0": code["x0"] * length,
-                    "c0": code["b0"] * 1e-6 / OMEGA * length,
-                    "tan0": 0.0,
-                    "i_n": i_n,
-                }
-            )
-            lines.append(row)
-        else:
-            # OpenDSS solves a 1-phase LineCode with Z1 and C1 only
-            row.update(
-                {
-                    "phases": 1,
-                    "r_aa": code["r1"] * length,
-                    "x_aa": code["x1"] * length,
-                    "c_aa": code["b1"] * 1e-6 / OMEGA * length,
-                    "i_n": i_n,
-                }
-            )
-            asym_lines.append(row)
+        rows[line.phases].append(pgm_line(line, network.linecodes[line.code]))
+    lines, asym_lines = rows[3], rows[1]
     return {
         "node": [{"id": node, "u_rated": network.node_u_rated[node]} for node in sorted(network.node_u_rated)],
         "line": lines,
@@ -1279,6 +1285,30 @@ def pgm_rows(network: Network, loads: list[Load]) -> dict[str, list[dict]]:
 # OpenDSS model
 
 
+def dss_linecode(key: str, code: dict) -> str:
+    """the OpenDSS LineCode lc{key}, with the sheet values verbatim (b in uS/km)"""
+    return (
+        f"New LineCode.lc{key} nphases={code['Phases']} r1={code['r1']!r} x1={code['x1']!r} b1={code['b1']!r}"
+        f" r0={code['r0']!r} x0={code['x0']!r} b0={code['b0']!r} units=km"
+    )
+
+
+def dss_line(line: LineSection, from_bus: str, to_bus: str) -> str:
+    """the OpenDSS Line l{id} on its LineCode, on phases 1, 2, 3 or (one-phase) 1 of the buses"""
+    nodes = ".1.2.3" if line.phases == 3 else ".1"
+    return (
+        f"New Line.l{line.id} phases={line.phases} bus1={from_bus}{nodes} bus2={to_bus}{nodes}"
+        f" linecode=lc{line.code} length={line.length!r} units=km"
+    )
+
+
+def dss_capacitor(capacitor: dict, bus: str) -> str:
+    """the OpenDSS Capacitor c{id}: three-phase, grounded wye (the default)"""
+    return (
+        f"New Capacitor.c{capacitor['id']} bus1={bus}.1.2.3 phases=3 kvar={capacitor['kvar']!r} kV={capacitor['kv']!r}"
+    )
+
+
 def dss_network(network: Network, voltage_pu: float = 1.0) -> list[str]:
     """the OpenDSS network without loads: the circuit (source), LineCodes, Lines, Capacitors and the transformers with
     their low-susceptance Reactors; voltage_pu = c scales the source voltage and impedance (IEC 60909)"""
@@ -1295,21 +1325,9 @@ def dss_network(network: Network, voltage_pu: float = 1.0) -> list[str]:
             f" Z1=[{z1.real!r}, {z1.imag!r}] Z0=[{z0.real!r}, {z0.imag!r}]"
         ),
     ]
-    for key, code in network.linecodes.items():
-        commands.append(
-            f"New LineCode.lc{key} nphases={code['Phases']} r1={code['r1']!r} x1={code['x1']!r} b1={code['b1']!r}"
-            f" r0={code['r0']!r} x0={code['x0']!r} b0={code['b0']!r} units=km"
-        )
-    for line in network.lines:
-        nodes = ".1.2.3" if line.phases == 3 else ".1"
-        commands.append(
-            f"New Line.l{line.id} phases={line.phases} bus1=n{line.from_node}{nodes} bus2=n{line.to_node}{nodes}"
-            f" linecode=lc{line.code} length={line.length!r} units=km"
-        )
-    commands += [
-        f"New Capacitor.c{c['id']} bus1=n{c['node']}.1.2.3 phases=3 kvar={c['kvar']!r} kV={c['kv']!r}"
-        for c in sorted(network.capacitors, key=lambda c: c["id"])
-    ]
+    commands += [dss_linecode(key, code) for key, code in network.linecodes.items()]
+    commands += [dss_line(line, f"n{line.from_node}", f"n{line.to_node}") for line in network.lines]
+    commands += [dss_capacitor(c, f"n{c['node']}") for c in sorted(network.capacitors, key=lambda c: c["id"])]
     transformers: list[ThreePhaseTransformer | Transformer1P] = [
         *network.three_phase_transformers(),
         *network.single_phase_transformers(),
@@ -1372,7 +1390,7 @@ def run_commands(commands: list[str]):
 
 
 def element_yprim(name: str) -> np.ndarray:
-    dss.Circuit.SetActiveElement(name)
+    set_active_element(name)
     raw = np.array(dss.CktElement.YPrim())
     y = raw[0::2] + 1j * raw[1::2]
     n = math.isqrt(len(y))
@@ -1397,33 +1415,34 @@ def small_circuit(kv: float, elements: list[str]):
 
 
 def check_linecodes(network: Network):
-    """self-check 1: a 1-km line of every used LineCode. Three-phase: the Line's R, X and C matrices are the
-    (2 Z1 + Z0) / 3 and (Z0 - Z1) / 3 forms (C from b / omega). One-phase: the YPrim series impedance is Z1 and the
-    shunt is C1 (r0, x0, b0 ignored), which catches the semantics changing with the OpenDSS version"""
-    commands = [
-        f"New LineCode.lc{key} nphases={code['Phases']} r1={code['r1']!r} x1={code['x1']!r} b1={code['b1']!r}"
-        f" r0={code['r0']!r} x0={code['x0']!r} b0={code['b0']!r} units=km"
-        for key, code in network.linecodes.items()
+    """self-check 1: a 1-km line of every used LineCode, written as in the network, against the PGM row of the same
+    line (pgm_line). Three-phase: the Line's R, X and C matrices are the (2 Z1 + Z0) / 3 and (Z0 - Z1) / 3 forms of
+    the row's r1, x1, c1, r0, x0, c0. One-phase: the YPrim series impedance is r_aa + j x_aa and the shunt c_aa (r0,
+    x0, b0 ignored), which catches the semantics changing with the OpenDSS version"""
+    test_lines = [
+        LineSection(id=k, from_node=0, to_node=0, phases=code["Phases"], length=1.0, code=key)
+        for k, (key, code) in enumerate(network.linecodes.items())
     ]
-    for k, (key, code) in enumerate(network.linecodes.items()):
-        nodes = ".1.2.3" if code["Phases"] == 3 else ".1"
-        commands.append(
-            f"New Line.k{k} phases={code['Phases']} bus1=src{nodes} bus2=x{k}{nodes} linecode=lc{key} length=1 units=km"
-        )
-    small_circuit(22.0, commands)
+    small_circuit(
+        22.0,
+        [
+            *(dss_linecode(key, code) for key, code in network.linecodes.items()),
+            *(dss_line(line, "src", f"x{line.id}") for line in test_lines),
+        ],
+    )
     worst = {1: 0.0, 3: 0.0}
     worst_shunt = 0.0
-    for k, (key, code) in enumerate(network.linecodes.items()):
-        z1 = complex(code["r1"], code["x1"])
-        c1 = code["b1"] * 1e-6 / OMEGA
-        if code["Phases"] == 3:
-            z0 = complex(code["r0"], code["x0"])
-            c0 = code["b0"] * 1e-6 / OMEGA
+    for line in test_lines:
+        key = line.code
+        row = pgm_line(line, network.linecodes[key])
+        if line.phases == 3:
+            z1, z0 = complex(row["r1"], row["x1"]), complex(row["r0"], row["x0"])
+            c1, c0 = row["c1"], row["c0"]
             z_self, z_mutual = (2.0 * z1 + z0) / 3.0, (z0 - z1) / 3.0
             c_self, c_mutual = (2.0 * c1 + c0) / 3.0, (c0 - c1) / 3.0
             z_expected = np.full((3, 3), z_mutual) + np.eye(3) * (z_self - z_mutual)
             c_expected = np.full((3, 3), c_mutual) + np.eye(3) * (c_self - c_mutual)
-            dss.Lines.Name(f"k{k}")
+            dss.Lines.Name(f"l{line.id}")
             z = (np.array(dss.Lines.RMatrix()) + 1j * np.array(dss.Lines.XMatrix())).reshape(3, 3)
             c = np.array(dss.Lines.CMatrix()).reshape(3, 3) * 1e-9
             dev = max(
@@ -1431,7 +1450,8 @@ def check_linecodes(network: Network):
                 np.max(np.abs(c - c_expected)) / np.max(np.abs(c_expected)),
             )
         else:
-            y = element_yprim(f"Line.k{k}")
+            z1, c1 = complex(row["r_aa"], row["x_aa"]), row["c_aa"]
+            y = element_yprim(f"Line.l{line.id}")
             assert y.shape == (2, 2)
             y_series = 1.0 / z1
             shunt = 0.5j * OMEGA * c1
@@ -1439,11 +1459,11 @@ def check_linecodes(network: Network):
             # the series impedance on its own, and the whole YPrim (the shunt to the round-off of y_series + shunt)
             dev = max(abs(-1.0 / y[0, 1] / z1 - 1.0), np.max(np.abs(y - y_expected)) / np.max(np.abs(y_expected)))
             worst_shunt = max(worst_shunt, abs((y[0, 0] + y[0, 1]) / shunt - 1.0))
-        assert dev < 1e-12, f"LineCode {key}: OpenDSS differs from the expected line model by {dev:.1e} relative"
-        worst[code["Phases"]] = max(worst[code["Phases"]], dev)
+        assert dev < 1e-12, f"LineCode {key}: OpenDSS differs from the PGM line by {dev:.1e} relative"
+        worst[line.phases] = max(worst[line.phases], dev)
     n3 = sum(1 for code in network.linecodes.values() if code["Phases"] == 3)
     print(
-        f"  check 1: {n3} three-phase LineCodes match the (2 Z1 + Z0) / 3, (Z0 - Z1) / 3 forms (max dev"
+        f"  check 1: {n3} three-phase LineCodes match the (2 Z1 + Z0) / 3, (Z0 - Z1) / 3 forms of the PGM line (max dev"
         f" {worst[3]:.1e}); {len(network.linecodes) - n3} one-phase LineCodes solve with Z1 and C1 (max dev"
         f" {worst[1]:.1e}, shunt alone {worst_shunt:.1e})"
     )
@@ -1477,7 +1497,7 @@ def check_three_phase_transformer(t: ThreePhaseTransformer) -> tuple[float, floa
     small_circuit(t.u1 / 1e3, elements)
     y = element_yprim(f"Transformer.t{t.id}")
     assert y.shape == (8, 8)
-    dss.Circuit.SetActiveElement(f"Transformer.t{t.id}")
+    set_active_element(f"Transformer.t{t.id}")
     order = dss.CktElement.NodeOrder()
     assert list(order[0:3]) == [1, 2, 3]
     assert list(order[4:7]) == [1, 2, 3]
@@ -1537,7 +1557,7 @@ def check_capacitors(network: Network):
     """self-check 4: the capacitor YPrim is j b I (the PGM shunt with b1 = b0 = b)"""
     worst = 0.0
     for c in network.capacitors:
-        small_circuit(22.0, [f"New Capacitor.c{c['id']} bus1=src.1.2.3 phases=3 kvar={c['kvar']!r} kV={c['kv']!r}"])
+        small_circuit(22.0, [dss_capacitor(c, "src")])
         y = element_yprim(f"Capacitor.c{c['id']}")[:3, :3]
         expected = 1j * c["b"] * np.eye(3)
         dev = np.max(np.abs(y - expected)) / c["b"]
@@ -1551,8 +1571,8 @@ def check_capacitors(network: Network):
 
 
 def solve(network: Network, commands: list[str], label: str) -> int:
-    """run the commands (ending in Solve); abort with the D-M10-1 message if OpenDSS does not converge"""
-    message = D_M10_1_MESSAGE.format(max_demand=MAX_DEMAND, network=network.spec.name)
+    """run the commands (ending in Solve); abort with the D47 message if OpenDSS does not converge"""
+    message = D47_MESSAGE.format(max_demand=MAX_DEMAND, network=network.spec.name)
     try:
         run_commands(commands)
     except dss.DSSException as error:
@@ -1571,7 +1591,7 @@ def check_load_powers(network: Network, loads: list[Load]) -> float:
         for name, _, _ in dss_load_elements(case, load):
             k = "abc".index(name[-1])
             expected = complex(p[k], q[k])
-            dss.Circuit.SetActiveElement(f"Load.{name}")
+            set_active_element(f"Load.{name}")
             raw = np.array(dss.CktElement.Powers()).reshape(-1, 2)
             actual = complex(*raw.sum(axis=0)) * 1e3
             dev = abs(actual - expected) / abs(expected)
@@ -1671,7 +1691,7 @@ def power_flow_summary(network: Network, label: str, iterations: int, loads: lis
     print(f"    regulator loading: {regulator_loading}; zone substation {summary.zone_loading:.1%}")
     failed = [node_class for node_class, (low, *_) in summary.extremes.items() if low < MIN_VOLTAGE_PU]
     if failed:
-        message = D_M10_1_MESSAGE.format(max_demand=MAX_DEMAND, network=network.spec.name)
+        message = D47_MESSAGE.format(max_demand=MAX_DEMAND, network=network.spec.name)
         raise SystemExit(f"{label}: node voltage below {MIN_VOLTAGE_PU} pu in {', '.join(failed)}: {message}")
     return summary
 
@@ -2338,10 +2358,11 @@ README_SHARED = """\
 
 - The LV networks are replaced by one lumped load per distribution transformer on a new LV busbar. The medium-voltage
   network, the SWER networks and every transformer of the source data are kept.
-- Voltage regulators are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl and %loadloss.
-  backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0; at the neutral
-  tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as YNyn0 (in positive
-  and zero sequence).
+- Voltage regulators (every `mvtx` row with equal primary and secondary kV, as in backend; on KLO14 this includes
+  PLENTY_VLY_RISE, 22/22 kV and 200 kVA) are fixed at the neutral tap as a YNyn0 bank on the rating with backend's xhl
+  and %loadloss. backend builds each one as three 12.7/1.27 kV autotransformers under a RegControl starting at tap 0;
+  at the neutral tap they are a 1:1 connection plus the leakage impedance, which both tools model identically as
+  YNyn0 (in positive and zero sequence).
 - ISO transformers (22/12.7 kV) are two-winding single-phase transformers from the phase pair of `Conn_Type` (R, W, B =
   a, b, c) to phase a of the SWER network, with clock 6 if `Conn_Type` lists the pair in reverse order; backend's open
   third winding is dropped. The OpenDSS buses are written literally from `Conn_Type`, so OpenDSS independently checks
@@ -2419,9 +2440,9 @@ to), `single_phase_transformer` and `transformer` (p and q, from and to, and the
 digits. It has no three-phase `line` output: the node voltages at both ends pin every line, and it keeps the data small.
 All datasets are written in the compact JSON format (a root `attributes` list per component and list rows).
 
-Tolerances: rtol {rtol} and atol {atol}, the smallest round values with a 10x margin over both scenarios (the power
-fields have their own atol: a branch power is computed from the voltages at its ends, so a short branch amplifies
-their round-off). {agreement}
+Tolerances: rtol {rtol} and atol {atol}, the smallest round values with a 10x margin over both scenarios, with the
+atol of the power fields at most 1e-3 (W, var). The power fields have their own atol: a branch power is computed from
+the voltages at its ends, so a short branch amplifies their round-off. {agreement}
 
 ## IDs
 
