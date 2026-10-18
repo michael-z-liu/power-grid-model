@@ -7,7 +7,7 @@ SPDX-License-Identifier: MPL-2.0 AND BSD-3-Clause
 
 # Validation case: power flow on the Australian rural SWER network KLO14
 
-Asymmetric power flow (`newton_raphson`) on the medium-voltage part of the rural 22 kV feeder KLO14 of AusNet Services
+Asymmetric power flow (`newton_raphson`, `iterative_current`) on the medium-voltage part of the rural 22 kV feeder KLO14 of AusNet Services
 (Victoria, Australia), with its SWER (single-wire earth return) networks, with OpenDSS as the reference solver. It is a
 batch of two scenarios: scenario 0 at minimum and scenario 1 at maximum demand. `input.json` holds the minimum demand
 and `update_batch.json` sets the `asym_load` powers of both scenarios. There is no single-calculation output
@@ -150,7 +150,7 @@ All datasets are written in the compact JSON format (a root `attributes` list pe
 
 Tolerances: rtol 1e-06 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios, with the
 atol of the power fields at most 1e-3 (W, var). The power fields have their own atol: a branch power is computed from
-the voltages at its ends, so a short branch amplifies their round-off. Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (7 and 9 iterations) misses the rule (worst ratio 0.207, on the powers through the regulator PLENTY_VLY_RISE), so it is not run.
+the voltages at its ends, so a short branch amplifies their round-off. Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (error tolerance 1e-10, 9 and 12 iterations) has its own atol of 1e-2 on the power fields, set in `extra_params` so that newton_raphson keeps 1e-3 (worst ratios 0.018 and 0.016 for iterative_current): its worst entry is the 795 W phase-c flow through the 200 kVA regulator PLENTY_VLY_RISE, where it is off by about 2e-4 W of round-off (newton_raphson 1.2e-4 W), a ratio of 0.11 against 1e-3. The round-off comes from the fixed point of the iteration, which solves the rounded matrix, so a tighter error tolerance does not remove it. A residual (defect-correction) form of iterative_current was tried and rejected: it did not agree better with newton_raphson.
 
 ## IDs
 

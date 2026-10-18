@@ -145,9 +145,9 @@ to), `single_phase_transformer` and `transformer` (p and q, from and to, and the
 digits. It has no three-phase `line` output: the node voltages at both ends pin every line, and it keeps the data small.
 All datasets are written in the compact JSON format (a root `attributes` list per component and list rows).
 
-Tolerances: rtol 1e-06 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios, with the
+Tolerances: rtol 1e-07 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios, with the
 atol of the power fields at most 1e-3 (W, var). The power fields have their own atol: a branch power is computed from
-the voltages at its ends, so a short branch amplifies their round-off. Measured: newton_raphson converges in 3 and 4 iterations and iterative_current in 8 and 12 (minimum, maximum demand); the node voltages agree to 1.1e-10 (newton_raphson) and 4.4e-10 (iterative_current) relative and the powers to 1.6e-3 W absolute, a worst ratio of 0.066.
+the voltages at its ends, so a short branch amplifies their round-off. Measured: newton_raphson converges in 3 and 4 iterations and iterative_current (error_tolerance 1e-10) in 10 and 14 (minimum, maximum demand); the node voltages agree to 1.1e-10 (newton_raphson) and 9.6e-11 (iterative_current) relative and the powers to 1.0e-3 W absolute, worst ratios of 0.050 (newton_raphson) and 0.044 (iterative_current). At the default error tolerance 1e-8 iterative_current needed rtol 1e-6 (ratio 0.066).
 
 ## IDs
 

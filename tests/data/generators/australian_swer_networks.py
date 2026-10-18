@@ -106,6 +106,7 @@ from openpyxl import load_workbook
 from reduced_phase_opendss_cases import (
     CENTER_TAPPED,
     FREQ,
+    IC_ERROR_TOLERANCE,
     SC_PARAMS,
     Case,
     Fault,
@@ -177,30 +178,59 @@ DSS_VOLTAGE_BASES = "[66, 22, 0.433, 0.4157]"
 # the smallest round atol, for which the worst |actual - expected| / (atol + rtol |expected|) over all methods and
 # both scenarios is below 0.1 (a 10x margin), as measured by reduced_phase_compare_pgm.py. For these networks the
 # power fields (p and q, from and to) get their own atol of at most 1e-3 (W, var): a branch power is computed from the
-# voltages at its ends, so a short branch (down to Z_MERGE_OHM) amplifies their round-off. iterative_current (at most
-# 12 iterations) passes the rule on SMR8 but not on KLO14, so KLO14 runs newton_raphson only.
+# voltages at its ends, so a short branch (down to Z_MERGE_OHM) amplifies their round-off. iterative_current runs with
+# IC_ERROR_TOLERANCE (extra_params, so newton_raphson keeps its default: it stalls at about 5e-11 on these networks).
+# On KLO14 it also gets its own atol of 1e-2 on the power fields (newton_raphson keeps 1e-3): the worst entry is the
+# 795 W phase-c flow through the 200 kVA regulator PLENTY_VLY_RISE, where iterative_current is off by about 2e-4 W of
+# round-off (newton_raphson by 1.2e-4 W), 0.11 of the 1e-3 + 1e-6 x 795 W tolerance. The cause is the fixed point of
+# the iteration: it solves the rounded matrix, so the LU round-off is not removed by iterating (err_tol 1e-9 to 1e-14
+# all give the same 0.11), whereas newton_raphson zeroes a residual that uses the true matrix. A defect-correction
+# (residual) form of iterative_current was tried and rejected: it only turned it into a residual-noise-limited method
+# like newton_raphson (stall at 3e-11 to 5e-11, ratios moving with the tolerance) without a systematic gain. With the
+# IC-only atol the worst ratio of iterative_current is 0.018. SMR8 needs no IC-only atol; its IC_ERROR_TOLERANCE run
+# agrees as well as newton_raphson (worst ratios 0.028 and 0.050), which tightens its rtol from 1e-6 (the rtol that
+# iterative_current needed at the default error tolerance 1e-8, ratio 0.066) to 1e-7. KLO14 stays at 1e-6, which
+# newton_raphson needs (rtol 1e-7 gives 0.137).
 POWER_FIELDS = "[pq]_(from|to)"
+KLO14_IC_POWER_ATOL = 1e-2
+IC_EXTRA_PARAMS = {"error_tolerance": IC_ERROR_TOLERANCE}
 PF_PARAMS = {
-    name: {
-        "calculation_method": methods,
+    "smr8": {
+        "calculation_method": ["newton_raphson", "iterative_current"],
+        "rtol": 1e-7,
+        "atol": {"default": 1e-8, POWER_FIELDS: 1e-3},
+        "experimental_features": "enabled",
+        "extra_params": {"iterative_current": dict(IC_EXTRA_PARAMS)},
+    },
+    "klo14": {
+        "calculation_method": ["newton_raphson", "iterative_current"],
         "rtol": 1e-6,
         "atol": {"default": 1e-8, POWER_FIELDS: 1e-3},
         "experimental_features": "enabled",
-    }
-    for name, methods in (("smr8", ["newton_raphson", "iterative_current"]), ("klo14", "newton_raphson"))
+        "extra_params": {
+            "iterative_current": dict(IC_EXTRA_PARAMS, atol={"default": 1e-8, POWER_FIELDS: KLO14_IC_POWER_ATOL})
+        },
+    },
 }
 # the measured agreement, for the README
 PF_AGREEMENT = {
     "smr8": (
-        "Measured: newton_raphson converges in 3 and 4 iterations and iterative_current in 8 and 12 (minimum, maximum"
-        " demand); the node voltages agree to 1.1e-10 (newton_raphson) and 4.4e-10 (iterative_current) relative and"
-        " the powers to 1.6e-3 W absolute, a worst ratio of 0.066."
+        "Measured: newton_raphson converges in 3 and 4 iterations and iterative_current (error_tolerance 1e-10) in 10"
+        " and 14 (minimum, maximum demand); the node voltages agree to 1.1e-10 (newton_raphson) and 9.6e-11"
+        " (iterative_current) relative and the powers to 1.0e-3 W absolute, worst ratios of 0.050 (newton_raphson)"
+        " and 0.044 (iterative_current). At the default error tolerance 1e-8 iterative_current needed rtol 1e-6"
+        " (ratio 0.066)."
     ),
     "klo14": (
         "Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree"
-        " to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (7 and 9"
-        " iterations) misses the rule (worst ratio 0.207, on the powers through the regulator PLENTY_VLY_RISE), so it"
-        " is not run."
+        " to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (error"
+        " tolerance 1e-10, 9 and 12 iterations) has its own atol of 1e-2 on the power fields, set in `extra_params`"
+        " so that newton_raphson keeps 1e-3 (worst ratios 0.018 and 0.016 for iterative_current): its worst entry is"
+        " the 795 W phase-c flow through the 200 kVA regulator PLENTY_VLY_RISE, where it is off by about 2e-4 W of"
+        " round-off (newton_raphson 1.2e-4 W), a ratio of 0.11 against 1e-3. The round-off comes from the fixed point"
+        " of the iteration, which solves the rounded matrix, so a tighter error tolerance does not remove it. A"
+        " residual (defect-correction) form of iterative_current was tried and rejected: it did not agree better with"
+        " newton_raphson."
     ),
 }
 
