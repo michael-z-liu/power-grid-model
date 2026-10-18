@@ -28,6 +28,18 @@ exact floats and references are rounded to 12 significant digits. The reference 
 single_phase_transformer and transformer (p, q from and to, loading); it has no three-phase line output (the node
 voltages at both ends pin every line, and it keeps the data small).
 
+It also writes tests/data/short_circuit/australian-swer/{smr8,klo14}: a batch IEC 60909 short circuit (maximum,
+c = 1.1) on the same network without loads, one fault (ID 6_000_000) re-pointed per scenario by update_batch.json. The
+fault nodes are selected deterministically on the merged network (fault_scenarios; the table is in the README):
+the zone-substation bus, the 22 kV node with the largest path impedance, the secondary of the largest regulator, the
+SWER node with the largest path impedance from its ISO (bolted and through 20 + j5 ohm), and the LV busbars of a SWER,
+the largest split-phase, the largest three-phase and (KLO14) the largest 22 kV phase-to-earth transformer. test.dss
+builds the network once and, per scenario, defines the fault elements (named f6000000s{k}), solves and disables them;
+the reference is read after each Solve. It has fault (i_f, i_f_angle), single_phase_transformer and transformer
+(i_from, i_to and their angles), no node or line output (size). Self-checks: the Reactor of a fault with x_f carries
+V / z_f, and a bolted two-phase fault solved on its own with a 10x larger bridge gives the same fault current. The same
+faults are also solved on the source network, for the effect of the merge in the README.
+
 Modelling choices (derived from backend.py; the deviations are listed):
 
 - IDs: an MV node keeps its AusNet Node_ID; the 66 kV source bus is 1_000_000; the LV busbar of distribution
@@ -93,18 +105,26 @@ from openpyxl import load_workbook
 from reduced_phase_opendss_cases import (
     CENTER_TAPPED,
     FREQ,
+    SC_PARAMS,
     Case,
+    Fault,
     Load,
     Transformer1P,
+    bus_phasors,
     bus_voltages,
     check_center_tapped_transformer,
+    check_fault_impedance,
     check_transformer,
     dss_load_elements,
+    fault_currents,
     fmt_matrix,
+    mag_angle,
+    pgm_fault,
     short_circuit_impedance,
     source_z,
     terminal_values,
     transformer_pf_reference,
+    transformer_sc_reference,
 )
 
 OMEGA = 2.0 * math.pi * FREQ
@@ -178,6 +198,35 @@ PF_AGREEMENT = {
         " to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (7 and 9"
         " iterations) misses the rule (worst ratio 0.207, on the powers through the regulator PLENTY_VLY_RISE), so it"
         " is not run."
+    ),
+}
+
+# Short circuit: IEC 60909 maximum (c = 1.1, as PGM takes it from the 66 kV source node), no loads. The fault
+# impedances of the scenarios: a two-phase fault on 22 kV gets r_f = 0.5 ohm (a bolted 22 kV bridge has a round-off of
+# about 1.6e-2 in OpenDSS, see reduced_phase_opendss_cases.py), and the high-impedance SWER fault r_f + j x_f.
+SC_VOLTAGE_FACTOR = 1.1
+TWO_PHASE_R_F = 0.5
+SWER_FAULT_Z = complex(20.0, 5.0)
+# Tolerances, by the rule above: rtol 1e-9 misses it (the fault current angles agree to about 3e-10 relative). The
+# branch currents (i_from, i_to and their angles) get their own atol of 1e-6 A: a small current through a
+# low-impedance branch (the charging currents through the ISOs and regulators, the 66 kV current of the zone
+# substation for a remote fault) is computed from a small voltage difference, which amplifies the voltage round-off of
+# about 1e-10 to a few 1e-8 A.
+BRANCH_CURRENT_FIELDS = "i_(from|to)(_angle)?"
+SC_CASE_PARAMS = {
+    name: dict(SC_PARAMS, rtol=1e-8, atol={"default": 1e-8, BRANCH_CURRENT_FIELDS: 1e-6}) for name in ("smr8", "klo14")
+}
+# the measured agreement, for the README
+SC_AGREEMENT = {
+    "smr8": (
+        "Measured: the fault currents agree to 6.7e-11 relative (as phasors, so the angles too), the branch currents"
+        " above 1 A to 5.4e-9 relative and those up to 10 A to 3.6e-8 A absolute, a worst ratio of 0.033 (the 66 kV"
+        " current of the zone substation in scenario 4, 9.7 A)."
+    ),
+    "klo14": (
+        "Measured: the fault currents agree to 9.2e-11 relative (as phasors, so the angles too), the branch currents"
+        " above 1 A to 6.0e-9 relative and those up to 10 A to 3.2e-8 A absolute, a worst ratio of 0.030 (the 66 kV"
+        " current of the zone substation in scenario 3, 3.8 A)."
     ),
 }
 
@@ -1826,6 +1875,301 @@ def run_power_flow(network: Network) -> PowerFlowRun:
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# short circuit
+
+
+@dataclass
+class ScenarioFault(Fault):
+    """a Fault whose OpenDSS elements are named per scenario (f{id}s{scenario}), so that every scenario of test.dss
+    defines new elements and disables them after its Solve; the PGM fault ID stays FAULT_ID"""
+
+    scenario: int = 0
+
+    def dss_elements(self, bridge_scale=1.0):
+        prefix = f".f{self.id}"
+        return [
+            (element.replace(prefix, f"{prefix}s{self.scenario}", 1), definition)
+            for element, definition in super().dss_elements(bridge_scale)
+        ]
+
+
+@dataclass(frozen=True)
+class FaultScenario:
+    fault: ScenarioFault
+    location: str  # where, for the README
+    reason: str  # why this node, for the README
+
+
+def path_impedances(network: Network) -> dict[int, float]:
+    """the series impedance sum |z1| L of the lines on the path from the source bus to every node, along the breadth
+    first tree of the network (the branches of a node in the order of their ids; a transformer counts 0)"""
+    z_line = {line.id: line_impedance(line, network.linecodes) for line in network.lines}
+    adjacency = defaultdict(list)
+    for branch_id, a, b in sorted(network_edges(network)):
+        adjacency[a].append((branch_id, b))
+        adjacency[b].append((branch_id, a))
+    path = {SOURCE_NODE: 0.0}
+    queue = deque([SOURCE_NODE])
+    while queue:
+        node = queue.popleft()
+        for branch_id, other in adjacency[node]:
+            if other not in path:
+                path[other] = path[node] + z_line.get(branch_id, 0.0)
+                queue.append(other)
+    assert path.keys() == network.node_u_rated.keys(), "a node is not reachable from the source"
+    return path
+
+
+def swer_of_nodes(network: Network) -> dict[int, Transformer1P]:
+    """the ISO that feeds each SWER node (through one-phase lines from its secondary)"""
+    adjacency = defaultdict(list)
+    for line in network.lines:
+        if line.phases == 1:
+            adjacency[line.from_node].append(line.to_node)
+            adjacency[line.to_node].append(line.from_node)
+    iso_of: dict[int, Transformer1P] = {}
+    for iso in sorted(network.isos, key=lambda t: t.id):
+        iso_of[iso.to_node] = iso
+        queue = deque([iso.to_node])
+        while queue:
+            node = queue.popleft()
+            for other in adjacency[node]:
+                if other not in iso_of:
+                    iso_of[other] = iso
+                    queue.append(other)
+    swer_nodes = {node for node, node_class in network.node_class.items() if node_class == CLASS_SWER}
+    assert iso_of.keys() == swer_nodes, "a SWER node is not fed by exactly one ISO"
+    return iso_of
+
+
+def largest(items, key):
+    """the item with the largest key; on a tie the one with the lowest id (items are (id, value) pairs)"""
+    return min(items, key=lambda item: (-key(item), item[0]))
+
+
+def fault_scenarios(network: Network) -> list[FaultScenario]:
+    """the fault scenarios of the short-circuit case (the table of the README), selected on the merged network, so every
+    fault node exists in both tools. Path impedance: the sum |z1| L of the lines on the breadth-first tree path
+    (path_impedances); every tie goes to the lowest id"""
+    path = path_impedances(network)
+    iso_of = swer_of_nodes(network)
+    scenarios: list[FaultScenario] = []
+
+    def add(fault: tuple[int, str, str, float, float], location: str, reason: str):
+        """fault: (node, fault_type, fault_phase, r_f, x_f)"""
+        node, fault_type, phase, r_f, x_f = fault
+        scenario = ScenarioFault(FAULT_ID, node, fault_type, phase, r_f, x_f, scenario=len(scenarios))
+        scenarios.append(FaultScenario(scenario, location, reason))
+
+    zone_bus = network.zone.to_node
+    add((zone_bus, "three_phase", "abc", 0.0, 0.0), "zone-substation 22 kV bus", "the secondary of the zone substation")
+
+    mv_nodes = [(node, path[node]) for node, node_class in network.node_class.items() if node_class == CLASS_MV]
+    node, z = largest(mv_nodes, key=lambda item: item[1])
+    add(
+        (node, "single_phase_to_ground", "a", 0.0, 0.0),
+        "22 kV line end",
+        f"the 22 kV node with the largest path impedance from the zone-substation bus ({z - path[zone_bus]:.4g} ohm)",
+    )
+
+    regulator = min(network.regulators, key=lambda t: (-t.sn, t.id))
+    add(
+        (regulator.to_node, "two_phase", "bc", TWO_PHASE_R_F, 0.0),
+        f"secondary bus of the regulator {network.regulator_names[regulator.id]}",
+        (
+            f"the largest regulator ({regulator.sn / 1e3:g} kVA); r_f = {TWO_PHASE_R_F:g} ohm, since a bolted 22 kV"
+            " bridge has a round-off of about 1.6e-2 in OpenDSS"
+        ),
+    )
+
+    swer_nodes = [(node, path[node] - path[iso.to_node]) for node, iso in iso_of.items()]
+    node, z = largest(swer_nodes, key=lambda item: item[1])
+    iso_name = network.iso_names[iso_of[node].id]
+    reason = f"the SWER node with the largest path impedance from its ISO secondary ({iso_name}, {z:.4g} ohm)"
+    add((node, "single_phase_to_ground", "a", 0.0, 0.0), "SWER line end", reason)
+    add(
+        (node, "single_phase_to_ground", "a", SWER_FAULT_Z.real, SWER_FAULT_Z.imag),
+        "SWER line end (high-impedance fault, a Reactor in OpenDSS)",
+        "the node of scenario 3",
+    )
+
+    def by_kind(kind: str) -> list[Transformer1P | ThreePhaseTransformer]:
+        return [t for t in network.distribution if network.distribution_kind[t.id] == kind]
+
+    swer_transformers = [(t.id, path[t.from_node] - path[iso_of[t.from_node].to_node], t) for t in by_kind(KIND_SWER)]
+    _, z, t = largest(swer_transformers, key=lambda item: item[1])
+    add(
+        (t.to_node, "single_phase_to_ground", "a", 0.0, 0.0),
+        "LV busbar of a SWER transformer (240 V)",
+        (
+            f"the SWER transformer {t.id} ({network.distribution_kva[t.id]:g} kVA) whose primary has the largest path"
+            f" impedance from its ISO secondary ({network.iso_names[iso_of[t.from_node].id]}, {z:.4g} ohm)"
+        ),
+    )
+
+    for kind, fault_type, phase, location in (
+        (KIND_SPLIT, "two_phase", "ab", "LV busbar of a split-phase transformer (250-0-250 V)"),
+        (KIND_3PH, "three_phase", "abc", "LV busbar of a three-phase transformer (433 V)"),
+        (KIND_1PH_22KV, "single_phase_to_ground", "a", "LV busbar of a 22 kV phase-to-earth transformer (250 V)"),
+    ):
+        candidates = [(t.id, network.distribution_kva[t.id], t) for t in by_kind(kind)]
+        if not candidates:
+            continue
+        _, kva, t = largest(candidates, key=lambda item: item[1])
+        reason = f"the largest {kind} transformer, {t.id} ({kva:g} kVA)"
+        if kind == KIND_SPLIT:
+            reason += "; a bolted two-phase fault is accurate in OpenDSS here (the shorted legs sit near 0 V)"
+        add((t.to_node, fault_type, phase, 0.0, 0.0), location, reason)
+    return scenarios
+
+
+def three_phase_sc_reference(t: ThreePhaseTransformer) -> dict:
+    """per-phase currents of both sides of a PGM transformer (the neutral conductors dropped), with the mirror
+    Reactor's current on the from side"""
+    i_from, i_to = terminal_values(f"Transformer.t{t.id}", dss.CktElement.Currents, 4)
+    if t.low_susceptance() is not None:
+        i_low, _ = terminal_values(f"Reactor.lo{t.id}n{t.from_node}", dss.CktElement.Currents, 3)
+        i_from = i_from + i_low
+    i_from_mag, i_from_angle = mag_angle(i_from)
+    i_to_mag, i_to_angle = mag_angle(i_to)
+    return {"id": t.id, "i_from": i_from_mag, "i_from_angle": i_from_angle, "i_to": i_to_mag, "i_to_angle": i_to_angle}
+
+
+def sc_reference(network: Network, i_f: np.ndarray) -> dict[str, list[dict]]:
+    """the reference of a solved short-circuit scenario: fault, single_phase_transformer and transformer, each sorted
+    by id and rounded to 12 significant digits"""
+    i_f_mag, i_f_angle = mag_angle(i_f)
+    return rounded(
+        {
+            "fault": [{"id": FAULT_ID, "i_f": i_f_mag, "i_f_angle": i_f_angle}],
+            "single_phase_transformer": [
+                transformer_sc_reference(t, None)
+                for t in sorted(network.single_phase_transformers(), key=lambda t: t.id)
+            ],
+            "transformer": [
+                three_phase_sc_reference(t) for t in sorted(network.three_phase_transformers(), key=lambda t: t.id)
+            ],
+        }
+    )
+
+
+def dss_sc_setup(network: Network) -> list[str]:
+    """the network with the IEC 60909 source (pu = c, impedances times c), no loads, and the solution settings"""
+    return [
+        *dss_network(network, voltage_pu=SC_VOLTAGE_FACTOR),
+        f"Set VoltageBases={DSS_VOLTAGE_BASES}",
+        "CalcVoltageBases",
+        f"Set Tolerance={DSS_TOLERANCE:g}",
+        f"Set MaxIterations={DSS_MAX_ITERATIONS}",
+        "Set Mode=Snapshot",
+    ]
+
+
+def fault_definitions(fault: ScenarioFault, bridge_scale: float = 1.0) -> list[str]:
+    return [f"New {element} {definition}" for element, definition in fault.dss_elements(bridge_scale)]
+
+
+def solve_fault(network: Network, commands: list[str], fault: ScenarioFault) -> np.ndarray:
+    """run the commands (ending in Solve) and return the fault current"""
+    run_commands(commands)
+    assert dss.Solution.Converged(), f"{network.spec.name} scenario {fault.scenario}: OpenDSS did not converge"
+    return fault_currents(fault)
+
+
+@dataclass
+class ShortCircuitRun:
+    script: list[str]  # test.dss: exactly the commands that were run
+    scenarios: list[FaultScenario]
+    references: list[dict]  # per scenario
+    currents: list[np.ndarray]  # the fault current per scenario
+    iterations: list[int]
+    bridge: dict[int, float] = field(default_factory=dict)  # scenario -> the change of i_f with a 10x bridge
+    reactor: dict[int, float] = field(default_factory=dict)  # scenario -> the deviation of the Reactor from V / z_f
+    source_currents: list[np.ndarray] = field(default_factory=list)  # the fault currents in the source network
+
+
+def run_short_circuit(network: Network, source: Network) -> ShortCircuitRun:
+    """the batch short circuit, as test.dss runs it: the network once (IEC 60909 maximum, no loads), then per scenario
+    the fault elements, Solve, the reference read and the fault elements disabled. Self-check 6: a Reactor fault
+    carries V / z_f, and a bolted two-phase fault (a 1e-13 ohm bridge) gives the same fault current with a 10x larger
+    bridge, solved on its own afterwards. Finally the same faults on the source network (every line, the sheet uk of
+    the zone substation), for the effect of the merge"""
+    name = network.spec.name
+    scenarios = fault_scenarios(network)
+    dss.Basic.ClearAll()
+    run = ShortCircuitRun(
+        script=[
+            (
+                f"! short circuit (IEC 60909 maximum, c = {SC_VOLTAGE_FACTOR:g}) on the Australian SWER network {name};"
+                " written by tests/data/generators/australian_swer_networks.py, which runs these commands line by line"
+            ),
+            "! per scenario: the fault elements, Solve, (the reference is read), the fault elements disabled",
+        ],
+        scenarios=scenarios,
+        references=[],
+        currents=[],
+        iterations=[],
+    )
+    run_commands(run.script)
+    setup = dss_sc_setup(network)
+    run_commands(setup)
+    run.script += setup
+    for k, scenario in enumerate(scenarios):
+        fault = scenario.fault
+        commands = [
+            (
+                f"! scenario {k}: {fault.fault_type} {fault.fault_phase} at node {fault.node} ({scenario.location}),"
+                f" r_f = {fault.r_f:g} ohm, x_f = {fault.x_f:g} ohm"
+            ),
+            *fault_definitions(fault),
+            "Solve",
+        ]
+        i_f = solve_fault(network, commands, fault)
+        run.iterations.append(dss.Solution.Iterations())
+        if fault.x_f != 0.0:
+            check_fault_impedance(fault, i_f)
+            assert fault.fault_type == "single_phase_to_ground", "the README value covers one faulted phase"
+            k_phase = "abc".index(fault.fault_phase)
+            expected = bus_phasors(fault.node)[k_phase + 1] / complex(fault.r_f, fault.x_f)
+            run.reactor[k] = float(abs(i_f[k_phase] - expected) / abs(expected))
+        run.currents.append(i_f)
+        run.references.append(sc_reference(network, i_f))
+        disable = [f"Edit {element} enabled=no" for element, _ in fault.dss_elements()]
+        run_commands(disable)
+        run.script += [*commands, *disable]
+        print(
+            f"  scenario {k}: {fault.fault_type} {fault.fault_phase} at node {fault.node} ({scenario.location}):"
+            f" |i_f| = {', '.join(f'{abs(v):.6g}' for v in i_f)} A ({run.iterations[-1]} iterations)"
+        )
+    for k, scenario in enumerate(scenarios):
+        fault = scenario.fault
+        if not fault.has_bridge():
+            continue
+        dss.Basic.ClearAll()
+        i_f = solve_fault(network, [*setup, *fault_definitions(fault, bridge_scale=10.0), "Solve"], fault)
+        dev = float(np.max(np.abs(i_f - run.currents[k])) / np.max(np.abs(run.currents[k])))
+        assert dev < 1e-10, f"{name} scenario {k}: the bolted two-phase fault is not accurate ({dev:.1e} relative)"
+        run.bridge[k] = dev
+        print(f"  scenario {k}: a 10x larger bridge changes i_f by {dev:.1e} relative")
+    dss.Basic.ClearAll()
+    run_commands(dss_sc_setup(source))
+    for k, scenario in enumerate(scenarios):
+        fault = scenario.fault
+        i_f = solve_fault(source, [*fault_definitions(fault), "Solve"], fault)
+        run_commands([f"Edit {element} enabled=no" for element, _ in fault.dss_elements()])
+        run.source_currents.append(i_f)
+        print(f"  scenario {k}: against the source network, i_f changes by {source_change(run, k):.2e} relative")
+    return run
+
+
+def source_change(run: ShortCircuitRun, k: int) -> float:
+    """the largest change of a fault current phasor (relative to the largest one) of the merged network against the
+    source network"""
+    reference = run.source_currents[k]
+    return float(np.max(np.abs(run.currents[k] - reference)) / np.max(np.abs(reference)))
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # writing
 
 
@@ -1878,7 +2222,7 @@ def load_update(loads: list[Load]) -> dict[str, list[dict]]:
     }
 
 
-def count_table(network: Network) -> list[str]:
+def count_table(network: Network, with_loads: bool) -> list[str]:
     mv = sum(1 for node_class in network.node_class.values() if node_class == CLASS_MV)
     swer = sum(1 for node_class in network.node_class.values() if node_class == CLASS_SWER)
     n_three = sum(1 for line in network.lines if line.phases == 3)
@@ -1913,8 +2257,9 @@ def count_table(network: Network) -> list[str]:
             f"{kinds[KIND_1PH_22KV]}",
         ),
         ("capacitors (`shunt`, 900 kvar)", f"{len(network.capacitors)}"),
-        ("loads (`asym_load`, const_pq)", f"{len(network.loads_min)}"),
     ]
+    if with_loads:
+        rows.append(("loads (`asym_load`, const_pq)", f"{len(network.loads_min)}"))
     return [
         "| Element | Count |",
         "|---|---|",
@@ -1960,7 +2305,7 @@ def results_table(network: Network, summaries: list[PowerFlowSummary]) -> list[s
     return lines
 
 
-README_TEMPLATE = """\
+PF_README_HEAD = """\
 <!--
 {license}-->
 
@@ -1972,6 +2317,10 @@ batch of two scenarios: scenario 0 at minimum and scenario 1 at maximum demand. 
 and `update_batch.json` sets the `asym_load` powers of both scenarios. There is no single-calculation output
 (`asym_output.json`).
 
+"""
+
+# the parts shared by the power-flow and the short-circuit README
+README_SHARED = """\
 ## Source data
 
 - Repository: {repo}, commit `{commit}`
@@ -2040,7 +2389,9 @@ in parallel with merged lines only), and lines that end up between the same two 
 keeps the length and LineCode of the data. The zone substation uk is raised to {zone_uk} (uk and pk scaled together,
 r / x kept): with a smaller uk it is the smallest impedance left after the merge, and PGM misses the tolerances on
 KLO14. Here: {merge}
+"""
 
+PF_README_TAIL = """
 The merge changes the OpenDSS solution against the source network (every line of the data and the sheet uk of the zone
 substation, solved with the same tolerance) by the following. A node voltage change is the largest
 |V - V_source| / |V_source| over the phases of the kept nodes of a class (the phasors, so the angle counts too); a
@@ -2093,6 +2444,91 @@ uv run --no-project --with opendssdirect.py --with numpy --with openpyxl \\
 ```
 """
 
+README_TEMPLATE = PF_README_HEAD + README_SHARED + PF_README_TAIL
+
+SC_README_HEAD = """\
+<!--
+{license}-->
+
+# Validation case: short circuit on the Australian rural SWER network {title}
+
+IEC 60909 short circuit (maximum, c = {c}) on the medium-voltage part of the rural 22 kV feeder {title} of AusNet
+Services (Victoria, Australia), with its SWER (single-wire earth return) networks, with OpenDSS as the reference
+solver. The network is the one of the power-flow case `tests/data/power_flow/australian-swer/{name}`, without loads.
+It is a batch of {n_scenarios} fault scenarios: `input.json` has the fault (one ID, {fault_id}) of scenario 0, and
+`update_batch.json` points it to the node of each scenario (fault_object, fault_type, fault_phase, r_f, x_f). There is
+no single-calculation output (`sc_output.json`).
+
+"""
+
+SC_README_TAIL = """
+The faults are selected on the merged network, so every fault node exists in both tools (a merged node does not). The
+merge changes the OpenDSS fault currents against the source network (every line of the data and the sheet uk of the
+zone substation, with the same faults) by the following: the largest |I_f - I_f,source| over the phases, relative to
+the largest |I_f,source|.
+
+{source_change}
+
+## Fault scenarios
+
+One fault (ID {fault_id}) per scenario, selected deterministically by the generator. The path impedance of a node is
+the sum |z1| L of the lines on its path from the source bus along the breadth-first tree of the network (the branches
+of a node taken in the order of their IDs; transformers count 0); every tie goes to the lowest ID. A bolted fault
+(r_f = 0) is a Fault of 1e-13 ohm in OpenDSS (OpenDSS replaces r = 0 by 1e-4 ohm), a fault with x_f a series R + jX
+Reactor.
+
+{faults}
+
+Self-checks of the generator: OpenDSS converges in every scenario; the Reactor of the high-impedance fault carries
+V / z_f with the OpenDSS node voltage ({reactor}); the bolted two-phase fault, solved again on its own with a 10x
+larger bridge, gives the same fault current ({bridge}).
+
+## Short-circuit model
+
+- The source is c times 66 kV behind c times its impedance (IEC 60909, as in PGM), with c = {c} for the maximum
+  (PGM takes it from the u_rated of the source node).
+- No loads. The capacitors and the line capacitances stay in, as in PGM's short-circuit admittance matrix.
+- `test.dss` builds the network once; per scenario it defines the fault elements (`Fault.f{fault_id}s{{k}}` or
+  `Reactor.f{fault_id}s{{k}}` for scenario k), solves, and disables them again. OpenDSS runs with tolerance
+  {dss_tolerance} in snapshot mode.
+
+## Reference output
+
+`sc_output_batch.json` has, per scenario, `fault` (i_f, i_f_angle), `single_phase_transformer` and `transformer` (i
+and i_angle, from and to; the current of a low-susceptance Reactor is added to the from side), rounded to 12
+significant digits. It has no `node`, `line` or `asym_line` output: {size_reason}. All datasets are written in the
+compact JSON format (a root `attributes` list per component and list rows).
+
+Tolerances: rtol {rtol} and atol {atol}, the smallest round values with a 10x margin over all scenarios. {agreement}
+
+## IDs
+
+As in the power-flow case: an MV node keeps its AusNet Node_ID; the 66 kV source bus is 1000000; the LV busbar of
+distribution transformer E is 2000000 + E; a line, transformer, capacitor or the zone substation (Element_ID E) is
+3000000 + E; the source is 5000000 and the fault {fault_id}. In OpenDSS every bus is `n{{node id}}`, and the elements
+are `Line.l{{id}}`, `Transformer.t{{id}}` and `Capacitor.c{{id}}`.
+
+## Generation
+
+The files are generated by `tests/data/generators/australian_swer_networks.py` with OpenDSS (opendssdirect.py
+{opendss_version}) as the reference solver, together with the power-flow case; do not edit them by hand. `test.dss` is
+exactly the script that was run: the generator runs it line by line and reads each reference right after the `Solve`
+of its scenario. From the repository root (the workbooks are downloaded from the pinned commit, or read from a local
+directory with `--source-dir`):
+
+```sh
+uv run --no-project --with opendssdirect.py --with numpy --with openpyxl \\
+    python tests/data/generators/australian_swer_networks.py tests/data {name}
+```
+"""
+
+SC_README_TEMPLATE = SC_README_HEAD + README_SHARED + SC_README_TAIL
+# measured: with asym_line output the four cases would take 10.0 MB, above the budget of 10 MB (8.97 MB without it)
+SC_SIZE_REASON = (
+    "the transformer currents pin the network around each fault, and the data of the four cases on both networks"
+    " has a size budget of 10 MB (it is 9.0 MB; the asym_line output would add 1.05 MB and the node output 5 MB)"
+)
+
 
 def atol_text(atol) -> str:
     if not isinstance(atol, dict):
@@ -2101,8 +2537,30 @@ def atol_text(atol) -> str:
     return f"{atol['default']:g} ({others})"
 
 
-def readme_text(network: Network, run: PowerFlowRun, deviation: SourceDeviation, params: dict) -> str:
+def shared_readme_fields(network: Network, with_loads: bool) -> dict:
+    """the fields of README_SHARED"""
     spec = network.spec
+    return {
+        "license": LICENSE,
+        "title": spec.name.upper(),
+        "name": spec.name,
+        "repo": SOURCE_REPO,
+        "commit": SOURCE_COMMIT,
+        "file": spec.file,
+        "sha256": spec.sha256,
+        "copyright": UPSTREAM_COPYRIGHT,
+        "counts": "\n".join(count_table(network, with_loads)),
+        "dss_tolerance": f"{DSS_TOLERANCE:g}",
+        "dss_max_iterations": DSS_MAX_ITERATIONS,
+        "z_merge": f"{Z_MERGE_OHM:g}",
+        "z_merge_pu": f"{Z_MERGE_OHM / (U_MV**2 / 1e6):.2g}",
+        "zone_uk": f"{ZONE_SUBSTATION_UK:g}",
+        "merge": merge_text(network),
+        "opendss_version": dss.__version__,
+    }
+
+
+def readme_text(network: Network, run: PowerFlowRun, deviation: SourceDeviation, params: dict) -> str:
     methods = params["calculation_method"]
     methods = methods if isinstance(methods, list) else [methods]
     factors = [
@@ -2112,23 +2570,9 @@ def readme_text(network: Network, run: PowerFlowRun, deviation: SourceDeviation,
         if network.iso_factor[iso.id] < 1.0
     ]
     return README_TEMPLATE.format(
-        license=LICENSE,
-        title=spec.name.upper(),
-        name=spec.name,
+        **shared_readme_fields(network, with_loads=True),
         methods=", ".join(f"`{m}`" for m in methods),
-        repo=SOURCE_REPO,
-        commit=SOURCE_COMMIT,
-        file=spec.file,
-        sha256=spec.sha256,
-        copyright=UPSTREAM_COPYRIGHT,
-        counts="\n".join(count_table(network)),
-        dss_tolerance=f"{DSS_TOLERANCE:g}",
-        z_merge=f"{Z_MERGE_OHM:g}",
-        z_merge_pu=f"{Z_MERGE_OHM / (U_MV**2 / 1e6):.2g}",
-        zone_uk=f"{ZONE_SUBSTATION_UK:g}",
-        merge=merge_text(network),
         deviation="\n".join(deviation_table(deviation)),
-        dss_max_iterations=DSS_MAX_ITERATIONS,
         power_factor=POWER_FACTOR,
         min_demand=f"{MIN_DEMAND:g}",
         max_demand=f"{MAX_DEMAND:g}",
@@ -2136,8 +2580,50 @@ def readme_text(network: Network, run: PowerFlowRun, deviation: SourceDeviation,
         results="\n".join(results_table(network, run.summaries)),
         rtol=f"{params['rtol']:g}",
         atol=atol_text(params["atol"]),
-        agreement=PF_AGREEMENT[spec.name],
-        opendss_version=dss.__version__,
+        agreement=PF_AGREEMENT[network.spec.name],
+    )
+
+
+def fault_table(run: ShortCircuitRun) -> list[str]:
+    lines = [
+        "| # | node | where | fault | r_f, x_f (ohm) | why this node | OpenDSS \\|I_f\\| (A) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for k, (scenario, i_f) in enumerate(zip(run.scenarios, run.currents)):
+        fault = scenario.fault
+        magnitudes = ", ".join(f"{abs(i_f['abc'.index(p)]):.6g}" for p in fault.fault_phase)
+        lines.append(
+            f"| {k} | {fault.node} | {scenario.location} | {fault.fault_type} {fault.fault_phase} |"
+            f" {fault.r_f:g}, {fault.x_f:g} | {scenario.reason} | {magnitudes} |"
+        )
+    return lines
+
+
+def source_change_table(run: ShortCircuitRun) -> list[str]:
+    header = "| scenario | " + " | ".join(str(k) for k in range(len(run.scenarios))) + " |"
+    return [
+        header,
+        "|---" * (len(run.scenarios) + 1) + "|",
+        "| change of I_f | " + " | ".join(f"{source_change(run, k):.1e}" for k in range(len(run.scenarios))) + " |",
+    ]
+
+
+def sc_readme_text(network: Network, run: ShortCircuitRun, params: dict) -> str:
+    reactor = "; ".join(f"scenario {k}: {dev:.1e} relative" for k, dev in run.reactor.items())
+    bridge = "; ".join(f"scenario {k}: {dev:.1e} relative" for k, dev in run.bridge.items())
+    return SC_README_TEMPLATE.format(
+        **shared_readme_fields(network, with_loads=False),
+        c=f"{SC_VOLTAGE_FACTOR:g}",
+        n_scenarios=len(run.scenarios),
+        fault_id=FAULT_ID,
+        source_change="\n".join(source_change_table(run)),
+        faults="\n".join(fault_table(run)),
+        reactor=reactor,
+        bridge=bridge,
+        size_reason=SC_SIZE_REASON,
+        rtol=f"{params['rtol']:g}",
+        atol=atol_text(params["atol"]),
+        agreement=SC_AGREEMENT[network.spec.name],
     )
 
 
@@ -2156,6 +2642,26 @@ def write_power_flow_case(network: Network, run: PowerFlowRun, deviation: Source
     write_licensed(target / "params.json", json.dumps(params, indent=2) + "\n")
     write_licensed(target / "test.dss", "\n".join(run.script) + "\n")
     (target / "README.md").write_text(readme_text(network, run, deviation, params), encoding="utf-8")
+    print(f"  wrote {target}")
+
+
+def write_short_circuit_case(network: Network, run: ShortCircuitRun, root: Path):
+    target = root / "short_circuit" / "australian-swer" / network.spec.name
+    target.mkdir(parents=True, exist_ok=True)
+    params = SC_CASE_PARAMS[network.spec.name]
+    rows = pgm_rows(network, [])
+    rows["fault"] = [pgm_fault(run.scenarios[0].fault, with_status=True)]
+    write_licensed(target / "input.json", compact_dataset("input", rows, is_batch=False))
+    write_licensed(
+        target / "update_batch.json",
+        compact_dataset(
+            "update", [{"fault": [pgm_fault(s.fault, with_status=False)]} for s in run.scenarios], is_batch=True
+        ),
+    )
+    write_licensed(target / "sc_output_batch.json", compact_dataset("sc_output", run.references, is_batch=True))
+    write_licensed(target / "params.json", json.dumps(params, indent=2) + "\n")
+    write_licensed(target / "test.dss", "\n".join(run.script) + "\n")
+    (target / "README.md").write_text(sc_readme_text(network, run, params), encoding="utf-8")
     print(f"  wrote {target}")
 
 
@@ -2180,8 +2686,10 @@ def main():
         check_elements(network)
         run = run_power_flow(network)
         deviation = source_deviation(network, source)
+        sc_run = run_short_circuit(network, source)
         if not args.check_only:
             write_power_flow_case(network, run, deviation, args.root)
+            write_short_circuit_case(network, sc_run, args.root)
 
 
 if __name__ == "__main__":
