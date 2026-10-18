@@ -398,9 +398,8 @@ class NewtonRaphsonPFSolver : public IterativePFSolver<sym_type, NewtonRaphsonPF
             // temporary complex phasor
             // U = V * exp(1i*theta)
             ComplexValue<sym> const& u_tmp = x_[i].v() * exp(1.0i * x_[i].theta());
-            // get dev of last iteration, get max
-            double const dev = max_val(cabs(u_tmp - u[i]));
-            max_dev = std::max(dev, max_dev);
+            // get dev of last iteration, get max; a NaN deviation is kept
+            max_dev = detail::fold_max_deviation<sym>(max_dev, cabs(u_tmp - u[i]));
             // assign
             u[i] = u_tmp;
         }

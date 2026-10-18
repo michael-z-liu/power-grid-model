@@ -27,10 +27,12 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -553,6 +555,48 @@ ReducedPhaseGrid make_floating_zero_sequence_grid() {
     return grid;
 }
 
+// source -- bus0 (abc) --ab-- bus1 (ab, slot c absent): the branch couples only the differential mode of a and b,
+// y_d * [[1, -1], [-1, 1]] on both sides, and the common mode of bus1 is held to earth only by a low admittance
+// eps * y_d / 2 * ones on the to side (eps 1e-8, like the low susceptance of D14), as at the ab secondary of an ab-ab
+// single phase transformer; bus1 has a const_y and a const_pq wye load, and optionally a delta load of type const_y
+ReducedPhaseGrid make_floating_common_mode_grid(Value const& s_const_y, Value const& s_const_pq,
+                                                std::optional<Value> const& s_delta = std::nullopt) {
+    using enum LoadGenType;
+    constexpr double eps = 1e-8;
+    DoubleComplex const y_d{2.0, -8.0};
+    Tensor const y_diff = two_phase_branch(y_d, -y_d);
+    Tensor const y_common = two_phase_branch(eps / 2.0 * y_d, eps / 2.0 * y_d);
+    Idx const n_load = s_delta.has_value() ? 3 : 2;
+
+    ReducedPhaseGrid grid{};
+    grid.topo.slack_bus = 0;
+    grid.topo.phase_shift = {0.0, 0.0};
+    grid.topo.branch_bus_idx = {{0, 1}};
+    grid.topo.sources_per_bus = {from_sparse, {0, 1, 1}};
+    grid.topo.shunts_per_bus = {from_sparse, {0, 0, 0}};
+    grid.topo.load_gens_per_bus = {from_sparse, {0, 0, n_load}};
+    grid.topo.load_gen_type = {const_y, const_pq};
+    grid.topo.voltage_regulators_per_load_gen = {from_sparse, IdxVector(static_cast<size_t>(n_load + 1), 0)};
+    grid.topo.has_reduced_phase = true;
+    grid.topo.bus_phase_mask = {phase_mask_abc, phase_mask_ab};
+    grid.topo.bus_slot_pattern = {SlotPattern::three_phase, SlotPattern::three_phase};
+    grid.param.branch_param = {{y_diff, -y_diff, -y_diff, Tensor{y_diff + y_common}}};
+    grid.param.source_param = {SourceCalcParam{.y1 = y_ref, .y0 = y_ref}};
+    grid.input.source = {u_ref};
+    grid.input.s_injection = {s_const_y, s_const_pq};
+    if (s_delta.has_value()) {
+        grid.topo.load_gen_type.push_back(const_y);
+        grid.topo.load_gen_connection = {LoadGenConnection::wye, LoadGenConnection::wye, LoadGenConnection::delta};
+        grid.input.s_injection.push_back(s_delta.value());
+    }
+    grid.input.initialization = CalculationInitialization::default_initialization;
+    return grid;
+}
+
+// const_y wye loads of the floating common mode grid, and const_pq loads of 1/20 of them; slot c is absent and ignored
+Value floating_const_y_load() { return {DoubleComplex{-0.1, -0.03}, DoubleComplex{-0.05, -0.02}, 0.0}; }
+Value floating_const_pq_load() { return floating_const_y_load() / 20.0; }
+
 void check_solver_output_exact(SolverOutput<asymmetric_t> const& output, SolverOutput<asymmetric_t> const& ref) {
     auto const equal = [](Value const& x, Value const& y) { return (x == y).all(); };
     REQUIRE(output.u.size() == ref.u.size());
@@ -961,6 +1005,114 @@ TEST_CASE("Test math solver - IC with a NaN deviation raises IterationDiverge") 
     constexpr Idx max_iter_nan = 100;
     CHECK_THROWS_WITH_AS(run_case<IterativeCurrent>(grid.topo, grid.param, grid.input, err_tol, max_iter_nan),
                          doctest::Contains("nan"), IterationDiverge);
+}
+
+TEST_CASE("Test math solver - the maximum deviation keeps a NaN of any bus and phase") {
+    // run_power_flow raises IterationDiverge on a NaN deviation, but std::max(dev, max_dev) over the buses returned the
+    // finite deviation of a later bus after a NaN, and Eigen's maxCoeff can drop a NaN within one bus. The deviation is
+    // folded with fold_max_deviation instead. A partial NaN is not reproduced with a solver: the sparse LU solve
+    // spreads a NaN (and an inf times an exact zero) to every bus of the connected math model in the same iteration.
+    constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+    using AsymDev = RealValue<asymmetric_t>;
+
+    SUBCASE("Finite deviations give the maximum") {
+        CHECK(detail::fold_max_deviation<symmetric_t>(0.5, 2.0) == 2.0);
+        CHECK(detail::fold_max_deviation<symmetric_t>(3.0, 2.0) == 3.0);
+        CHECK(detail::fold_max_deviation<asymmetric_t>(0.5, AsymDev{1.0, 3.0, 2.0}) == 3.0);
+        CHECK(detail::fold_max_deviation<asymmetric_t>(5.0, AsymDev{1.0, 3.0, 2.0}) == 5.0);
+    }
+    SUBCASE("A NaN bus followed by a finite bus") {
+        CHECK(std::max(1.0, std::max(nan, 0.0)) == 1.0); // the NaN of the first bus is lost
+        double max_dev = detail::fold_max_deviation<symmetric_t>(0.0, nan);
+        max_dev = detail::fold_max_deviation<symmetric_t>(max_dev, 1.0);
+        CHECK(std::isnan(max_dev));
+        double max_dev_asym = detail::fold_max_deviation<asymmetric_t>(0.0, AsymDev{nan, nan, nan});
+        max_dev_asym = detail::fold_max_deviation<asymmetric_t>(max_dev_asym, AsymDev{1.0, 2.0, 0.5});
+        CHECK(std::isnan(max_dev_asym));
+    }
+    SUBCASE("A NaN in one phase") {
+        for (Idx phase = 0; phase != 3; ++phase) {
+            CAPTURE(phase);
+            AsymDev dev{1.0, 2.0, 0.5};
+            dev(phase) = nan;
+            CHECK(std::isnan(detail::fold_max_deviation<asymmetric_t>(0.0, dev)));
+        }
+    }
+}
+
+TEST_CASE("Test math solver - IC with const_y loads on a floating common mode") {
+    // The common mode of bus1 is held to earth by eps * y_d (eps 1e-8) and by the loads. Iterative current used to
+    // treat the const_y load explicitly, which gives the common mode a gain of about |Y_load| / (eps |y_d|) = 1e6 per
+    // iteration: with the absent-phase gate disabled, this run raised IterationDiverge at max_iter 50 with an infinite
+    // deviation (checked once). At a network with an absent phase the const_y loads are in the matrix and anchor the
+    // common mode; the explicit const_pq loads (1/20 of the const_y ones) leave a rate of about 0.05, and the run
+    // converges within 15 iterations. A floating common mode with only const_pq loads still diverges, so it is not
+    // asserted here.
+    ReducedPhaseGrid const grid = make_floating_common_mode_grid(floating_const_y_load(), floating_const_pq_load());
+    auto const output = run_case<IterativeCurrent>(grid.topo, grid.param, grid.input);
+    // Newton-Raphson from the average source start converges to another solution here, with bus1 near zero voltage
+    auto const reference = run_case<NewtonRaphsonLinearStart>(grid.topo, grid.param, grid.input);
+    assert_output(output, reference, false, result_tol);
+    check_absent_slots_zero(output, grid.topo);
+    // the common mode is not trivially at the source: the legs carry unequal loads to earth
+    CHECK(cabs(output.u[1](0) + output.u[1](1) - reference.u[0](0) - reference.u[0](1)) > 1e-2);
+}
+
+TEST_CASE("Test math solver - IC refactorizes when the const_y loads change") {
+    // The matrix of iterative current holds the const_y loads at a network with an absent phase, so a solver instance
+    // that ran another input must refactorize; its result equals that of a fresh solver bit for bit
+    ReducedPhaseGrid const grid = make_floating_common_mode_grid(floating_const_y_load(), floating_const_pq_load());
+    PowerFlowInput<asymmetric_t> const input_a = grid.input;
+    PowerFlowInput<asymmetric_t> input_b = grid.input;
+    input_b.s_injection[0] = Value{DoubleComplex{-0.07, -0.02}, DoubleComplex{-0.09, -0.04}, 0.0};
+    YBus<asymmetric_t> const y_bus{grid.topo, grid.param};
+    NoLogger log;
+
+    for (bool const a_first : {true, false}) {
+        CAPTURE(a_first);
+        PowerFlowInput<asymmetric_t> const& first = a_first ? input_a : input_b;
+        PowerFlowInput<asymmetric_t> const& second = a_first ? input_b : input_a;
+        IterativeCurrentPFSolver<asymmetric_t> solver{y_bus, grid.topo};
+        auto const output_first = run_power_flow(solver, y_bus, first, err_tol, max_iter, log);
+        auto const output_second = run_power_flow(solver, y_bus, second, err_tol, max_iter, log);
+        // the same input again keeps the matrix
+        auto const output_second_again = run_power_flow(solver, y_bus, second, err_tol, max_iter, log);
+
+        check_solver_output_exact(output_first, run_case<IterativeCurrent>(grid.topo, grid.param, first));
+        check_solver_output_exact(output_second, run_case<IterativeCurrent>(grid.topo, grid.param, second));
+        check_solver_output_exact(output_second_again, output_second);
+        assert_output(output_second, run_case<NewtonRaphsonLinearStart>(grid.topo, grid.param, second), false,
+                      result_tol);
+    }
+}
+
+TEST_CASE("Test math solver - IC with a delta const_y load at a bus with an absent phase") {
+    // the delta const_y load is part of the matrix too; it has no earth reference, so it does not anchor a common mode
+    using enum LoadGenType;
+    Value const s_delta{DoubleComplex{-0.3, -0.1}, 0.0, 0.0};
+
+    SUBCASE("Floating common mode, next to the wye loads") {
+        ReducedPhaseGrid const grid =
+            make_floating_common_mode_grid(floating_const_y_load(), floating_const_pq_load(), s_delta);
+        REQUIRE(grid.topo.is_delta_load_gen(2));
+        auto const output = run_case<IterativeCurrent>(grid.topo, grid.param, grid.input);
+        auto const reference = run_case<NewtonRaphsonLinearStart>(grid.topo, grid.param, grid.input);
+        assert_output(output, reference, false, result_tol);
+    }
+    SUBCASE("Two-phase and split-phase bus, only load") {
+        Tensor const y_two_phase = two_phase_branch({3.0, -9.0}, {-0.5, 1.5});
+        ReducedPhaseGrid const two_phase =
+            make_delta_only_grid({{y_two_phase, -y_two_phase, -y_two_phase, y_two_phase}}, phase_mask_ab,
+                                 SlotPattern::three_phase, s_delta, const_y);
+        ReducedPhaseGrid const split_phase = make_delta_only_grid(
+            centre_tapped_branch({3.0, -9.0}, {2.5, -8.0}), phase_mask_ab, SlotPattern::split_phase, s_delta, const_y);
+        for (ReducedPhaseGrid const* grid : {&two_phase, &split_phase}) {
+            auto const output = run_case<IterativeCurrent>(grid->topo, grid->param, grid->input);
+            auto const reference = run_case<NewtonRaphsonLinearStart>(grid->topo, grid->param, grid->input);
+            assert_output(output, reference, false, result_tol);
+            CHECK(output.u[1](2) == 0.0);
+        }
+    }
 }
 
 TEST_CASE("Test math solver - split-phase slot patterns of the start values") {

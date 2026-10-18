@@ -20,9 +20,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <complex>
 #include <concepts>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <ranges>
@@ -88,28 +90,68 @@ inline ComplexValue<sym> absent_phases_masked(ComplexValue<sym> value, [[maybe_u
     return value;
 }
 
+// add the admittance of one load_gen at the nominal voltage to the diagonal block of its bus: -conj(S) for a wye
+// load_gen, or the branch admittances of a delta load_gen; the injected current is then -Y U, which is exact for a
+// const_y load_gen
+template <symmetry_tag sym>
+inline void add_linear_load(Idx load_number, Idx bus_number, [[maybe_unused]] PhaseMask phases,
+                            PowerFlowInput<sym> const& input, ComplexTensor<sym>& diagonal_element,
+                            [[maybe_unused]] MathModelTopology const& topo) {
+    if constexpr (!is_symmetric_v<sym>) {
+        if (topo.is_delta_load_gen(load_number)) {
+            // constant admittance at the nominal branch voltage; it couples the two phases of each branch
+            diagonal_element += delta_load_gen::linear_admittance(
+                input.s_injection[load_number], phases, delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
+            return;
+        }
+        if (!phases.all()) {
+            // a load on an absent phase is ignored, so that the identity of that slot in the Y-bus is kept
+            add_diag(diagonal_element, absent_phases_masked<sym>(-conj(input.s_injection[load_number]), phases));
+            return;
+        }
+    }
+    // YBus_diag += -conj(S_base) // NOSONAR(S125)
+    add_diag(diagonal_element, -conj(input.s_injection[load_number]));
+}
+
 template <symmetry_tag sym>
 inline void add_linear_loads(IdxRange const& load_gens_per_bus, Idx bus_number, PowerFlowInput<sym> const& input,
                              ComplexTensor<sym>& diagonal_element, MathModelTopology const& topo) {
-    [[maybe_unused]] PhaseMask const phases = topo.bus_phase(bus_number);
+    PhaseMask const phases = topo.bus_phase(bus_number);
     for (auto load_number : load_gens_per_bus) {
-        if constexpr (!is_symmetric_v<sym>) {
-            if (topo.is_delta_load_gen(load_number)) {
-                // constant admittance at the nominal branch voltage; it couples the two phases of each branch
-                diagonal_element +=
-                    delta_load_gen::linear_admittance(input.s_injection[load_number], phases,
-                                                      delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
-                continue;
-            }
-            if (!phases.all()) {
-                // a load on an absent phase is ignored, so that the identity of that slot in the Y-bus is kept
-                add_diag(diagonal_element, absent_phases_masked<sym>(-conj(input.s_injection[load_number]), phases));
-                continue;
-            }
-        }
-        // YBus_diag += -conj(S_base) // NOSONAR(S125)
-        add_diag(diagonal_element, -conj(input.s_injection[load_number]));
+        add_linear_load(load_number, bus_number, phases, input, diagonal_element, topo);
     }
+}
+
+// add the admittances of the const_y load_gens of a bus only, as add_linear_loads does; their injected current is
+// exactly -Y U, so that a solver can move them from the right-hand side into its matrix
+template <symmetry_tag sym>
+inline void add_const_y_loads(IdxRange const& load_gens_per_bus, Idx bus_number, PowerFlowInput<sym> const& input,
+                              std::vector<LoadGenType> const& load_gen_type, ComplexTensor<sym>& diagonal_element,
+                              MathModelTopology const& topo) {
+    PhaseMask const phases = topo.bus_phase(bus_number);
+    for (auto load_number : load_gens_per_bus) {
+        if (load_gen_type[load_number] == LoadGenType::const_y) {
+            add_linear_load(load_number, bus_number, phases, input, diagonal_element, topo);
+        }
+    }
+}
+
+// fold the per-phase deviation of one bus into the maximum over the buses of an iteration; finite deviations give
+// exactly std::max(max_val(dev), max_dev), and a NaN in any phase of any bus makes the result NaN for good, which
+// IterativePFSolver::run_power_flow turns into IterationDiverge (std::max and Eigen's maxCoeff each drop a NaN in some
+// argument positions)
+template <symmetry_tag sym> inline double fold_max_deviation(double max_dev, RealValue<sym> const& dev) {
+    bool dev_is_nan{};
+    if constexpr (is_symmetric_v<sym>) {
+        dev_is_nan = std::isnan(dev);
+    } else {
+        dev_is_nan = dev.isNaN().any();
+    }
+    if (dev_is_nan || std::isnan(max_dev)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return std::max(max_val(dev), max_dev);
 }
 
 template <symmetry_tag sym>
