@@ -26,9 +26,9 @@ and `update_batch.json` sets the `asym_load` powers of both scenarios. There is 
 
 | Element | Count |
 |---|---|
-| nodes | 4533: the 66 kV source bus, 3260 22 kV, 572 SWER and 700 LV busbars |
-| `line` (three-phase, 22 kV) | 3259 |
-| `asym_line` (one-phase SWER, phase a) | 565 |
+| nodes | 3224: the 66 kV source bus, 2156 22 kV, 367 SWER and 700 LV busbars |
+| `line` (three-phase, 22 kV) | 2154 |
+| `asym_line` (one-phase SWER, phase a) | 360 |
 | zone substation (`transformer`) | 66/22.7 kV, 100 MVA, Dyn1 |
 | voltage regulators (`transformer`, YNyn0) | 3: PLENTY_VLY_RISE (200 kVA), MERRIANG_JANNA_REG (5000 kVA), DONNYBROOK_RD_REG (10000 kVA) |
 | ISO transformers (`single_phase_transformer`) | 7: EDEN_PARK_STH_ISO (100 kVA), TWELTH_AVE_ISO (100 kVA), EDEN_PARK_NORTH_ISO (100 kVA), NINTH_AVE_ISO (100 kVA), UPPER_PLENTY_STH_ISO (200 kVA), UPPER_PLENTY_ISO (100 kVA), FOURTEENTH_AVE_ISO (100 kVA) |
@@ -74,16 +74,44 @@ and `update_batch.json` sets the `asym_load` powers of both scenarios. There is 
   backend's 1-phase LineCodes (r0, x0 and b0 are ignored), so they have no earth-return reactance in either tool. All
   22 kV and 12.7 kV SWER nodes have `u_rated` 22 kV (the SWER convention of power-grid-model).
 - Capacitors are grounded-wye shunts with b1 = b0 = kvar / kV^2.
-- Impedance floor (in both tools): a line whose series impedance |z1| L is below 0.01 ohm gets the length
-  0.01 ohm / |z1 per km| (the LineCode is unchanged, so its capacitance scales with it), and the zone substation
-  uk is raised (r / x kept). Here: 1555 lines raised to |z1| = 0.01 ohm (1302 three-phase, 253 one-phase); the smallest |z1| of the data is 7.6e-07 ohm and the largest length added 7.07 km. 0.01 ohm is 2.1e-05 pu on the 22 kV base of 484 ohm (1 MVA). The zone substation uk is raised from 1.41e-06 to 1e-05 (5.2e-05 ohm on the 22.7 kV side). The source data has connector lines down to 1.4e-7 ohm and a zone
-  substation with uk = 1.41e-6, which make the admittance matrix so ill-conditioned that PGM's Newton-Raphson stalls
-  at a max deviation of about 3e-7 (error tolerance 1e-8) and PGM and OpenDSS agree to only about 2e-7. This is not
-  caused by the reduced-phase or SWER parts: the three-phase part of the network on its own (the upstream code path)
-  stalls at the same level. The network, its topology and every element are kept, and both tools solve the same
-  floored network. Its effect in OpenDSS: at minimum demand the largest change of a node voltage magnitude is 0.12% and the losses change from 91.9 to 101.0 kW; at maximum demand the largest change of a node voltage magnitude is 0.37% and the losses change from 304.0 to 326.8 kW.
+- Near-zero lines are merged (in both tools): see below.
 - OpenDSS runs with tolerance 1e-11 (1e-12 stalls at round-off on SMR8) and MaxIterations
   200.
+
+## Merged near-zero lines
+
+The source data has connector lines with a series impedance down to 1.4e-7 ohm and a zone substation with uk =
+1.41e-6. They make the admittance matrix so ill-conditioned that PGM's Newton-Raphson stalls at a max deviation of
+about 3e-7 (error tolerance 1e-8) and PGM and OpenDSS agree to only about 2e-7. This is not caused by the reduced-phase
+or SWER parts: the three-phase part of the network on its own (the upstream code path) stalls at the same level.
+
+Therefore every line whose series impedance |z1| L is below 0.001 ohm (2.1e-06 pu on the 22 kV base of 484 ohm,
+1 MVA) is removed and its two end nodes are merged into one, in both tools. A merged group of nodes keeps the node
+closest to the source (the fewest branches; on a tie the lowest id), and every element on a merged node moves to it:
+lines, transformer terminals and capacitors. A three-phase line merges 22 kV nodes and a one-phase line SWER nodes;
+the generator asserts that a 22 kV node never merges with a SWER node. A kept line whose ends merge is dropped (it runs
+in parallel with merged lines only), and lines that end up between the same two nodes stay parallel. Every other line
+keeps the length and LineCode of the data. The zone substation uk is raised to 0.0001 (uk and pk scaled together,
+r / x kept): with a smaller uk it is the smallest impedance left after the merge, and PGM misses the tolerances on
+KLO14. Here: 1105 three-phase and 205 one-phase lines are merged (|z1| L up to 0.000997 ohm), and 1309 nodes with them, which leaves 3224 of 4533 nodes and 2154 of 3259 three-phase and 360 of 565 one-phase lines; 0 kept lines became a self-loop and were dropped, and 0 lines run in parallel after the merge. The smallest |z1| L left is 0.00109 ohm. The zone substation uk is raised from 1.41e-06 to 0.0001 (0.00052 ohm on the 22.7 kV side).
+
+The merge changes the OpenDSS solution against the source network (every line of the data and the sheet uk of the zone
+substation, solved with the same tolerance) by the following. A node voltage change is the largest
+|V - V_source| / |V_source| over the phases of the kept nodes of a class (the phasors, so the angle counts too); a
+merged node is compared at the node it is merged into.
+
+| change against the source network | scenario 0: minimum demand | scenario 1: maximum demand |
+|---|---|---|
+| node voltage, 66 kV source | 1.3e-06 | 1.2e-06 |
+| node voltage, 22 kV | 5.5e-05 | 5.2e-05 |
+| node voltage, SWER 12.7 kV | 4.9e-05 | 4.3e-05 |
+| node voltage, LV 433 V three-phase | 5.5e-05 | 5.1e-05 |
+| node voltage, LV 250-0-250 V split-phase | 5.2e-05 | 4.9e-05 |
+| node voltage, LV 240 V SWER | 4.9e-05 | 4.3e-05 |
+| node voltage, LV 250 V 22 kV phase-to-earth | 3.9e-05 | 3.2e-05 |
+| node voltage, merged nodes | 5.5e-05 | 5.2e-05 |
+| losses | 91.851 to 91.762 kW (-9.7e-04) | 303.982 to 303.865 kW (-3.8e-04) |
+| feeder P (relative) | -2.3e-05 | -1.6e-05 |
 
 ## Demand
 
@@ -98,19 +126,19 @@ the voltage collapses on both networks.
 
 | | scenario 0: minimum demand (0.1) | scenario 1: maximum demand (0.2) |
 |---|---|---|
-| OpenDSS iterations | 10 | 15 |
-| feeder P, Q | 3.470 MW, -1.782 Mvar | 7.064 MW, -0.069 Mvar |
+| OpenDSS iterations | 9 | 15 |
+| feeder P, Q | 3.460 MW, -1.644 Mvar | 7.041 MW, 0.031 Mvar |
 | load P | 3.369 MW | 6.737 MW |
-| losses | 101.0 kW | 326.8 kW |
-| 66 kV source (pu of 38105.1 V) | 1.0003 to 1.0006 | 0.9988 to 0.9996 |
-| 22 kV (pu of 12701.7 V) | 1.0102 to 1.0440 | 0.9460 to 1.0313 |
-| SWER 12.7 kV (pu of 12700.0 V) | 1.0046 to 1.0391 | 0.9309 to 1.0103 |
-| LV 433 V three-phase (pu of 250.0 V) | 0.9809 to 1.0373 | 0.9264 to 1.0199 |
-| LV 250-0-250 V split-phase (pu of 250.0 V) | 0.9795 to 1.0314 | 0.9079 to 1.0217 |
-| LV 240 V SWER (pu of 240.0 V) | 1.0246 to 1.0630 | 0.9488 to 1.0304 |
-| LV 250 V 22 kV phase-to-earth (pu of 250.0 V) | 1.0180 to 1.0196 | 0.9542 to 0.9577 |
+| losses | 91.8 kW | 303.9 kW |
+| 66 kV source (pu of 38105.1 V) | 1.0002 to 1.0006 | 0.9988 to 0.9995 |
+| 22 kV (pu of 12701.7 V) | 1.0097 to 1.0429 | 0.9483 to 1.0312 |
+| SWER 12.7 kV (pu of 12700.0 V) | 1.0041 to 1.0383 | 0.9333 to 1.0114 |
+| LV 433 V three-phase (pu of 250.0 V) | 0.9804 to 1.0362 | 0.9285 to 1.0207 |
+| LV 250-0-250 V split-phase (pu of 250.0 V) | 0.9790 to 1.0313 | 0.9101 to 1.0225 |
+| LV 240 V SWER (pu of 240.0 V) | 1.0241 to 1.0622 | 0.9512 to 1.0316 |
+| LV 250 V 22 kV phase-to-earth (pu of 250.0 V) | 1.0176 to 1.0192 | 0.9574 to 0.9608 |
 | highest ISO loading | 46.4% (UPPER_PLENTY_ISO) | 95.3% (UPPER_PLENTY_ISO) |
-| highest regulator loading | 47.0% (PLENTY_VLY_RISE) | 78.1% (PLENTY_VLY_RISE) |
+| highest regulator loading | 46.8% (PLENTY_VLY_RISE) | 78.0% (PLENTY_VLY_RISE) |
 
 ## Reference output
 
@@ -121,7 +149,7 @@ All datasets are written in the compact JSON format (a root `attributes` list pe
 
 Tolerances: rtol 1e-06 and atol 1e-08 (0.001 on `[pq]_(from|to)`), the smallest round values with a 10x margin over both scenarios (the power
 fields have their own atol: a branch power is computed from the voltages at its ends, so a short branch amplifies
-their round-off). Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree to 2.4e-10 relative and the powers to 1e-2 W absolute, a worst ratio of 0.089. iterative_current (7 and 10 iterations) misses the rule (worst ratio 0.108), so it is not run.
+their round-off). Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (7 and 9 iterations) misses the rule (worst ratio 0.207, on the powers through the regulator PLENTY_VLY_RISE), so it is not run.
 
 ## IDs
 

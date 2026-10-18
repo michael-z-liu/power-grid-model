@@ -70,9 +70,10 @@ Modelling choices (derived from backend.py; the deviations are listed):
   min(1, S_iso / (MAX_DEMAND sum S_tx)). Split per phase: three-phase P / 3 each, split-phase P / 2 on each leg,
   phase-to-earth all on phase a. OpenDSS: one 1-phase wye Load per non-zero phase (model=1, kV = u_rated / sqrt(3))
 - OpenDSS tolerance 1e-11 (1e-12 stalls at round-off on SMR8) and MaxIterations=200
-- impedance floor (both tools): a line with |z1| L below Z_MIN_OHM gets the length Z_MIN_OHM / |z1 per km|, and the
-  zone substation uk is raised to ZONE_SUBSTATION_UK; the near-zero impedances of the data otherwise make the
-  admittance matrix too ill-conditioned for PGM's Newton-Raphson (see Z_MIN_OHM)
+- near-zero lines merged (both tools): a line with |z1| L below Z_MERGE_OHM is removed and its end nodes are merged,
+  and the zone substation uk is raised to ZONE_SUBSTATION_UK; the near-zero impedances of the data otherwise make the
+  admittance matrix too ill-conditioned for PGM's Newton-Raphson (see Z_MERGE_OHM and merge_connectors). The generator
+  also solves the source network (every line, the sheet uk) in OpenDSS and writes the change into the README
 """
 
 import argparse
@@ -153,43 +154,50 @@ DSS_VOLTAGE_BASES = "[66, 22, 0.433, 0.4157]"
 # the smallest round atol, for which the worst |actual - expected| / (atol + rtol |expected|) over all methods and
 # both scenarios is below 0.1 (a 10x margin), as measured by reduced_phase_compare_pgm.py. For these networks the
 # power fields (p and q, from and to) get their own atol of at most 1e-3 (W, var): a branch power is computed from the
-# voltages at its ends, so a short branch (down to the floor of Z_MIN_OHM) amplifies their round-off. Only
-# newton_raphson: iterative_current converges in at most 12 iterations but misses the rule on SMR8 (its error
-# tolerance of 1e-8 on the voltage leaves too large an error on the powers).
+# voltages at its ends, so a short branch (down to Z_MERGE_OHM) amplifies their round-off. iterative_current (at most
+# 12 iterations) passes the rule on SMR8 but not on KLO14, so KLO14 runs newton_raphson only.
 POWER_FIELDS = "[pq]_(from|to)"
 PF_PARAMS = {
     name: {
-        "calculation_method": "newton_raphson",
+        "calculation_method": methods,
         "rtol": 1e-6,
         "atol": {"default": 1e-8, POWER_FIELDS: 1e-3},
         "experimental_features": "enabled",
     }
-    for name in ("smr8", "klo14")
+    for name, methods in (("smr8", ["newton_raphson", "iterative_current"]), ("klo14", "newton_raphson"))
 }
 # the measured agreement, for the README
 PF_AGREEMENT = {
     "smr8": (
-        "Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree"
-        " to 1.6e-10 relative and the powers to 1e-2 W absolute, a worst ratio"
-        " of 0.045. iterative_current (8 and 12 iterations) misses the rule (worst ratio 0.103), so it is not run."
+        "Measured: newton_raphson converges in 3 and 4 iterations and iterative_current in 8 and 12 (minimum, maximum"
+        " demand); the node voltages agree to 1.1e-10 (newton_raphson) and 4.4e-10 (iterative_current) relative and"
+        " the powers to 1.6e-3 W absolute, a worst ratio of 0.066."
     ),
     "klo14": (
         "Measured: newton_raphson converges in 3 and 4 iterations (minimum, maximum demand); the node voltages agree"
-        " to 2.4e-10 relative and the powers to 1e-2 W absolute, a worst ratio"
-        " of 0.089. iterative_current (7 and 10 iterations) misses the rule (worst ratio 0.108), so it is not run."
+        " to 9.8e-11 relative and the powers to 1.2e-3 W absolute, a worst ratio of 0.069. iterative_current (7 and 9"
+        " iterations) misses the rule (worst ratio 0.207, on the powers through the regulator PLENTY_VLY_RISE), so it"
+        " is not run."
     ),
 }
 
-# Impedance floor. The source data has near-zero impedances: connector lines down to 1.4e-7 ohm (three-phase) and
-# 1.4e-6 ohm (one-phase), and a zone substation with uk = 1.41e-6. They make the admittance matrix so ill-conditioned
-# that PGM's Newton-Raphson stalls at a max deviation of about 3e-7 (error tolerance 1e-8), also on the three-phase
-# part alone (the upstream code path), and PGM agrees with OpenDSS to only about 2e-7. A line whose series impedance
-# |z1| L is below Z_MIN_OHM gets the length L' = Z_MIN_OHM / |z1 per km| in both tools (the LineCode is unchanged, so
-# its capacitance scales with it), and the zone substation gets ZONE_SUBSTATION_UK (r / x kept). The smallest values
-# of the grid {1e-4, 1e-3, 1e-2} ohm and {1e-5, 1e-4} for which PGM's Newton-Raphson converges and the tolerance
-# rule passes.
-Z_MIN_OHM = 1e-2
-ZONE_SUBSTATION_UK = 1e-5
+# Merging of near-zero lines. The source data has near-zero impedances: connector lines down to 1.4e-7 ohm
+# (three-phase) and 1.4e-6 ohm (one-phase), and a zone substation with uk = 1.41e-6. They make the admittance matrix so
+# ill-conditioned that PGM's Newton-Raphson stalls at a max deviation of about 3e-7 (error tolerance 1e-8), also on the
+# three-phase part alone (the upstream code path), and PGM agrees with OpenDSS to only about 2e-7. A line whose series
+# impedance |z1| L is below Z_MERGE_OHM is removed and its two end nodes are merged into one (in both tools); see
+# merge_connectors. The zone substation gets ZONE_SUBSTATION_UK (r / x kept) if its sheet uk is smaller.
+# Measured (OpenDSS, against the source network; PGM newton_raphson with the default error tolerance 1e-8):
+# - Z_MERGE_OHM 1e-4 changes the node voltages by at most 1.0e-5 relative, but the tolerance rule fails on both
+#   networks (the smallest line left is 1.5e-4 ohm), also with ZONE_SUBSTATION_UK 1e-4; 1e-3 changes them by 5.5e-5 and
+#   the losses by up to 0.1 %, and passes the rule with ZONE_SUBSTATION_UK 1e-4; 1e-2 changes them by 1.6e-3 and the
+#   losses by up to 3.2 %.
+# - with uk 1e-5 (or 3e-5) the zone substation (5.2e-5 ohm) is the smallest impedance left after the merge, and KLO14
+#   misses the rule (worst ratio 0.145 at Z_MERGE_OHM 1e-3, the powers through a 200 kVA regulator); uk 1e-4
+#   (5.2e-4 ohm) passes it, and on its own changes the node voltages by at most 1.3e-5 and the losses by 0.013 %.
+# Newton-Raphson converges in 3 and 4 iterations with every one of these values.
+Z_MERGE_OHM = 1e-3
+ZONE_SUBSTATION_UK = 1e-4
 
 # PGM's transformer_low_susceptance_ratio and the regularisation of the mirror Reactor
 LOW_SUSCEPTANCE_RATIO = 1e-8
@@ -476,9 +484,23 @@ class LineSection:
     from_node: int
     to_node: int
     phases: int  # 3 or 1
-    length: float  # km, after the impedance floor
-    sheet_length: float  # km, as in the source data
+    length: float  # km
     code: str  # the LineCode key, e.g. "46-3ph"
+
+
+@dataclass(frozen=True)
+class MergeInfo:
+    """what merge_connectors changed"""
+
+    representative: dict[int, int]  # every merged node -> the node it is merged into
+    merged_lines: dict[int, int]  # the number of removed (merged) lines by phases
+    dropped_loops: dict[int, int]  # the number of lines that became a self-loop by phases
+    parallel_lines: int  # lines that run in parallel to another line after the merge
+    largest_merged: float  # ohm, the largest |z1| L of a merged line
+    smallest_kept: float  # ohm, the smallest |z1| L of a kept line
+    nodes_before: int
+    lines_before: dict[int, int]  # by phases
+    zone_sheet_uk: float
 
 
 @dataclass
@@ -486,7 +508,6 @@ class Network:
     spec: NetworkSpec
     linecodes: dict[str, dict]  # the used LineCodes by key
     lines: list[LineSection]
-    zone_sheet_uk: float
     node_class: dict[int, str]
     node_u_rated: dict[int, float]
     zone: ThreePhaseTransformer
@@ -505,6 +526,7 @@ class Network:
     iso_swer_kva: dict[int, float]
     loads_min: list[Load] = field(default_factory=list)
     loads_max: list[Load] = field(default_factory=list)
+    merge: MergeInfo | None = None  # None for the source network
 
     def case(self) -> Case:
         """the existing generator's Case as an adapter for source_z and dss_load_elements"""
@@ -589,24 +611,18 @@ def parse_lines(sheets) -> list[LineSection]:
                 to_node=row["End_Node"],
                 phases=phases,
                 length=row["Length"],
-                sheet_length=row["Length"],
                 code=f"{row['Linecode']}-{phases}ph",
             )
         )
     return sorted(lines, key=lambda line: line.id)
 
 
-def line_impedance_per_km(code: dict) -> float:
-    return math.hypot(code["r1"], code["x1"])
-
-
-def apply_impedance_floor(lines: list[LineSection], linecodes: dict[str, dict]):
-    """the impedance floor: a line whose |z1| L is below Z_MIN_OHM gets the length Z_MIN_OHM / |z1 per km|"""
-    for line in lines:
-        z_per_km = line_impedance_per_km(linecodes[line.code])
-        assert z_per_km > 0.0, f"LineCode {line.code} has no series impedance"
-        if z_per_km * line.length < Z_MIN_OHM:
-            line.length = Z_MIN_OHM / z_per_km
+def line_impedance(line: LineSection, linecodes: dict[str, dict]) -> float:
+    """the series impedance |z1| L of a line (ohm)"""
+    code = linecodes[line.code]
+    z_per_km = math.hypot(code["r1"], code["x1"])
+    assert z_per_km > 0.0, f"LineCode {line.code} has no series impedance"
+    return z_per_km * line.length
 
 
 def cycle_edges(adjacency: dict[int, list[tuple[int, int]]], root: int) -> set[int]:
@@ -641,11 +657,11 @@ def cycle_edges(adjacency: dict[int, list[tuple[int, int]]], root: int) -> set[i
 
 
 def build_network(spec: NetworkSpec, sheets) -> Network:
-    """the section 2 mapping of the plan, with the topology checks (self-check 7)"""
+    """the source network: the section 2 mapping of the plan, with the topology checks (self-check 7), before the merge
+    of near-zero lines"""
     check_unique_element_ids(sheets)
     lines = parse_lines(sheets)
     linecodes = used_linecodes(sheets, lines)
-    apply_impedance_floor(lines, linecodes)
     n_three = sum(1 for line in lines if line.phases == 3)
     n_one = len(lines) - n_three
     assert (n_three, n_one) == (spec.lines_three_phase, spec.lines_one_phase), (n_three, n_one)
@@ -657,11 +673,6 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
     assert zone_row["kvas_primary"] == zone_row["kvas_secondary"]
     zone_sn = scaled(zone_row["kvas_primary"], 1000)
     zone_uk, zone_pk = sheet_uk_pk(zone_row, zone_sn)
-    zone_sheet_uk = zone_uk
-    if zone_uk < ZONE_SUBSTATION_UK:
-        # the impedance floor of the zone substation: uk and pk scaled together (r / x kept)
-        zone_pk *= ZONE_SUBSTATION_UK / zone_uk
-        zone_uk = ZONE_SUBSTATION_UK
     zone = ThreePhaseTransformer(
         id=BRANCH_OFFSET + zone_row["Element_ID"],
         from_node=SOURCE_NODE,
@@ -912,7 +923,6 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
         spec=spec,
         linecodes=linecodes,
         lines=lines,
-        zone_sheet_uk=zone_sheet_uk,
         node_class=node_class,
         node_u_rated=node_u_rated,
         zone=zone,
@@ -939,7 +949,6 @@ def build_network(spec: NetworkSpec, sheets) -> Network:
         f" three-phase lines), {len(isos)} ISOs each feeding its own SWER network, {len(regulators)} regulators,"
         f" distribution transformers {dict(sorted(counts.items()))}"
     )
-    print(f"  impedance floor: {impedance_floor_text(network)}")
     return network
 
 
@@ -966,19 +975,166 @@ def demand(network: Network, fraction: float, with_iso_factor: bool) -> list[Loa
     return loads
 
 
-def impedance_floor_text(network: Network) -> str:
-    """what the impedance floor changed, for the summary and the README"""
-    raised = [line for line in network.lines if line.length != line.sheet_length]
-    counts = Counter(line.phases for line in raised)
-    z_min = min(line_impedance_per_km(network.linecodes[line.code]) * line.sheet_length for line in raised)
-    added = max(line.length - line.sheet_length for line in raised)
+def network_edges(network: Network) -> list[tuple[int, int, int]]:
+    """every branch as (id, from node, to node): lines and transformers"""
+    return [
+        *((line.id, line.from_node, line.to_node) for line in network.lines),
+        *((t.id, t.from_node, t.to_node) for t in network.three_phase_transformers()),
+        *((t.id, t.from_node, t.to_node) for t in network.single_phase_transformers()),
+    ]
+
+
+def source_distances(network: Network) -> dict[int, int]:
+    """the number of branches between the source bus and every node (breadth first); every node is reached"""
+    adjacency = defaultdict(list)
+    for _, a, b in network_edges(network):
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+    distance = {SOURCE_NODE: 0}
+    queue = deque([SOURCE_NODE])
+    while queue:
+        node = queue.popleft()
+        for other in adjacency[node]:
+            if other not in distance:
+                distance[other] = distance[node] + 1
+                queue.append(other)
+    assert distance.keys() == network.node_u_rated.keys(), "a node is not reachable from the source"
+    return distance
+
+
+def rebus(bus: str, old: int, new: int) -> str:
+    """an OpenDSS bus n{old}.x.y as n{new}.x.y"""
+    prefix = f"n{old}."
+    assert bus.startswith(prefix), bus
+    return f"n{new}.{bus[len(prefix) :]}"
+
+
+def merge_connectors(source: Network) -> Network:
+    """the network as solved by both tools: every line with |z1| L below Z_MERGE_OHM is removed and its two end nodes
+    are merged into one (union-find). A merged group of nodes is represented by its node closest to the source (the
+    fewest branches; on a tie the lowest id), and every element on a merged node moves to the representative: lines,
+    transformer terminals (zone substation, regulators, ISOs, distribution transformers) and capacitors. A kept line
+    whose ends merge is dropped (a self-loop: it runs in parallel with merged lines only), and lines that end up
+    between the same pair of nodes stay parallel. A three-phase line merges 22 kV nodes and a one-phase line SWER
+    nodes; a 22 kV node never merges with a SWER node. The zone substation uk is raised to ZONE_SUBSTATION_UK if its
+    sheet uk is smaller (uk and pk scaled together, r / x kept)."""
+    distance = source_distances(source)
+    parent = {node: node for node in source.node_u_rated}
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    expected_class = {3: CLASS_MV, 1: CLASS_SWER}
+    merged_ids = set()
+    for line in source.lines:
+        if line_impedance(line, source.linecodes) >= Z_MERGE_OHM:
+            continue
+        ends = {source.node_class[line.from_node], source.node_class[line.to_node]}
+        assert ends == {expected_class[line.phases]}, f"line {line.id} ({line.phases} phases) between {ends}"
+        merged_ids.add(line.id)
+        a, b = find(line.from_node), find(line.to_node)
+        if a != b:
+            keep, drop = sorted((a, b), key=lambda node: (distance[node], node))
+            parent[drop] = keep
+    representative = {node: find(node) for node in parent if find(node) != node}
+    for node, kept in representative.items():
+        assert source.node_class[node] == source.node_class[kept], (
+            f"node {node} ({source.node_class[node]}) merges with node {kept} ({source.node_class[kept]})"
+        )
+        assert source.node_class[node] in (CLASS_MV, CLASS_SWER), node
+
+    def rep(node: int) -> int:
+        return representative.get(node, node)
+
+    lines = []
+    dropped_loops: Counter[int] = Counter()
+    for line in source.lines:
+        if line.id in merged_ids:
+            continue
+        a, b = rep(line.from_node), rep(line.to_node)
+        if a == b:
+            dropped_loops[line.phases] += 1
+        else:
+            lines.append(replace(line, from_node=a, to_node=b))
+    pairs = Counter(frozenset((line.from_node, line.to_node)) for line in lines)
+    parallel_lines = sum(n for n in pairs.values() if n > 1)
+
+    zone_uk, zone_pk = source.zone.uk, source.zone.pk
+    if zone_uk < ZONE_SUBSTATION_UK:
+        zone_pk *= ZONE_SUBSTATION_UK / zone_uk
+        zone_uk = ZONE_SUBSTATION_UK
+    zone = replace(source.zone, to_node=rep(source.zone.to_node), uk=zone_uk, pk=zone_pk)
+    regulators = [replace(t, from_node=rep(t.from_node), to_node=rep(t.to_node)) for t in source.regulators]
+    isos = [replace(t, from_node=rep(t.from_node), to_node=rep(t.to_node)) for t in source.isos]
+    iso_buses = {t.id: rebus(source.iso_buses[t.id], t.from_node, rep(t.from_node)) for t in source.isos}
+    distribution = [replace(t, from_node=rep(t.from_node)) for t in source.distribution]
+    distribution_buses = {
+        t.id: [rebus(buses[0], t.from_node, rep(t.from_node)), *buses[1:]]
+        for t in source.distribution
+        if (buses := source.distribution_buses.get(t.id)) is not None
+    }
+    assert all(t.from_node != t.to_node for t in [zone, *regulators, *isos, *distribution])
+    assert all(load.node not in representative for load in source.loads_min)
+    used_codes = {line.code for line in lines}
+    network = replace(
+        source,
+        linecodes={key: code for key, code in source.linecodes.items() if key in used_codes},
+        lines=lines,
+        node_class={node: c for node, c in source.node_class.items() if node not in representative},
+        node_u_rated={node: u for node, u in source.node_u_rated.items() if node not in representative},
+        zone=zone,
+        regulators=regulators,
+        isos=isos,
+        iso_buses=iso_buses,
+        distribution=distribution,
+        distribution_buses=distribution_buses,
+        capacitors=[{**c, "node": rep(c["node"])} for c in source.capacitors],
+        merge=MergeInfo(
+            representative=representative,
+            merged_lines=dict(Counter(line.phases for line in source.lines if line.id in merged_ids)),
+            dropped_loops=dict(dropped_loops),
+            parallel_lines=parallel_lines,
+            largest_merged=max(
+                line_impedance(line, source.linecodes) for line in source.lines if line.id in merged_ids
+            ),
+            smallest_kept=min(line_impedance(line, source.linecodes) for line in lines),
+            nodes_before=len(source.node_u_rated),
+            lines_before=dict(Counter(line.phases for line in source.lines)),
+            zone_sheet_uk=source.zone.uk,
+        ),
+    )
+    # the merged network is connected, and every node is used
+    source_distances(network)
+    check_unique_pgm_ids(network)
+    print(f"  merge: {merge_text(network)}")
+    return network
+
+
+def merge_text(network: Network) -> str:
+    """what merge_connectors changed, for the summary and the README"""
+    merge = network.merge
+    assert merge is not None
+    after = Counter(line.phases for line in network.lines)
+    loops = sum(merge.dropped_loops.values())
     zone_z = network.zone.uk * network.zone.u2**2 / network.zone.sn
+    if network.zone.uk != merge.zone_sheet_uk:
+        zone = (
+            f"The zone substation uk is raised from {merge.zone_sheet_uk:.3g} to {network.zone.uk:g} ({zone_z:.2g} ohm"
+            f" on the {network.zone.u2 / 1e3:g} kV side)."
+        )
+    else:
+        zone = f"The zone substation keeps its sheet uk of {network.zone.uk:.3g}."
     return (
-        f"{len(raised)} lines raised to |z1| = {Z_MIN_OHM:g} ohm ({counts[3]} three-phase, {counts[1]} one-phase);"
-        f" the smallest |z1| of the data is {z_min:.3g} ohm and the largest length added {added:.3g} km."
-        f" {Z_MIN_OHM:g} ohm is {Z_MIN_OHM / (U_MV**2 / 1e6):.2g} pu on the 22 kV base of 484 ohm (1 MVA). The zone"
-        f" substation uk is raised from {network.zone_sheet_uk:.3g} to {network.zone.uk:g} ({zone_z:.2g} ohm on the"
-        f" {network.zone.u2 / 1e3:g} kV side)"
+        f"{merge.merged_lines.get(3, 0)} three-phase and {merge.merged_lines.get(1, 0)} one-phase lines are merged"
+        f" (|z1| L up to {merge.largest_merged:.3g} ohm), and {len(merge.representative)} nodes with them, which"
+        f" leaves {len(network.node_u_rated)} of {merge.nodes_before} nodes and {after[3]} of"
+        f" {merge.lines_before.get(3, 0)} three-phase and {after[1]} of {merge.lines_before.get(1, 0)} one-phase lines;"
+        f" {loops} kept line{'s' if loops != 1 else ''} became a self-loop and {'were' if loops != 1 else 'was'}"
+        f" dropped, and {merge.parallel_lines} lines run in parallel after the merge. The smallest |z1| L left is"
+        f" {merge.smallest_kept:.3g} ohm. {zone}"
     )
 
 
@@ -1546,46 +1702,94 @@ class PowerFlowRun:
     script: list[str]  # test.dss: exactly the commands that were run
     references: list[dict]  # per scenario
     summaries: list[PowerFlowSummary]  # per scenario
-    floor_effect: str = ""  # what the impedance floor changes (OpenDSS, both scenarios)
 
 
-def without_floor(network: Network) -> Network:
-    """the network as in the source data: the sheet line lengths and the sheet uk of the zone substation"""
-    factor = network.zone_sheet_uk / network.zone.uk
-    return replace(
-        network,
-        lines=[replace(line, length=line.sheet_length) for line in network.lines],
-        zone=replace(network.zone, uk=network.zone.uk * factor, pk=network.zone.pk * factor),
-    )
+@dataclass
+class SourceDeviation:
+    """the OpenDSS solution of the merged network against the source network (every line of the data, the sheet uk
+    of the zone substation), per scenario"""
+
+    voltage: list[dict[str, float]]  # per node class: the max |V - V_source| / |V_source| over the kept nodes
+    voltage_merged_nodes: list[float]  # the same over the merged nodes (V at their representative)
+    losses: list[tuple[float, float]]  # W: (source, merged)
+    feeder_p: list[tuple[float, float]]  # W: (source, merged)
+
+    def max_voltage(self, k: int) -> float:
+        return max(self.voltage[k].values())
 
 
-def floor_effect(network: Network) -> str:
-    """the effect of the impedance floor in OpenDSS: the largest relative change of a node voltage magnitude and the
-    feeder losses, with and without the floor, per scenario"""
+def dss_states(network: Network) -> list[tuple[dict[str, complex], float, float]]:
+    """per scenario, the OpenDSS node voltages by node name, the losses and the feeder P (W)"""
+    dss.Basic.ClearAll()
     states = []
-    for net in (network, without_floor(network)):
-        dss.Basic.ClearAll()
-        state = []
-        for commands in (
-            [*dss_network(net), *dss_loads(net, net.loads_min), *dss_solve()],
-            [*dss_load_edits(net, net.loads_max), "Solve"],
-        ):
-            run_commands(commands)
-            assert dss.Solution.Converged()
-            state.append((dict(zip(dss.Circuit.AllNodeNames(), dss.Circuit.AllBusVMag())), dss.Circuit.Losses()[0]))
-        states.append(state)
-    parts = []
+    for commands in (
+        [*dss_network(network), *dss_loads(network, network.loads_min), *dss_solve()],
+        [*dss_load_edits(network, network.loads_max), "Solve"],
+    ):
+        run_commands(commands)
+        assert dss.Solution.Converged()
+        raw = np.array(dss.Circuit.AllBusVolts())
+        voltages = dict(zip(dss.Circuit.AllNodeNames(), raw[0::2] + 1j * raw[1::2]))
+        states.append((voltages, dss.Circuit.Losses()[0], -dss.Circuit.TotalPower()[0] * 1e3))
+    return states
+
+
+def source_deviation(network: Network, source: Network) -> SourceDeviation:
+    """how much the merge (and the zone substation uk) changes the OpenDSS solution against the source network: the
+    node voltage phasors (relative, per class over the kept nodes, and over the merged nodes against their
+    representative), the losses and the feeder P"""
+    merge = network.merge
+    assert merge is not None
+    deviation = SourceDeviation(voltage=[], voltage_merged_nodes=[], losses=[], feeder_p=[])
+    for (v_source, loss_source, p_source), (v_merged, loss_merged, p_merged) in zip(
+        dss_states(source), dss_states(network)
+    ):
+        per_class: dict[str, float] = {}
+        merged_nodes = 0.0
+        for name, value in v_source.items():
+            bus, number = name.split(".")
+            node = int(bus[1:])
+            rep = merge.representative.get(node, node)
+            dev = float(abs(v_merged[f"n{rep}.{number}"] - value) / abs(value))
+            if rep == node:
+                node_class = source.node_class[node]
+                per_class[node_class] = max(per_class.get(node_class, 0.0), dev)
+            else:
+                merged_nodes = max(merged_nodes, dev)
+        deviation.voltage.append(per_class)
+        deviation.voltage_merged_nodes.append(merged_nodes)
+        deviation.losses.append((loss_source, loss_merged))
+        deviation.feeder_p.append((p_source, p_merged))
     for k, kind in enumerate(("minimum", "maximum")):
-        (v_floor, loss_floor), (v_sheet, loss_sheet) = states[0][k], states[1][k]
-        assert v_floor.keys() == v_sheet.keys()
-        dv = max(abs(v_floor[name] - v_sheet[name]) / v_sheet[name] for name in v_sheet)
-        parts.append(
-            f"at {kind} demand the largest change of a node voltage magnitude is {dv:.2%} and the losses change from"
-            f" {loss_sheet / 1e3:.1f} to {loss_floor / 1e3:.1f} kW"
+        (loss_source, loss_merged), (p_source, p_merged) = deviation.losses[k], deviation.feeder_p[k]
+        print(
+            f"  against the source network at {kind} demand: node voltages {deviation.max_voltage(k):.2e}"
+            f" (merged nodes {deviation.voltage_merged_nodes[k]:.2e}); losses {loss_source / 1e3:.3f} ->"
+            f" {loss_merged / 1e3:.3f} kW ({loss_merged / loss_source - 1.0:+.2e}); feeder P"
+            f" {p_merged / p_source - 1.0:+.2e}"
         )
-    text = "Its effect in OpenDSS: " + "; ".join(parts) + "."
-    print(f"  {text}")
-    return text
+    return deviation
+
+
+def deviation_table(deviation: SourceDeviation) -> list[str]:
+    lines = [
+        "| change against the source network | scenario 0: minimum demand | scenario 1: maximum demand |",
+        "|---|---|---|",
+    ]
+    for node_class in NOMINAL_VOLTAGE:
+        if node_class in deviation.voltage[0]:
+            values = " | ".join(f"{v[node_class]:.1e}" for v in deviation.voltage)
+            lines.append(f"| node voltage, {node_class} | {values} |")
+    values = " | ".join(f"{v:.1e}" for v in deviation.voltage_merged_nodes)
+    lines.append(f"| node voltage, merged nodes | {values} |")
+    values = " | ".join(
+        f"{source / 1e3:.3f} to {merged / 1e3:.3f} kW ({merged / source - 1.0:+.1e})"
+        for source, merged in deviation.losses
+    )
+    lines.append(f"| losses | {values} |")
+    values = " | ".join(f"{merged / source - 1.0:+.1e}" for source, merged in deviation.feeder_p)
+    lines.append(f"| feeder P (relative) | {values} |")
+    return lines
 
 
 def run_power_flow(network: Network) -> PowerFlowRun:
@@ -1816,16 +2020,33 @@ and `update_batch.json` sets the `asym_load` powers of both scenarios. There is 
   backend's 1-phase LineCodes (r0, x0 and b0 are ignored), so they have no earth-return reactance in either tool. All
   22 kV and 12.7 kV SWER nodes have `u_rated` 22 kV (the SWER convention of power-grid-model).
 - Capacitors are grounded-wye shunts with b1 = b0 = kvar / kV^2.
-- Impedance floor (in both tools): a line whose series impedance |z1| L is below {z_min} ohm gets the length
-  {z_min} ohm / |z1 per km| (the LineCode is unchanged, so its capacitance scales with it), and the zone substation
-  uk is raised (r / x kept). Here: {floor}. The source data has connector lines down to 1.4e-7 ohm and a zone
-  substation with uk = 1.41e-6, which make the admittance matrix so ill-conditioned that PGM's Newton-Raphson stalls
-  at a max deviation of about 3e-7 (error tolerance 1e-8) and PGM and OpenDSS agree to only about 2e-7. This is not
-  caused by the reduced-phase or SWER parts: the three-phase part of the network on its own (the upstream code path)
-  stalls at the same level. The network, its topology and every element are kept, and both tools solve the same
-  floored network. {floor_effect}
+- Near-zero lines are merged (in both tools): see below.
 - OpenDSS runs with tolerance {dss_tolerance} (1e-12 stalls at round-off on SMR8) and MaxIterations
   {dss_max_iterations}.
+
+## Merged near-zero lines
+
+The source data has connector lines with a series impedance down to 1.4e-7 ohm and a zone substation with uk =
+1.41e-6. They make the admittance matrix so ill-conditioned that PGM's Newton-Raphson stalls at a max deviation of
+about 3e-7 (error tolerance 1e-8) and PGM and OpenDSS agree to only about 2e-7. This is not caused by the reduced-phase
+or SWER parts: the three-phase part of the network on its own (the upstream code path) stalls at the same level.
+
+Therefore every line whose series impedance |z1| L is below {z_merge} ohm ({z_merge_pu} pu on the 22 kV base of 484 ohm,
+1 MVA) is removed and its two end nodes are merged into one, in both tools. A merged group of nodes keeps the node
+closest to the source (the fewest branches; on a tie the lowest id), and every element on a merged node moves to it:
+lines, transformer terminals and capacitors. A three-phase line merges 22 kV nodes and a one-phase line SWER nodes;
+the generator asserts that a 22 kV node never merges with a SWER node. A kept line whose ends merge is dropped (it runs
+in parallel with merged lines only), and lines that end up between the same two nodes stay parallel. Every other line
+keeps the length and LineCode of the data. The zone substation uk is raised to {zone_uk} (uk and pk scaled together,
+r / x kept): with a smaller uk it is the smallest impedance left after the merge, and PGM misses the tolerances on
+KLO14. Here: {merge}
+
+The merge changes the OpenDSS solution against the source network (every line of the data and the sheet uk of the zone
+substation, solved with the same tolerance) by the following. A node voltage change is the largest
+|V - V_source| / |V_source| over the phases of the kept nodes of a class (the phasors, so the angle counts too); a
+merged node is compared at the node it is merged into.
+
+{deviation}
 
 ## Demand
 
@@ -1880,7 +2101,7 @@ def atol_text(atol) -> str:
     return f"{atol['default']:g} ({others})"
 
 
-def readme_text(network: Network, run: PowerFlowRun, params: dict) -> str:
+def readme_text(network: Network, run: PowerFlowRun, deviation: SourceDeviation, params: dict) -> str:
     spec = network.spec
     methods = params["calculation_method"]
     methods = methods if isinstance(methods, list) else [methods]
@@ -1902,9 +2123,11 @@ def readme_text(network: Network, run: PowerFlowRun, params: dict) -> str:
         copyright=UPSTREAM_COPYRIGHT,
         counts="\n".join(count_table(network)),
         dss_tolerance=f"{DSS_TOLERANCE:g}",
-        z_min=f"{Z_MIN_OHM:g}",
-        floor=impedance_floor_text(network),
-        floor_effect=run.floor_effect,
+        z_merge=f"{Z_MERGE_OHM:g}",
+        z_merge_pu=f"{Z_MERGE_OHM / (U_MV**2 / 1e6):.2g}",
+        zone_uk=f"{ZONE_SUBSTATION_UK:g}",
+        merge=merge_text(network),
+        deviation="\n".join(deviation_table(deviation)),
         dss_max_iterations=DSS_MAX_ITERATIONS,
         power_factor=POWER_FACTOR,
         min_demand=f"{MIN_DEMAND:g}",
@@ -1918,7 +2141,7 @@ def readme_text(network: Network, run: PowerFlowRun, params: dict) -> str:
     )
 
 
-def write_power_flow_case(network: Network, run: PowerFlowRun, root: Path):
+def write_power_flow_case(network: Network, run: PowerFlowRun, deviation: SourceDeviation, root: Path):
     target = root / "power_flow" / "australian-swer" / network.spec.name
     target.mkdir(parents=True, exist_ok=True)
     params = PF_PARAMS[network.spec.name]
@@ -1932,7 +2155,7 @@ def write_power_flow_case(network: Network, run: PowerFlowRun, root: Path):
     write_licensed(target / "asym_output_batch.json", compact_dataset("asym_output", run.references, is_batch=True))
     write_licensed(target / "params.json", json.dumps(params, indent=2) + "\n")
     write_licensed(target / "test.dss", "\n".join(run.script) + "\n")
-    (target / "README.md").write_text(readme_text(network, run, params), encoding="utf-8")
+    (target / "README.md").write_text(readme_text(network, run, deviation, params), encoding="utf-8")
     print(f"  wrote {target}")
 
 
@@ -1952,12 +2175,13 @@ def main():
         paths = fetch_sources(specs, args.source_dir, Path(download_dir))
         sheets = {spec.name: read_workbook(paths[spec.name]) for spec in specs}
     for spec in specs:
-        network = build_network(spec, sheets[spec.name])
+        source = build_network(spec, sheets[spec.name])
+        network = merge_connectors(source)
         check_elements(network)
         run = run_power_flow(network)
-        run.floor_effect = floor_effect(network)
+        deviation = source_deviation(network, source)
         if not args.check_only:
-            write_power_flow_case(network, run, args.root)
+            write_power_flow_case(network, run, deviation, args.root)
 
 
 if __name__ == "__main__":
