@@ -9,6 +9,11 @@ For every case and method it prints, per field, the max absolute and relative de
 The fields are transformed exactly like tests/unit/utils.py compare_result does (angles as phasors, u_angle
 normalised on the first entry). A ratio below 0.1 means the tolerance passes with a 10x margin.
 
+Per calculation method the parameters are those of params.json overridden by params["extra_params"][<method>], as in
+the validation harnesses: rtol, atol, error_tolerance (default 1e-8), max_iterations (default 20) and
+calculation_initialization (default "default"). The "ratio with params" of a method uses its own rtol and atol. The
+candidate search is over all methods together, so it is not affected by extra_params.
+
 If no candidate of the standard grid (rtol up to 1e-6, atol up to 1e-4) passes, it also prints the passing
 candidates of a wider grid (rtol up to 1e-5, atol up to 1e-2). Reference rows may be in the compact format (lists, with
 the root "attributes"). It handles single power flows and short circuits, and batches of both (update_batch.json with
@@ -87,14 +92,25 @@ def worst_ratio(items, rtol, atol):
     return max(float(np.max(np.abs(a - e) / (atol_for(atol, name) + rtol * np.abs(e)))) for name, a, e in items)
 
 
+def method_params(params, method):
+    """the params of one calculation method: the top-level params overridden by extra_params[<method>]"""
+    return dict(params, **params.get("extra_params", {}).get(method, {}))
+
+
 def run(case, params, method):
+    mp = method_params(params, method)
+    solver_options = {
+        "error_tolerance": mp.get("error_tolerance", 1e-8),
+        "max_iterations": mp.get("max_iterations", 20),
+        "calculation_initialization": mp.get("calculation_initialization", "default"),
+    }
     model = PowerGridModel(json_deserialize_from_file(case / "input.json"))
     enabled = _ExperimentalFeatures.enabled
     if (case / "asym_output.json").exists():
         result = model._calculate_power_flow(
             symmetric=False,
             calculation_method=CalculationMethod[method],
-            calculation_initialization=params.get("calculation_initialization", "default"),
+            **solver_options,
             experimental_features=enabled,
         )
         return [(result, reference_data(case / "asym_output.json"))]
@@ -103,7 +119,7 @@ def run(case, params, method):
         result = model._calculate_power_flow(
             symmetric=False,
             calculation_method=CalculationMethod[method],
-            calculation_initialization=params.get("calculation_initialization", "default"),
+            **solver_options,
             update_data=update,
             experimental_features=enabled,
         )
@@ -132,6 +148,7 @@ def main():
         methods = methods if isinstance(methods, list) else [methods]
         print(case.relative_to(root), f"(params: rtol {params['rtol']}, atol {params['atol']})")
         all_items = []
+        overall = 0.0
         for method in methods:
             for k, (actual, reference) in enumerate(run(case, params, method)):
                 items = list(fields(actual, reference))
@@ -141,9 +158,11 @@ def main():
                     dev = np.abs(a - e)
                     rel = np.where(np.abs(e) > 1e-3, dev / np.maximum(np.abs(e), 1e-300), 0.0)
                     parts.append(f"{name} {dev.max():.1e}/{rel.max():.1e}")
-                ratio = worst_ratio(items, params["rtol"], params["atol"])
+                mp = method_params(params, method)
+                ratio = worst_ratio(items, mp["rtol"], mp["atol"])
+                overall = max(overall, ratio)
                 print(f"  {method} #{k}: ratio {ratio:.3f} | abs/rel: " + ", ".join(parts))
-        print(f"  overall ratio with params: {worst_ratio(all_items, params['rtol'], params['atol']):.3f}")
+        print(f"  overall ratio with params: {overall:.3f}")
         passing = [(r, a) for r, a in CANDIDATES if worst_ratio(all_items, r, a) < 0.1]
         print("  candidates with 10x margin (rtol, atol):", ", ".join(f"({r:.0e}, {a:.0e})" for r, a in passing[:8]))
         if not passing:
