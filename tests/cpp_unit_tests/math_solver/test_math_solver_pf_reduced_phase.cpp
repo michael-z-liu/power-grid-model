@@ -525,6 +525,34 @@ void check_meshed_power_balance(SolverOutput<asymmetric_t> const& output, MathMo
     }
 }
 
+// source -- bus0 (abc) --abc-- bus1 (abc): the branch couples only the differential modes, y_d * (I - 1/3 * ones) on
+// both sides, and the zero sequence of bus1 is held to earth only by a low admittance eps * y_d / 3 * ones (eps 1e-8,
+// like the low-susceptance fallback of D14); bus1 has one unbalanced const_y wye load, which iterative current treats
+// explicitly, so the zero sequence of bus1 grows by about |S| / (eps * |y_d|) = 1e6 per iteration
+ReducedPhaseGrid make_floating_zero_sequence_grid() {
+    constexpr double eps = 1e-8;
+    DoubleComplex const y_d{2.0, -8.0};
+    Tensor const y_diff{2.0 / 3.0 * y_d, -1.0 / 3.0 * y_d};
+    Tensor const y_zero{eps / 3.0 * y_d, eps / 3.0 * y_d};
+
+    ReducedPhaseGrid grid{};
+    grid.topo.slack_bus = 0;
+    grid.topo.phase_shift = {0.0, 0.0};
+    grid.topo.branch_bus_idx = {{0, 1}};
+    grid.topo.sources_per_bus = {from_sparse, {0, 1, 1}};
+    grid.topo.shunts_per_bus = {from_sparse, {0, 0, 0}};
+    grid.topo.load_gens_per_bus = {from_sparse, {0, 0, 1}};
+    grid.topo.load_gen_type = {LoadGenType::const_y};
+    grid.topo.voltage_regulators_per_load_gen = {from_sparse, {0, 0}};
+    grid.param.branch_param = {{y_diff, -y_diff, -y_diff, Tensor{y_diff + y_zero}}};
+    grid.param.source_param = {SourceCalcParam{.y1 = y_ref, .y0 = y_ref}};
+    grid.input.source = {u_ref};
+    grid.input.s_injection = {
+        Value{DoubleComplex{-0.1, -0.03}, DoubleComplex{-0.05, -0.02}, DoubleComplex{-0.08, -0.01}}};
+    grid.input.initialization = CalculationInitialization::default_initialization;
+    return grid;
+}
+
 void check_solver_output_exact(SolverOutput<asymmetric_t> const& output, SolverOutput<asymmetric_t> const& ref) {
     auto const equal = [](Value const& x, Value const& y) { return (x == y).all(); };
     REQUIRE(output.u.size() == ref.u.size());
@@ -918,6 +946,21 @@ TEST_CASE("Test math solver - PF with absent phases rejects voltage regulation")
         CHECK(output.u[1](1) == 0.0);
         CHECK(output.u[1](2) == 0.0);
     }
+}
+
+TEST_CASE("Test math solver - IC with a NaN deviation raises IterationDiverge") {
+    // The iteration loop runs while max_dev > err_tol, which a NaN deviation fails, so a NaN used to end the loop as if
+    // converged. Here the voltages of iterative current overflow to inf after about 40 iterations and then turn NaN;
+    // with the NaN check disabled, the run with max_iter 100 returned NaN voltages without an error (checked once).
+    // - The grid is three-phase on purpose: a floating common mode at a bus with an absent phase behaves the same
+    //   today, but the absent-phase handling of const_y loads in iterative current is meant to anchor it there.
+    // - With only const_pq loads the explicit current conj(S / U) shrinks as U grows, so the iteration stays finite
+    //   and raises IterationDiverge at max_iter whether or not NaN is checked; the const_y load is needed for NaN.
+    // - Newton-Raphson (linear start) converges on this grid and never produces NaN, so it is not asserted here.
+    ReducedPhaseGrid const grid = make_floating_zero_sequence_grid();
+    constexpr Idx max_iter_nan = 100;
+    CHECK_THROWS_WITH_AS(run_case<IterativeCurrent>(grid.topo, grid.param, grid.input, err_tol, max_iter_nan),
+                         doctest::Contains("nan"), IterationDiverge);
 }
 
 TEST_CASE("Test math solver - split-phase slot patterns of the start values") {
