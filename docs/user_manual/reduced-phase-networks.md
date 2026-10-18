@@ -352,5 +352,10 @@ See [Backwards compatibility](../advanced_documentation/c-api.md#backwards-compa
 * The phases of a node are not part of the output.
 * The voltage factor $c$ of a short circuit follows the source node, not the fault location.
 
+Besides the small cases for each component, the feature is validated against OpenDSS on two real rural networks with SWER
+(SMR8 and KLO14, AusNet Services data from the Team-Nando MV-LV-Networks repository), for power flow and short circuit.
+The cases are in `tests/data/power_flow/australian-swer` and `tests/data/short_circuit/australian-swer`, and each has a
+README that lists its modelling choices.
+
 The [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md#later-work) lists the
 work planned for later, and also records the decisions behind this feature.

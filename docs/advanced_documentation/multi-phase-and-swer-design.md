@@ -8,7 +8,7 @@ SPDX-License-Identifier: MPL-2.0
 
 ```{note}
 This is a design and investigation document. It describes what is needed to support one- and two-phase
-components in power flow and short-circuit calculations. Milestones M0 to M9 are implemented. One- and two-phase
+components in power flow and short-circuit calculations. Milestones M0 to M10 are implemented. One- and two-phase
 components and delta loads stay an experimental feature (decisions D9 and D45). For how to use the feature, see
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md).
 ```
@@ -683,6 +683,105 @@ Python validation and documentation (decided by recommendation under Michael's b
   (Michael's earlier call). `docs/user_manual/reduced-phase-networks.md` replaces the "example notebook" of the M9
   row, and `tests/unit/test_docs_reduced_phase_example.py` executes its code blocks.
 
+#### Taken in M10
+
+Validation against two real networks (decided by recommendation under Michael's blanket approval, 2026-10-18; D47 was
+reported to him, because it changes the approved plan):
+
+* **D47. Maximum demand is 20 % of the transformer kVA, minimum demand 10 %, power factor 0.95.** The 60 % first
+  approved does not work: OpenDSS does not converge on either network and the voltages collapse (SMR8 down to 0.29
+  pu, KLO14 to 0.53 pu), because 60 % of the installed transformers (40 MVA and 35 MVA) is 24 to 26 MW on rural 22 kV
+  feeders, and the regulators would run at 153 % to 281 % of their rating. At 20 % every regulator is within its
+  rating, the feeder peaks are 8.1 MW (SMR8) and 7.0 MW (KLO14), and the lowest voltage is 0.845 pu (SMR8, SWER) and 0.933 pu
+  (KLO14). The generator has a voltage gate of 0.8 pu and stops with a message that names this decision when the
+  loads are too high. `MAX_DEMAND` and `MIN_DEMAND` are constants in the generator.
+* **D48. The ISO coincidence factor applies at maximum demand only.** The SWER loads behind an isolating transformer
+  (ISO) get $\min(1, S_{ISO} / (0.2 \sum S_{tx}))$, with $S_{tx}$ the rating of the SWER distribution transformers behind it. The
+  factor models the diversity of the peak. Minimum demand is base load, and every ISO is within its rating without it. At 20 %
+  it binds on two ISOs of SMR8 (NISSEN_ISO 0.625, BUNGARRA_ISO 0.9346) and on none of KLO14.
+* **D49. Voltage regulators are fixed-neutral `YNyn0` banks.** `backend.py` builds each regulator as three
+  autotransformers under a `RegControl` that starts at tap 0. At the neutral tap this is a 1:1 connection plus the
+  leakage impedance, so both tools get a `transformer` (clock 0, grounded wye on both sides) with the rating, `xhl` and
+  `%loadloss` of the sheet. Regulator action (tap changing) is not part of the validation. This includes
+  PLENTY_VLY_RISE of KLO14 (22/22 kV, 200 kVA, without `_REG` in its name).
+* **D50. ISOs are two-winding.** The ISO is a `single_phase_transformer` from a phase pair of the 22 kV side
+  (`Conn_Type`; clock 6 if the pair is listed in reverse order) to phase a of the SWER network. The open third winding
+  of `backend.py` is dropped. The OpenDSS buses are written literally from `Conn_Type`, so OpenDSS checks the clock-6
+  mapping independently.
+* **D51. Split-phase transformers use an explicit Kersting split.** The 250-0-250 V transformers are centre-tapped
+  (`ab_center_tapped`, $u_2$ = 500 V) with the Kersting defaults of D20. OpenDSS gets the matching `XHT` and `XLT`
+  instead of the defaults of `backend.py` (`XHT` = 35 %, `XLT` = 30 %), which are not the Kersting split. The YPrim of
+  every distinct parameter set is checked against the PGM model.
+* **D52. The 44 phase-to-earth units of KLO14 are 12.7 kV / 250 V.** The data gives them a 22/0.433 kV rating but wires them from phase R
+  to earth. Both ratings are taken phase-to-earth, which keeps the turns ratio of the data. They are
+  `single_phase_transformer`s, like the SWER units.
+* **D53. $i_0 = p_0 = 0$ everywhere.** PGM places the magnetising branch as a $\pi$ (half on each side), OpenDSS lumps it
+  at winding 1, as in M5. `uk` and `pk` come from the sheet's `xhl` and loadloss, and OpenDSS gets the matching
+  `XHL` and `%loadloss`. The low-susceptance zero-sequence regularisation of the delta side of a `transformer`
+  (and of a phase-to-phase `single_phase_transformer` winding, D14) is mirrored by shunt `Reactor`s, whose power is
+  added to the from side of the reference, as in M5 (the reactors equal PGM's value to 1.0e-6, the `eps` regularisation).
+* **D54. Near-zero connectors are merged, and the zone-substation $u_k$ is raised to 1e-4.** The data has connector
+  lines (LineCode 0, 0.001 ohm/km, and others) with a series impedance down to 1.4e-7 ohm, and a zone substation with
+  $u_k$ = 1.41e-6. They make the admittance matrix so ill-conditioned that the PGM Newton-Raphson stalls at a maximum
+  deviation of about 3e-7, above its error tolerance of 1e-8, also after 1000 iterations; PGM and OpenDSS agree to only about 2e-7.
+  * **This is pre-existing, not caused by the reduced-phase code.** The model with only its three-phase parts (every
+    `single_phase_transformer`, `asym_line` and their nodes and loads removed; the upstream code path) stalls at the
+    same level (0.8e-7 to 5.3e-7).
+  * **A floor on the impedance was tried and rejected.** M10b lengthened every line below 1e-2 ohm. That worked for PGM,
+    but it changed the OpenDSS solution of the source network by up to 0.4 % in voltage magnitude (5.3e-3 and 6.6e-3 as phasors) and by +4 % to +10 % in
+    losses, so the cases no longer described the real networks.
+  * **Decision.** Every line with $|z_1| L$ below 1e-3 ohm is removed and its end nodes are merged (union-find; the
+    representative has the fewest branches to the source, then the lowest id), in the input of both tools. Lines,
+    transformer terminals and capacitors move to the representative. The generator asserts that a merge never joins a 22 kV node and a SWER node. SMR8 loses 887 of
+    its lines (4329 to 3442 nodes), KLO14 1310 (4533 to 3224 nodes); the smallest line left is 1.01e-3 ohm.
+  * **The zone-substation $u_k$** is raised to 1e-4 (0.00052 ohm on the 22.9 kV side), because after the merge it is
+    the smallest impedance left: with 1e-5 or 3e-5, KLO14 misses the tolerance rule (ratio 0.145, on the power through the
+    200 kVA regulator).
+  * **Deviation from the source network** (every line, the sheet $u_k$, solved by OpenDSS with the same tolerance): at most 5.5e-5 in node voltage
+    (phasor metric, merged nodes at their representative) and at most 0.1 % in losses; the feeder power changes by at most 2.3e-5. The README of each case lists the
+    change per node class.
+  * Faults sit on kept nodes only, so that the fault node exists in both tools.
+* **D55. The references carry no three-phase `line`, short-circuit `node` or `asym_line` output.** Whole component
+  types can be left out of a reference (the harnesses compare the keys of the reference), but not a subset of rows. The
+  power-flow reference has `node`, `asym_line`, `single_phase_transformer` and `transformer`; the short-circuit
+  reference has `fault`, `single_phase_transformer` and `transformer`. The node voltages at both ends pin every line, and the
+  size budget (about 10 MB for the new data) did not allow more: `asym_line` output would add 1.05 MB to the short-circuit cases and
+  `node` output about 5 MB. The datasets use the compact JSON format (a root `attributes` list, one list row per line), and references
+  are rounded to 12 significant digits.
+* **D56. Tolerances.** The rule is that of the earlier cases: the smallest round values with at least 10x margin over all
+  scenarios, with a `dict` for `atol` where one field needs its own value.
+  * **Power flow:** rtol 1e-6, atol 1e-8, and 1e-3 on `[pq]_(from|to)`. Node voltages agree to 1.1e-10 (SMR8) and 9.8e-11 (KLO14)
+    relative, the branch powers to 1.6e-3 W and 1.2e-3 W absolute. A branch power is computed from the voltages at its ends, so a branch
+    with a small impedance (down to 1e-3 ohm) amplifies their round-off to an absolute error that no relative tolerance covers; the
+    dict `atol` is limited to the power fields. The worst ratio of measured deviation to tolerance is 0.066 and 0.069. `newton_raphson` runs on both networks (3 and 4
+    iterations), `iterative_current` on SMR8 only (8 and 12 iterations); on KLO14 it misses the rule (ratio 0.207, on the power of
+    the regulator PLENTY_VLY_RISE).
+  * **Short circuit:** rtol 1e-8, atol 1e-8, and 1e-6 on `i_(from|to)` and its angle. Fault currents agree to 6.7e-11 and 9.2e-11 relative, and
+    branch currents above 1 A to 6.0e-9 relative. Currents up to 10 A agree to 3.6e-8 A absolute: they are small currents through low-impedance branches,
+    driven by small voltage differences, which have the same round-off amplification. rtol 1e-9 is not enough (the fault angles agree to 3e-10 only). The worst ratio is 0.033 and 0.030
+    (the 66 kV current of the zone substation for a remote SWER fault).
+* **D57. Licence sidecars are `MPL-2.0 AND BSD-3-Clause`.** The data of the cases derives from the Team-Nando data (Copyright (c) 2024,
+  Team Nando - Public Repositories, BSD 3-Clause), so every data file of a case has a `.license` sidecar, and each `README.md` a header, with both
+  copyright lines and the licence expression `MPL-2.0 AND BSD-3-Clause`. `LICENSES/BSD-3-Clause.txt` is added for `reuse lint`. There is no
+  `REUSE.toml` override. The workbooks are not part of the repository: the generator downloads them from the pinned commit (or reads
+  `--source-dir`) and checks their sha256.
+* **D58. The OpenDSS reference follows what OpenDSS solves.**
+  * **One-phase lines use $Z_1$ and $C_1$ only.** For a `LineCode` with `nphases=1`, a `Line` solves with the series impedance
+    $r_1 + jx_1$ and the shunt $C_1 = b_1/\omega$; $r_0$, $x_0$ and $b_0$ are ignored. The matrix that the `LineCode` object reports is
+    $(2Z_1 + Z_0)/3$ and must not be read. The `asym_line` of a SWER section with phase `a` therefore gets $r_{aa} = r_1 L$,
+    $x_{aa} = x_1 L$ and $c_{aa} = b_1 10^{-6} L/\omega$ ($b_1$ in µS/km), and has no earth-return reactance, as in `backend.py`.
+  * **Tolerance 1e-11, `MaxIterations` 200.** `Set Tolerance=1e-12` stalls at round-off on SMR8 and gives the same voltages as 1e-11. The earlier cases use
+    1e-12; the README of each case states the change.
+  * **Taps are written explicitly** (`taps=[t 1]`), because the `mintap`/`maxtap` of `backend.py` do not clamp. The unreduced source network is also solved, for the
+    README table of D54.
+  * **The generator checks before it writes anything:** the LineCodes against the $(2Z_1 + Z_0)/3$ form, the YPrim of every distinct single-
+    and three-phase transformer set against the numpy PGM model, the mirror reactors, the capacitors, the convergence, that the loads draw their kW + jkvar,
+    the 0.8 pu voltage gate (D47) and the topology and counts.
+* **D59. Runtime cost in the debug test run.** In the debug `ctest` (clang with the sanitizers), `Validation test batch - power flow` goes from 98.8 s to
+  235 s (the two cases take 79 s and 58 s, of which `iterative_current` on SMR8 is 19 s), and `Validation test batch - short circuit` from 24.8 s to
+  70.9 s. The time is spent in the sanitizer build on networks of 3.2k to 3.4k nodes. The merge of D54 cut the power-flow
+  time from 256.5 s, which it took with the impedance floor.
+
 ### Decision index
 
 | Decision | Subject | Section |
@@ -733,6 +832,19 @@ Python validation and documentation (decided by recommendation under Michael's b
 | D44 | Sensors on a `single_phase_transformer` | [Taken in M9](#taken-in-m9) |
 | D45 | The experimental gate stays | [Taken in M9](#taken-in-m9) |
 | D46 | User-manual page, no notebook | [Taken in M9](#taken-in-m9) |
+| D47 | Maximum demand 20 %, minimum 10 %, power factor 0.95 | [Taken in M10](#taken-in-m10) |
+| D48 | ISO coincidence factor at maximum demand only | [Taken in M10](#taken-in-m10) |
+| D49 | Voltage regulators are fixed-neutral `YNyn0` banks | [Taken in M10](#taken-in-m10) |
+| D50 | ISOs are two-winding | [Taken in M10](#taken-in-m10) |
+| D51 | Split-phase transformers with an explicit Kersting split | [Taken in M10](#taken-in-m10) |
+| D52 | The 44 phase-to-earth units of KLO14 are 12.7 kV / 250 V | [Taken in M10](#taken-in-m10) |
+| D53 | $i_0 = p_0 = 0$ everywhere | [Taken in M10](#taken-in-m10) |
+| D54 | Near-zero connectors are merged, zone-substation $u_k$ 1e-4 | [Taken in M10](#taken-in-m10) |
+| D55 | References without `line`, short-circuit `node` and `asym_line` output | [Taken in M10](#taken-in-m10) |
+| D56 | Tolerances of the real-network cases | [Taken in M10](#taken-in-m10) |
+| D57 | Licence sidecars `MPL-2.0 AND BSD-3-Clause` | [Taken in M10](#taken-in-m10) |
+| D58 | OpenDSS reference: $Z_1$/$C_1$ of one-phase lines, tolerance 1e-11 | [Taken in M10](#taken-in-m10) |
+| D59 | Runtime cost in the debug test run | [Taken in M10](#taken-in-m10) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
@@ -1078,6 +1190,31 @@ and atol 1e-8 with a margin of at least 27x. All existing cases regenerate byte 
   240 V; `swer-c-minimum` pins this (IEC 60909 would use 0.95 at the fault location). The reference scales the
   source voltage and impedance with the same *c* as PGM.
 
+**Validation against real networks** (M10). The two networks `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` of
+[Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`) have 3.4k
+and 3.2k nodes, 10 and 7 SWER networks behind isolating transformers, voltage regulators and about 700 distribution transformers each. They test
+the feature at a scale and with a data quality that the small synthetic cases do not have: a mix of
+three-phase, split-phase and SWER transformers, and connectors with a near-zero impedance. The cases are generated by
+`tests/data/generators/australian_swer_networks.py` (D47 to D59) and compared with OpenDSS: power flow in
+`tests/data/power_flow/australian-swer/{smr8,klo14}` and short circuit in `tests/data/short_circuit/australian-swer/{smr8,klo14}`. PGM and OpenDSS
+agree to about 1e-10 relative in node voltages and fault currents, and every case passes with a margin of at least 14x in the tolerance (worst
+ratio 0.069). The generated `README.md` of each case lists every deviation from the source repository's `backend.py`. The reduced-phase code needed no change. Lessons from M10:
+
+* **Check that the load level is feasible before fixing it.** The 60 % of the transformer rating first approved does not converge
+  in OpenDSS and collapses the voltage (D47). The planning step ran the networks in OpenDSS first, and the generator stops at a voltage gate of 0.8 pu.
+* **OpenDSS one-phase lines use $Z_1$ and $C_1$ only**, and the matrix that a `LineCode` reports is not what the `Line` solves (D58).
+  The OpenDSS tolerance had to be 1e-11, as 1e-12 stalls at round-off on SMR8.
+* **The regularisation of PGM must be mirrored.** The zero-sequence low susceptance of a delta winding of a three-phase `transformer` is
+  part of the PGM model, as is that of a phase-to-phase winding (D14). The reference therefore adds matching shunt `Reactor`s, as in M5 (D53).
+* **Near-zero impedances limit the Newton-Raphson solver of PGM, with or without reduced-phase components** (D54). The three-phase-only version of each network stalls at
+  the same deviation. An impedance floor, as an easy fix, changes the network (voltages by up to 0.4 %, losses by 4 % to 10 %); merging the connectors
+  changes it by at most 5.5e-5 in voltage and 0.1 % in losses. Whichever fix is used, it must be applied to both tools,
+  and the generator solves the unreduced network in OpenDSS to report how far the fix moved the solution. See [Later work](#later-work).
+* **Size and runtime are design inputs.** The reference output was trimmed to what the budget allowed (D55: no three-phase `line`, short-circuit `node` or
+  `asym_line` output; compact JSON; 12 significant digits), which keeps the data at 9.0 MB. The cases still add 136 s and 46 s to the debug test run (D59).
+* **Short branches need a per-field `atol`** (D56): a power computed from the voltages at both ends of a branch of 1e-3 ohm
+  carries the round-off of the voltages, so a purely relative tolerance on all fields would fail without a model error.
+
 ### Initial voltages
 
 The `Vector(T)` rotation of 0°/−120°/+120° plus a scalar `phase_shift` is wrong for split-phase buses. It is fixed
@@ -1178,7 +1315,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M7 (implemented) | Delta loads (`connection` on `asym_load`/`asym_gen`) | `input.json` (`connection`), `<core>/common/enum.hpp` and `src/power_grid_model/_core/enum.py` (`LoadGenConnection`), `<core>/component/load_gen.hpp`, `MathModelTopology`/`ComponentTopology` (`load_gen_connection`), new `<core>/math_solver/delta_load_gen.hpp`, `add_loads` in the Newton-Raphson and iterative current solvers, `common_solver_functions.hpp` (linear and results), `main_model_impl.hpp` (gates) | `tests/cpp_unit_tests/math_solver/test_delta_load_gen.cpp` (closed forms, finite-difference check of the Newton-Raphson Jacobian, exact zeros, linear admittance); `math_solver/test_math_solver_pf_reduced_phase.cpp` (KCL for all solvers, bit-identity with all load_gens flagged wye, quadratic convergence, backstops); `component/test_load_gen.cpp`, `test_topology.cpp`, `main_core/test_main_core_topology.cpp`, `common/test_exceptions.cpp`; native API tests (`tests/native_api_tests/test_api_model.cpp`); Python tests (`tests/unit/test_error_handling.py`); validation cases against OpenDSS (1-phase `Load conn=delta` on `bus.p.q` and a native 3-phase `conn=delta` load, checked by the branch-voltage base check), generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/power_flow/asym-load-delta/{three-phase,three-phase-linear,two-phase,two-phase-linear,split-phase,split-phase-flat-start,split-phase-linear}` (with `asym_load`/`asym_gen` outputs in the reference) and the expected-error cases `power_flow/asym-load-delta/{symmetric-not-supported,delta-on-absent-phase}` and `state_estimation/asym-load-delta-not-supported` (see [Phase-to-phase loads](#phase-to-phase-loads-connection-on-asym_load--asym_gen)) | M / medium |
 | M8 (implemented) | Short-circuit phase validity | `<core>/main_core/calculation_input_preparation.hpp` (`check_fault_phases_present`), `<core>/component/fault.hpp` (`has_default_phase`), `<core>/common/exception.hpp` (`InvalidShortCircuitPhases` with the fault ID), `<core>/calculation_parameters.hpp` (`fault_phase_mask`), `<core>/job_adapter.hpp` (cache-run catch); decisions D34-D37 | `tests/cpp_unit_tests/common/test_exceptions.cpp`, `component/test_fault.cpp`, `math_solver/test_math_solver_sc.cpp` (solver backstop); native API tests (`tests/native_api_tests/test_api_model.cpp`: valid, absent, default and skipped faults); Python tests (`tests/unit/test_error_handling.py`: single and batch, per-scenario topology); validation cases against OpenDSS, generated by `tests/data/generators/reduced_phase_opendss_cases.py`: `tests/data/short_circuit/{swer-fault-impedance,swer-multiple-faults,swer-c-minimum}` (`x_f` as a `Reactor`, simultaneous faults on three-phase, SWER and 240 V nodes, minimum voltage scaling) and the expected-error case `short_circuit/swer-fault-on-absent-phase`; user docs in `docs/user_manual/components.md` | S / low |
 | M9 (implemented) | Python validation and documentation (decisions D38-D46) | `src/power_grid_model/validation/_validation.py` (required values and ranges of `asym_line` with `phases`, new `validate_single_phase_transformer`, load `connection`: valid enum value, `delta` only on `asym_load` and `asym_gen`, no voltage regulator on a delta load_gen, sensor branch lists, the `ValidationWarning` hooks), `_rules.py`, `errors.py` (`NotApplicableValueError`, `SinglePhaseTransformerClockError`, `ValidationWarning`), `__init__.py`; the new user manual page `docs/user_manual/reduced-phase-networks.md` (a worked example instead of a notebook, D46); `docs/user_manual/{components,calculations,data-validator,model-validation}.md`, `docs/advanced_documentation/c-api.md` and `docs/algorithms/sc-algorithms.md`; the comment of the experimental gate in `<core>/main_model_impl.hpp` | `tests/unit/validation/test_reduced_phase_validation.py` (every rule, with the mirror tests against C++), `test_reduced_phase_cases.py` (all reduced-phase, split-phase and delta validation cases validate cleanly without a warning), `test_rules.py`, `test_errors.py`, `test_input_validation.py`, `test_validation_functions.py`; `tests/unit/test_docs_reduced_phase_example.py` (runs the code of the user manual page) | M / low |
-| M10 (planned) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (BSD-3-Clause, AusNet Services data). Only the 22 kV and 12.7 kV SWER parts are modelled. Each distribution transformer (three-phase, centre-tapped 250-0-250 V, or SWER 12.7 kV / 240 V) feeds one lumped constant-power load on its secondary busbar, split evenly over the live phases. Minimum and maximum demand are set from the transformer rating. A generator reads the Excel files at a pinned commit and writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py` | New generator in `tests/data/generators/`; no library changes expected | Validation cases in `tests/data/power_flow/` (both networks at minimum and maximum demand) and `tests/data/short_circuit/` (faults on 22 kV, SWER and LV busbars), matched against OpenDSS with the existing tolerances | M / medium (data size, convergence at maximum demand) |
+| M10 (implemented) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`, BSD-3-Clause, AusNet Services data). Only the 22 kV and SWER (12.7 kV) parts are modelled; the LV side is lumped into one constant-power load per distribution transformer (three-phase, centre-tapped 250-0-250 V, SWER 12.7 kV / 240 V, and the 44 phase-to-earth units of KLO14) on its secondary busbar. Minimum demand is 10 % and maximum demand 20 % of the transformer kVA, at power factor 0.95. The generator writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py`; decisions D47-D59 | `tests/data/generators/australian_swer_networks.py` (new: downloads the workbooks at the pinned commit and checks their sha256, maps them to OpenDSS and PGM, runs the self-checks, runs OpenDSS and writes the cases); `tests/data/generators/reduced_phase_compare_pgm.py` (extended: compact JSON rows, power-flow batches, a wider tolerance grid when no standard candidate passes); `LICENSES/BSD-3-Clause.txt`; `tests/unit/validation/test_reduced_phase_cases.py` (`MIN_CASE_COUNT` 37); no library changes | Four case folders, each with a generated `README.md` that lists every deviation from `backend.py`: power flow `tests/data/power_flow/australian-swer/{smr8,klo14}` (asymmetric batch of two scenarios, minimum and maximum demand; `newton_raphson` on both, `iterative_current` on SMR8 only) and short circuit `tests/data/short_circuit/australian-swer/{smr8,klo14}` (IEC 60909, maximum voltage scaling, a batch of 8 (SMR8) and 9 (KLO14) faults on 22 kV, SWER and LV busbars). Measured agreement with OpenDSS: power flow rtol 1e-6, atol 1e-8 (1e-3 on `[pq]_(from|to)`), worst ratio 0.066 (SMR8) and 0.069 (KLO14), node voltages to 1.1e-10 and 9.8e-11 relative; short circuit rtol 1e-8, atol 1e-8 (1e-6 on `i_(from|to)` and its angle), worst ratio 0.033 and 0.030, fault currents to 6.7e-11 and 9.2e-11 relative. The data is 4.9 MB for power flow and 4.1 MB for short circuit | M / medium (data size, convergence, conditioning) |
 | Later | See [Later work](#later-work) | — | — | — |
 
 ### Cross-cutting concerns
@@ -1234,6 +1371,11 @@ scope by Michael (2026-10-15).
   (see [`asym_line` with `phases`](#asym_line-with-phases)); changing it changes three-phase results.
 * **A best-effort Python check of the node phases** (D38).
 * **A public Python experimental switch, or graduating the feature** (D45).
+* **The Newton-Raphson stall on networks with near-zero impedance branches** (D54). On the SMR8 and KLO14 data, with
+  connectors down to 1.4e-7 ohm, the Newton-Raphson power flow stalls at a maximum deviation of about 3e-7, above the
+  error tolerance of 1e-8. This is pre-existing: it also happens with only the three-phase parts. Possible remedies are
+  merging zero-impedance branches automatically before the solve, or a convergence criterion relative to the conditioning of the admittance matrix. It
+  changes the behaviour of three-phase networks too, so it needs a discussion with the upstream maintainers.
 
 ## Open questions
 
