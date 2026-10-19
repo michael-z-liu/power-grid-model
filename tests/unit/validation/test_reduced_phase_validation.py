@@ -992,6 +992,68 @@ def test_single_phase_transformer_tap_regulator_u_set_warning_assertion():
     assert len(record) == 1
 
 
+@pytest.mark.parametrize(
+    ("u_set", "warned"), [pytest.param(12.9e3, [], id="nominal"), pytest.param(240.0, [5], id="off")]
+)
+def test_single_phase_transformer_tap_regulator_u_set_warning_unsorted_ids(u_set: float, warned: list[int]):
+    """single_phase_transformer IDs out of order (2, 1): the regulator of transformer 1 (a 22 kV phase-to-earth to side,
+    12.7 kV) must not be checked against transformer 2 (a 240 V phase-to-earth to side), and vice versa"""
+    node = initialize_array(DatasetType.input, CT.node, 3)
+    node[AT.id] = [10, 11, 12]
+    node[AT.u_rated] = [U_MV, U_MV, 240.0 * np.sqrt(3.0)]
+    source = initialize_array(DatasetType.input, CT.source, 1)
+    source[AT.id] = [20]
+    source[AT.node] = [10]
+    source[AT.status] = [1]
+    source[AT.u_ref] = [1.0]
+    spt = initialize_array(DatasetType.input, CT.single_phase_transformer, 2)
+    spt[AT.id] = [2, 1]
+    spt[AT.from_node] = [10, 10]
+    spt[AT.to_node] = [12, 11]
+    spt[AT.from_status] = [1, 1]
+    spt[AT.to_status] = [1, 1]
+    spt[AT.u1] = [U_MV, U_MV]
+    spt[AT.u2] = [240.0, U_MV / np.sqrt(3.0)]
+    spt[AT.sn] = [50e3, 200e3]
+    spt[AT.uk] = [0.04, 0.05]
+    spt[AT.pk] = [500.0, 2000.0]
+    spt[AT.i0] = [0.0, 0.0]
+    spt[AT.p0] = [0.0, 0.0]
+    spt[AT.from_connection] = [WindingConnection1P.ab, WindingConnection1P.ab]
+    spt[AT.to_connection] = [WindingConnection1P.a, WindingConnection1P.a]
+    spt[AT.clock] = [0, 0]
+    spt[AT.tap_side] = [BranchSide.from_side, BranchSide.from_side]
+    spt[AT.tap_pos] = [0, 0]
+    spt[AT.tap_nom] = [0, 0]
+    spt[AT.tap_min] = [-2, -2]
+    spt[AT.tap_max] = [2, 2]
+    spt[AT.tap_size] = [275.0, 275.0]
+    regulator = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
+    regulator[AT.id] = [5]
+    regulator[AT.regulated_object] = [1]
+    regulator[AT.status] = [1]
+    regulator[AT.control_side] = [BranchSide.to_side]
+    regulator[AT.u_set] = [u_set]
+    regulator[AT.u_band] = [100.0]
+    data = {
+        CT.node: node,
+        CT.source: source,
+        CT.single_phase_transformer: spt,
+        CT.transformer_tap_regulator: regulator,
+    }
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always", ValidationWarning)
+        assert validate_input_data(data, CalculationType.power_flow, symmetric=False) is None
+    u_set_warnings = [str(w.message) for w in record if "u_set" in str(w.message)]
+    if warned:
+        assert len(u_set_warnings) == 1
+        assert f"[{warned[0]}]" in u_set_warnings[0]
+    else:
+        assert u_set_warnings == []
+    # no other warning
+    assert [w for w in record if "u_set" not in str(w.message)] == []
+
+
 def test_single_phase_transformer_tap_regulator_u_set_only_checked_for_power_flow():
     data = _regulated_spt_input(regulator={AT.u_set: U_MV})
     assert len(_warned(data)) == 1

@@ -8,7 +8,12 @@ import pytest
 from power_grid_model import initialize_array
 from power_grid_model._core.dataset_definitions import AttributeType as AT, ComponentType as CT, DatasetType
 from power_grid_model.validation.errors import NotGreaterThanError
-from power_grid_model.validation.utils import _eval_field_expression, _update_input_data, errors_to_string
+from power_grid_model.validation.utils import (
+    _eval_field_expression,
+    _get_indexer,
+    _update_input_data,
+    errors_to_string,
+)
 
 
 def test_eval_field_expression():
@@ -186,4 +191,38 @@ def test_errors_to_string_dict_2_no_details():
         "than zero for 1 node."
         "\nThere is a validation error in input_data, batch #2:\n\tField 'p_from' is not greater "
         "than zero for 1 line."
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param([1, 2, 3, 4, 5], id="sorted"),
+        pytest.param([5, 1, 4, 2, 3], id="unsorted"),
+        pytest.param([151, 154, 152], id="unsorted-three"),
+    ],
+)
+def test_get_indexer(source: list[int]):
+    source_ids = np.array(source)
+    target_ids = np.array(source[::-1] + source[:1])
+    expected = np.array([source.index(i) for i in target_ids])
+    np.testing.assert_array_equal(_get_indexer(source_ids, target_ids), expected)
+    np.testing.assert_array_equal(_get_indexer(source_ids, target_ids, default_value=-1), expected)
+    assert all(source_ids[_get_indexer(source_ids, target_ids, default_value=-1)] == target_ids)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [pytest.param([1, 2, 3, 4, 5], id="sorted"), pytest.param([5, 1, 4, 2, 3], id="unsorted")],
+)
+def test_get_indexer_missing_id_gives_default(source: list[int]):
+    source_ids = np.array(source)
+    target_ids = np.array([4, 99, 1, 0, 6])
+    expected = np.array([source.index(4), -7, source.index(1), -7, -7])
+    np.testing.assert_array_equal(_get_indexer(source_ids, target_ids, default_value=-7), expected)
+
+
+def test_get_indexer_empty_source_gives_default():
+    np.testing.assert_array_equal(
+        _get_indexer(np.array([], dtype=np.int32), np.array([1, 2]), default_value=-1), np.array([-1, -1])
     )
