@@ -209,7 +209,9 @@ current of such a load is linear in $U_N$, but a `const_y` load to earth now hol
   of a batch calculation. A change of the other loads does not need it.
 - A floating common mode with only constant-power or constant-current loads still does not converge: the voltages
   stay finite and the calculation raises `IterationDiverge` at the maximum number of iterations.
-- Networks where all nodes have all three phases are calculated as described above, bit for bit.
+- Networks where all nodes have all three phases are calculated as described above, bit for bit. This holds per
+  island: an island (a part of the network with its own source) in which all nodes have all three phases is
+  calculated as described above, even when another island has an absent phase.
 
 ## Linear power flow
 

@@ -1115,6 +1115,40 @@ TEST_CASE("Test math solver - IC with a delta const_y load at a bus with an abse
     }
 }
 
+TEST_CASE("Test math solver - linear current at a network with an absent phase") {
+    // linear_current is one iterative current iteration from the average source start, on the same solver. At a network
+    // with an absent phase the const_y loads are in its matrix, so they are treated exactly instead of as their current
+    // at the start voltage. On the floating common mode grid the explicit form gave a common mode off by orders of
+    // magnitude (the phase-to-phase validation case returned about 7e5 pu before M11); with the absent-phase gate
+    // disabled, the first subcase fails (checked once).
+    auto const run = [](ReducedPhaseGrid const& grid, CalculationMethod method) {
+        auto const topo_ptr = std::make_shared<MathModelTopology const>(grid.topo);
+        YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        NoLogger log;
+        return solver.run_power_flow(grid.input, err_tol, max_iter, false, log, method, y_bus);
+    };
+
+    SUBCASE("The const_y loads are exact") {
+        // the const_pq load has no power, so the single iteration solves the network exactly; it still keeps the math
+        // solver from running the linear method for every method, which it does when all loads are const_y
+        Value const no_power{DoubleComplex{0.0}, DoubleComplex{0.0}, DoubleComplex{0.0}};
+        ReducedPhaseGrid const grid = make_floating_common_mode_grid(floating_const_y_load(), no_power);
+        auto const output = run(grid, CalculationMethod::linear_current);
+        assert_output(output, run(grid, CalculationMethod::linear), false, result_tol);
+        assert_output(output, run(grid, CalculationMethod::iterative_current), false, result_tol);
+        check_absent_slots_zero(output, grid.topo);
+    }
+    SUBCASE("A NaN load raises IterationDiverge instead of returning NaN") {
+        Value const nan_load{DoubleComplex{std::numeric_limits<double>::quiet_NaN()}, DoubleComplex{0.0},
+                             DoubleComplex{0.0}};
+        ReducedPhaseGrid const grid = make_floating_common_mode_grid(floating_const_y_load(), nan_load);
+        for (auto const method : {CalculationMethod::linear_current, CalculationMethod::iterative_current}) {
+            CHECK_THROWS_WITH_AS(run(grid, method), doctest::Contains("nan"), IterationDiverge);
+        }
+    }
+}
+
 TEST_CASE("Test math solver - split-phase slot patterns of the start values") {
     // bus0 abc; bus1 ab behind a centre-tapped winding (split); bus2 a, a leg line off bus1 (split); bus3 ab behind a
     // phase-to-phase winding (three_phase)
