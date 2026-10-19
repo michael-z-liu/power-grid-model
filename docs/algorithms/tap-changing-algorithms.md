@@ -38,19 +38,24 @@ The control logic is described as follows:
 ## Order of regulation
 
 The regulators are not all processed at once.
-The transformers are ranked by their distance from the sources: the rank of a regulated transformer is the number of
-regulated transformers, itself included, on the shortest path from a source to its controlled side.
-The regulators of the first rank are regulated first, then the regulators of the next rank, with the tap positions of
-the earlier ranks kept.
-A transformer is therefore regulated for the grid as the earlier regulators have left it.
+The transformers are ranked by their distance from the sources, counted in regulated transformers: the rank of a
+regulated transformer is the smallest number of regulated transformers on any path from a source to its controlled
+side, itself included, when that path passes through the transformer itself.
+If its controlled side can also be reached through fewer regulated transformers on a path that does not pass through it
+(for example in a meshed grid), the transformer gets the last rank.
+In every iteration the ranks are visited in order and the first rank in which a tap position changes ends the visit;
+the next iteration starts again from the first rank.
+A transformer is therefore regulated for the grid as the regulators of the earlier ranks have left it, and an earlier
+rank is adjusted again when a later change moves its voltage out of its band.
 
 The ranking graph connects the nodes through all branch types: `line`, `asym_line`, `generic_branch`, `link`,
 `transformer`, `three_winding_transformer` and `single_phase_transformer`.
 A regulated transformer can therefore be ranked when it is only connected to a source through, for example, a SWER
 `asym_line`.
 A transformer that cannot be reached from a source is not regulated.
-The `control_side` of a regulated transformer must be further from the source than its other side; otherwise the
-calculation raises an `AutomaticTapInputError`.
+The `control_side` of a regulated transformer must be further from the source than its other side: when the
+`control_side` can be reached from a source but the other side cannot, because the graph leads through a regulated
+transformer only from its other side to its `control_side`, the calculation raises an `AutomaticTapInputError`.
 
 ## Controlled voltage
 
@@ -60,8 +65,8 @@ The reduction of the three phases to one number depends on the regulated compone
 
 - For a `transformer` and a `three_winding_transformer`, it is the mean over the phases of the magnitude of the
   compensated voltage.
-- For a `single_phase_transformer`, it is the voltage of the controlled winding only, to earth, because the phases
-  outside the winding have no voltage and must not be averaged in:
+- For a `single_phase_transformer`, it is the voltage of the controlled winding only, from the voltages of the node to
+  earth, because the phases outside the winding have no voltage and must not be averaged in:
   - a phase-to-earth winding: the magnitude of the compensated voltage of that phase;
   - a phase-to-phase winding: the magnitude of the difference of the compensated voltages of the two phases;
   - a centre-tapped winding: the mean of the magnitudes of the compensated voltages of the two legs.

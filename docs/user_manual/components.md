@@ -1649,8 +1649,8 @@ A [Single-Phase Transformer](#single-phase-transformer) is regulated in the same
 The regulation is experimental, like the component itself (see
 [Reduced-phase networks](reduced-phase-networks.md#experimental-feature)).
 
-**Regulated voltage.** The controlled voltage is the voltage of the winding at the `control_side`, measured from the
-node to earth, after the line drop compensation.
+**Regulated voltage.** The controlled voltage is the voltage of the winding at the `control_side`, computed from the
+voltages of its node to earth, after the line drop compensation.
 It depends on the connection of that winding:
 
 | connection of the winding at `control_side` | controlled voltage                                    | `u_set` and `u_band` are                                 | example `u_set`           |

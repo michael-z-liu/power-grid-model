@@ -14,8 +14,9 @@ checks. The Python validation checks each component's own data, so it must accep
 missing-tap-limits: a regulated single_phase_transformer without both tap limits is caught by the Python validation as
 well (D73), so that case must give exactly that error.
 
-No case may raise a ValidationWarning either: the winding voltages of every single_phase_transformer are nominal, and
-every phase-to-phase winding has an earth reference (D67).
+No case may raise a ValidationWarning either: the winding voltages of every single_phase_transformer are nominal,
+every phase-to-phase winding has an earth reference (D67) and the u_set of every tap regulator is near the nominal
+voltage of its winding (D73).
 """
 
 import json

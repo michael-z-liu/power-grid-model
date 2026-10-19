@@ -111,6 +111,11 @@ In this document `<core>` means `power_grid_model_c/power_grid_model/include/pow
   `c_ba`, `c_ca`, `c_cb` $\geq 0$ contradicts the model of the core, which uses the c matrix as the nodal (Maxwell)
   matrix: `c0` and `c1` give an off-diagonal of $(c_0 - c_1)/3 < 0$, and every OpenDSS-validated case has negative
   mutual capacitances. M9 drops the sign rule, in a commit of its own so that it can be proposed upstream separately.
+* **Found later.** The Newton-Raphson stall on near-zero impedance branches, the flat and `average_source`
+  starts that ignore off-nominal transformer ratios, the open-end shunt guard of `asym_line`, the asymmetric line drop
+  compensation that is 3x too weak, the ranking graph without `asym_line` and `generic_branch`, a batch with a tap
+  regulator whose input has no valid tap, and `_get_indexer` with a default value are listed under
+  [To raise upstream](#to-raise-upstream) (items a, b, e and j to m).
 
 ### What is generated and what is written by hand
 
@@ -335,7 +340,8 @@ The `single_phase_transformer` (all decided by Michael, 2026-10-15):
   $y_0/3 \cdot \mathbf{1}_{3\times3}$ of `transformer`); the differential mode is untouched. Limitation: the two
   windings of an `a` → `a` transformer cannot share one earth electrode; each side has its own (a shared electrode
   is listed under [Later work](#later-work)).
-  * **Confirmed by Michael (2026-10-19).** The low-susceptance fallback stays. The validation warns about a phase-to-phase winding left floating (D67, FU4).
+  * **Confirmed by Michael (2026-10-19).** The low-susceptance fallback stays. The validation warns about a
+    phase-to-phase winding left floating (D67, FU4).
 * **D15. `u1`/`u2` are winding voltages**, the rated voltages across the connection terminals: for example 22 kV
   for an `ab` primary, 12.7 kV for an `a` SWER secondary and 240 V for an `a` LV winding. Node `u_rated` stays
   $\sqrt3 \times$ the phase-to-earth voltage, so the nominal winding voltage implied by a node is $u_{rated}/\sqrt3$
@@ -632,7 +638,8 @@ Python validation and documentation (decided by recommendation under Michael's b
   this, 25 of the 33 reduced-phase cases with a single-phase transformer, `phases` or a load `connection` fail
   the validation on this rule alone. It is a commit of its own, so that it can be proposed upstream separately, like M0.
   The self capacitance must still be positive.
-  * **Confirmed by Michael (2026-10-19).** The sign rule stays dropped. A physics check of the capacitance matrix is in [Later work](#later-work); the commit is listed under [To raise upstream](#to-raise-upstream).
+  * **Confirmed by Michael (2026-10-19).** The sign rule stays dropped. A physics check of the capacitance matrix is in
+    [Later work](#later-work); the commit is listed under [To raise upstream](#to-raise-upstream).
 * **D41. `validate_single_phase_transformer`.**
   * **Required:** the branch fields plus `u1`, `u2`, `sn`, `uk`, `pk`, `i0`, `p0`, `from_connection` and
     `to_connection`. `clock`, the tap fields, `uk_half`/`pk_half` and the earthing fields are optional (D13, D18, D20,
@@ -685,7 +692,8 @@ Python validation and documentation (decided by recommendation under Michael's b
     `<core>/main_model_impl.hpp`, plus the documentation. The user manual states how to enable it today: the C API
     option `PGM_set_experimental_features`, or the private `_calculate_power_flow(...,
     experimental_features="enabled")` in Python, flagged as private and subject to change.
-  * **Confirmed by Michael (2026-10-19).** The gate stays; graduating the feature is proposed in the upstream pull request (see [To raise upstream](#to-raise-upstream)).
+  * **Confirmed by Michael (2026-10-19).** The gate stays; graduating the feature is proposed in the upstream pull
+    request (see [To raise upstream](#to-raise-upstream)).
 * **D46. Documentation: a new user-manual page with a worked Python example that runs in a test; no notebook**
   (Michael's earlier call). `docs/user_manual/reduced-phase-networks.md` replaces the "example notebook" of the M9
   row, and `tests/unit/test_docs_reduced_phase_example.py` executes its code blocks.
@@ -749,7 +757,9 @@ reported to him, because it changes the approved plan):
     (phasor metric, merged nodes at their representative) and at most 0.1 % in losses; the feeder power changes by at most 2.3e-5. The README of each case lists the
     change per node class.
   * Faults sit on kept nodes only, so that the fault node exists in both tools.
-  * **Confirmed by Michael (2026-10-19).** Merging below 1e-3 ohm and the zone-substation $u_k$ of 1e-4 stay; there are no "as published" cases. The stall itself is recorded under [To raise upstream](#to-raise-upstream), and the user manual describes the workarounds.
+  * **Confirmed by Michael (2026-10-19).** Merging below 1e-3 ohm and the zone-substation $u_k$ of 1e-4 stay; there are
+    no "as published" cases. The stall itself is recorded under [To raise upstream](#to-raise-upstream), and the user
+    manual describes the workarounds.
 * **D55. The references carry no three-phase `line`, short-circuit `node` or `asym_line` output.** Whole component
   types can be left out of a reference (the harnesses compare the keys of the reference), but not a subset of rows. The
   power-flow reference has `node`, `asym_line`, `single_phase_transformer` and `transformer`; the short-circuit
@@ -989,9 +999,9 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     `controlled_voltage` throws `ReducedPhaseNotSupported` as a backstop and is unreachable.
   * **The three-phase code is untouched.** `Transformer` and `ThreeWindingTransformer` keep the `NodeState` path; a
     `SinglePhaseNodeState` is only used for the new type (D75).
-* **D69. The regulated quantity is the voltage of the control-side winding, in winding volts, measured to earth.** It
-  is computed from the per-slot compensated voltages $V_s = U_s + Z_c I_s$ of the slots of that winding, where $U_s$ is
-  the node voltage and $I_s$ the branch current into the transformer.
+* **D69. The regulated quantity is the voltage of the control-side winding, in winding volts, from the node voltages
+  to earth.** It is computed from the per-slot compensated voltages $V_s = U_s + Z_c I_s$ of the slots of that
+  winding, where $U_s$ is the node voltage and $I_s$ the branch current into the transformer.
 
   | Control-side winding | Regulated voltage | `u_set` and `u_band` are |
   |---|---|---|
@@ -1032,7 +1042,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     tap −4 (u2 = 413.4 V) in an asymmetric one; with r = 0 both give tap −1. The fork does not fix it, because that
     changes three-phase results, which is for the maintainers (item j of [To raise upstream](#to-raise-upstream)). The
     consequence is that in one asymmetric model the compensation of a three-phase regulator acts at a third of the
-    strength of a single-phase one with the same ohms.
+    strength of a single-phase one with the same ohms. Michael was told explicitly about this defect, and that the fork
+    does not fix it, on 2026-10-19.
 * **D71. A regulated `single_phase_transformer` must provide both `tap_min` and `tap_max`.** D18 leaves an omitted limit
   unbounded, and its getter then returns $\min(t, t_{nom})$ or $\max(t, t_{nom})$, a bound that moves with the tap
   position. That blocks `one_step_tap_up/down` and makes the tap range, and with it the budget of `MaxIterationReached`
@@ -1057,7 +1068,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     sides are on. The graph is on user nodes, so the phase masks do not matter, and the slots of a winding are always
     present (D1).
   * **Scope.** The fix changes three-phase behaviour only where a regulator is silently skipped today. It is its own
-    commit (4fb4c1278) and can be proposed on its own (item k).
+    commit (4fb4c1278) and can be proposed on its own (item k). Michael was told explicitly about the fix on
+    2026-10-19.
   * **Tests.** Ranking through an `asym_line` and through a `generic_branch`, an open `asym_line`, control towards the
     source through either branch (`AutomaticTapInputError`), two ranks coupled through an `asym_line`, an isolating
     transformer followed by a SWER line regulator (ranks 1 and 2) and an unregulated `single_phase_transformer` that
@@ -1114,7 +1126,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     | `missing-tap-limits` | the swer-chain without `tap_max` on 154 | `AutomaticTapInputError` | | | |
 
   * **Worst ratio** against OpenDSS (`|actual − expected| / (atol + rtol |expected|)`, below 0.1 everywhere; the
-    tolerances by the existing rule: the smallest round `rtol`, then the smallest `atol`, with a worst ratio below 0.1): `phase-to-phase` 0.034 (rtol 1e-8, atol 1e-8); `split-phase` 0.078 and
+    tolerances by the existing rule: the smallest round `rtol`, then the smallest `atol`, with a worst ratio below 0.1):
+    `phase-to-phase` 0.034 (rtol 1e-8, atol 1e-8); `split-phase` 0.078 and
     `swer-chain` 0.074 (iterative current; Newton-Raphson 0.034), both at rtol 1e-8 and atol 1e-6; `swer-chain-batch`
     0.052 (rtol 1e-8, atol 1e-5); `split-phase-wide-band` 0.087 (max) and 0.094 (min), the largest of the family. The
     `tap_pos` of every regulator matches exactly.
@@ -1130,7 +1143,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
   * **The capture.** `fu5_capture.py` runs every power-flow case in `tests/data` that has a `transformer_tap_regulator`
     with each of the five strategies (`disabled` and the four others), in a symmetric Newton-Raphson, an asymmetric
     Newton-Raphson and an asymmetric iterative current calculation, in a batch where `update_batch.json` exists, and all
-    runs of the M11 capture: 45011 keys over 144 cases (1184 successful runs, 254 batch runs and 465 runs that raise, stored as text), 30772 of
+    runs of the M11 capture: 45011 keys over 144 cases (1184 successful runs, 254 batch runs and 465 runs that raise,
+    stored as text), 30772 of
     them from the 45 regulator cases (23463 from the strategy runs). The M11 capture alone never passed
     `tap_changing_strategy`, so it could not prove the optimizer. A rerun at the base is bit-identical.
   * **Result.** The tip after the ranking graph (4fb4c1278) and the tip after the C++ support (8b67c287f) both give
@@ -1138,7 +1152,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     the capture. The reason is that the new graph edges only come from types that no existing regulator case has, and
     the `SinglePhaseTransformer` branches only run for that type.
   * **Tests.** ctest 328 of 328 (including `PGMExample`); pytest 2599 passed, 4 skipped and 7 xfailed (2498 before FU5),
-    coverage 97.68 %; clang-tidy clean on the four changed C++ test files. In ctest the power-flow validation tests take 8.5 s (single cases) and 254.3 s (batch cases; 256.6 s at the end
+    coverage 97.68 %; clang-tidy clean on the four changed C++ test files. In ctest the power-flow validation tests take
+    8.5 s (single cases) and 254.3 s (batch cases; 256.6 s at the end
     of M11). Pre-commit passes.
 
 ### Decision index
@@ -1213,7 +1228,7 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
 | D66 | Scope of iterative current in the validation cases | [Taken in M11](#taken-in-m11) |
 | D67 | A `ValidationWarning` for a phase-to-phase winding without an earth reference | [Taken in FU4](#taken-in-fu4) |
 | D68 | A `transformer_tap_regulator` regulates a `single_phase_transformer`; no new attributes | [Taken in FU5](#taken-in-fu5) |
-| D69 | Regulated quantity: the voltage of the control-side winding to earth, in winding volts | [Taken in FU5](#taken-in-fu5) |
+| D69 | Regulated quantity: the voltage of the control-side winding from the node voltages to earth, in winding volts | [Taken in FU5](#taken-in-fu5) |
 | D70 | Line drop compensation per conductor on the per-phase base; the three-phase asymmetric regulator is 3x too weak | [Taken in FU5](#taken-in-fu5) |
 | D71 | A regulated `single_phase_transformer` must provide `tap_min` and `tap_max` | [Taken in FU5](#taken-in-fu5) |
 | D72 | The transformer ranking graph covers every branch type | [Taken in FU5](#taken-in-fu5) |
@@ -1592,7 +1607,8 @@ ratio 0.069 at M10; see D56 for the values after M11). The generated `README.md`
 * **Near-zero impedances limit the Newton-Raphson solver of PGM, with or without reduced-phase components** (D54). The three-phase-only version of each network stalls at
   the same deviation. An impedance floor, as an easy fix, changes the network (voltages by up to 0.4 %, losses by 4 % to 10 %); merging the connectors
   changes it by at most 5.5e-5 in voltage and 0.1 % in losses. Whichever fix is used, it must be applied to both tools,
-  and the generator solves the unreduced network in OpenDSS to report how far the fix moved the solution. See [To raise upstream](#to-raise-upstream).
+  and the generator solves the unreduced network in OpenDSS to report how far the fix moved the solution. See
+  [To raise upstream](#to-raise-upstream).
 * **Size and runtime are design inputs.** The reference output was trimmed to what the budget allowed (D55: no three-phase `line`, short-circuit `node` or
   `asym_line` output; compact JSON; 12 significant digits), which keeps the data at 9.0 MB. The cases still add 136 s and 46 s to the debug test run (D59).
 * **Short branches need a per-field `atol`** (D56): a power computed from the voltages at both ends of a branch of 1e-3 ohm

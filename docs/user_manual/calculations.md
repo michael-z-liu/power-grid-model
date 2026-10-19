@@ -423,8 +423,8 @@ see [Automatic Tap Changing Algorithm Details](../algorithms/tap-changing-algori
 A [Single-Phase Transformer](../user_manual/components.md#single-phase-transformer) can be regulated as well, in an
 asymmetric power flow only (it is an experimental feature).
 It needs both `tap_min` and `tap_max`.
-The controlled voltage is the voltage of the controlled winding to earth, and `u_set` and `u_band` are in volts across
-that winding; see
+The controlled voltage is the voltage of the controlled winding, computed from the voltages of its node to earth, and
+`u_set` and `u_band` are in volts across that winding; see
 [Single-phase transformer regulated by a tap regulator](../user_manual/components.md#single-phase-transformer-regulated-by-a-tap-regulator).
 ```
 

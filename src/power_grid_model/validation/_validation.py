@@ -1402,6 +1402,13 @@ def _floating_phase_to_phase_windings(
     return sorted(floating)
 
 
+def _batch_scenarios_suffix(scenarios: list[int] | None, n_scenarios: int) -> str:
+    """The part of a warning that names the batch scenarios; empty for single data"""
+    if not scenarios:
+        return ""
+    return f" in {len(scenarios)} of {n_scenarios} batch scenarios (the first is scenario {scenarios[0]})"
+
+
 def _warn_floating_phase_to_phase_windings(
     windings: list[tuple[int, str]], scenarios: list[int] | None = None, n_scenarios: int = 0
 ) -> None:
@@ -1423,11 +1430,7 @@ def _warn_floating_phase_to_phase_windings(
     if not windings:
         return
     listing = ", ".join(f"{spt_id} ({side} side)" for spt_id, side in windings)
-    where = (
-        f" in {len(scenarios)} of {n_scenarios} batch scenarios (the first is scenario {scenarios[0]})"
-        if scenarios
-        else ""
-    )
+    where = _batch_scenarios_suffix(scenarios, n_scenarios)
     warnings.warn(
         f"The phase-to-phase winding(s) {listing} of {CT.single_phase_transformer} have no earth reference{where}. "
         "The network on that side, up to the next transformer, has no source, no earthed winding (a phase-to-earth or "
@@ -2299,11 +2302,7 @@ def _warn_off_nominal_tap_regulator_u_set(
     """
     if not regulators:
         return
-    where = (
-        f" in {len(scenarios)} of {n_scenarios} batch scenarios (the first is scenario {scenarios[0]})"
-        if scenarios
-        else ""
-    )
+    where = _batch_scenarios_suffix(scenarios, n_scenarios)
     warnings.warn(
         f"{AT.u_set} of {CT.transformer_tap_regulator}(s) {regulators} of a {CT.single_phase_transformer}{where} "
         "differs by more than 20% from the nominal voltage of the control side winding: the voltage of the winding "
