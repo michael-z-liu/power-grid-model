@@ -16,6 +16,7 @@ import pytest
 
 from power_grid_model import (
     AttributeType as AT,
+    CalculationMethod,
     ComponentType as CT,
     DatasetType,
     PowerGridModel,
@@ -30,10 +31,12 @@ from power_grid_model.enum import (
     MeasuredTerminalType,
     PhaseConnection,
     WindingConnection1P,
+    WindingType,
 )
 from power_grid_model.errors import (
     InvalidPhaseConnection,
     InvalidTransformerClock,
+    IterationDiverge,
     MissingCaseForEnumError,
     UnsupportedLoadGenTypeForVoltageRegulator,
 )
@@ -44,6 +47,7 @@ from power_grid_model.validation import (
     validate_batch_data,
     validate_input_data,
 )
+from power_grid_model.validation._validation import _connected_components
 from power_grid_model.validation.errors import (
     InvalidEnumValueError,
     InvalidIdError,
@@ -895,3 +899,396 @@ def test_voltage_regulator_on_wye_asym_load_gen(component: CT):
     assert validate_input_data(input_data, CalculationType.power_flow, symmetric=False) is None
     model = PowerGridModel(input_data)
     model._calculate_power_flow(symmetric=False, experimental_features="enabled")  # noqa: SLF001
+
+
+# phase-to-phase windings without an earth reference (D67)
+FLOAT_SPT_ID = 151
+FLOAT_LOAD_ID = 301
+FLOAT_LINE_ID = 401
+FLOAT_TRANSFORMER_ID = 501
+FLOAT_NO_REFERENCE = "no earth reference"
+NODE_PRIMARY, NODE_SOURCE, NODE_SECONDARY, NODE_EXTRA = 0, 1, 3, 4
+
+
+def _floating_spt(**overrides) -> np.ndarray:
+    """An 11 kV / 415 V phase-to-phase transformer from the source node (1) to the secondary node (3)"""
+    return _spt(
+        **{
+            AT.id: FLOAT_SPT_ID,
+            AT.from_node: NODE_SOURCE,
+            AT.to_node: NODE_SECONDARY,
+            AT.u1: 11e3,
+            AT.u2: 415.0,
+            AT.sn: 50e3,
+            AT.uk: 0.04,
+            AT.pk: 600.0,
+            AT.to_connection: WindingConnection1P.ab,
+            **overrides,
+        }
+    )
+
+
+def _floating_load(load_type: LoadGenType, component: CT = CT.asym_load, **overrides) -> np.ndarray:
+    load = initialize_array(DatasetType.input, component, 1)
+    values = {
+        AT.id: FLOAT_LOAD_ID,
+        AT.node: NODE_SECONDARY,
+        AT.status: 1,
+        AT.type: load_type,
+        AT.p_specified: [[20e3, 12e3, 0.0]],
+        AT.q_specified: [[5e3, 3e3, 0.0]],
+        **overrides,
+    }
+    for field, value in values.items():
+        load[field] = value
+    return load
+
+
+def _three_phase_transformer(winding_from: WindingType, winding_to: WindingType, clock: int) -> np.ndarray:
+    """A 11 kV / 11 kV transformer from the source node (1) to the primary node (0)"""
+    transformer = initialize_array(DatasetType.input, CT.transformer, 1)
+    values = {
+        AT.id: FLOAT_TRANSFORMER_ID,
+        AT.from_node: NODE_SOURCE,
+        AT.to_node: NODE_PRIMARY,
+        AT.from_status: 1,
+        AT.to_status: 1,
+        AT.u1: 11e3,
+        AT.u2: 11e3,
+        AT.sn: 1e6,
+        AT.uk: 0.05,
+        AT.pk: 5e3,
+        AT.i0: 0.001,
+        AT.p0: 500.0,
+        AT.winding_from: winding_from,
+        AT.winding_to: winding_to,
+        AT.clock: clock,
+        AT.tap_side: BranchSide.from_side,
+        AT.tap_pos: 0,
+        AT.tap_min: -1,
+        AT.tap_max: 1,
+        AT.tap_size: 0.0,
+    }
+    for field, value in values.items():
+        transformer[field] = value
+    return transformer
+
+
+def _floating_shunt(node: int) -> np.ndarray:
+    shunt = initialize_array(DatasetType.input, CT.shunt, 1)
+    for field, value in {
+        AT.id: 601,
+        AT.node: node,
+        AT.status: 1,
+        AT.g1: 1e-6,
+        AT.b1: 1e-6,
+        AT.g0: 1e-6,
+        AT.b0: 1e-6,
+    }.items():
+        shunt[field] = value
+    return shunt
+
+
+def _floating_input(
+    load_type: LoadGenType = LoadGenType.const_power,
+    *,
+    load_component: CT = CT.asym_load,
+    load_overrides: dict | None = None,
+    spt_overrides: dict | None = None,
+    extra: dict[CT, np.ndarray] | None = None,
+    with_load: bool = True,
+    source_status: int | None = 1,
+) -> dict[CT, np.ndarray]:
+    """
+    A source at 11 kV (node 1), a phase-to-phase transformer (ab to ab) to the 415 V node 3 and an asym_load there.
+    Node 0 (11 kV) and node 4 (415 V) are free for the variants. source_status None means no source.
+    """
+    node = initialize_array(DatasetType.input, CT.node, 4)
+    node[AT.id] = [NODE_PRIMARY, NODE_SOURCE, NODE_SECONDARY, NODE_EXTRA]
+    node[AT.u_rated] = [11e3, 11e3, 415.0, 415.0]
+    data: dict[CT, np.ndarray] = {CT.node: node, CT.single_phase_transformer: _floating_spt(**(spt_overrides or {}))}
+    if source_status is not None:
+        source = initialize_array(DatasetType.input, CT.source, 1)
+        for field, value in {
+            AT.id: 2,
+            AT.node: NODE_SOURCE,
+            AT.status: source_status,
+            AT.u_ref: 1.0,
+            AT.sk: 1e8,
+        }.items():
+            source[field] = value
+        data[CT.source] = source
+    if with_load:
+        data[load_component] = _floating_load(load_type, load_component, **(load_overrides or {}))
+    for component, array in (extra or {}).items():
+        data[component] = np.concatenate([data[component], array]) if component in data else array
+    return data
+
+
+def _warned(data: dict[CT, np.ndarray], calculation_type: CalculationType | None = None) -> list:
+    """The ValidationWarnings that validate_input_data emits for this data"""
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        validate_input_data(data, calculation_type, symmetric=False)
+    return [warning for warning in record if issubclass(warning.category, ValidationWarning)]
+
+
+def test_floating_winding_warns():
+    data = _floating_input()
+    with pytest.warns(ValidationWarning, match=FLOAT_NO_REFERENCE) as record:
+        assert validate_input_data(data, symmetric=False) is None
+    assert len(record) == 1
+    message = str(record[0].message)
+    assert str(FLOAT_SPT_ID) in message
+    assert "to side" in message
+    assert "from side" not in message
+    with pytest.warns(ValidationWarning, match=FLOAT_NO_REFERENCE):
+        assert_valid_input_data(data, symmetric=False)
+
+
+def _asym_line_from_secondary() -> np.ndarray:
+    asym_line = _swer_asym_line(PhaseConnection.ab)
+    asym_line[AT.id] = FLOAT_LINE_ID
+    asym_line[AT.from_node] = NODE_SECONDARY
+    asym_line[AT.to_node] = NODE_EXTRA
+    return asym_line
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "calculation_type", "side"),
+    [
+        pytest.param({"load_type": LoadGenType.const_current}, None, "to", id="const-current"),
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance, "load_overrides": {AT.p_specified: 0.0, AT.q_specified: 0.0}},
+            None,
+            "to",
+            id="const-impedance-zero-power",
+        ),
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance, "load_overrides": {AT.status: 0}}, None, "to", id="status-off"
+        ),
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance, "load_overrides": {AT.connection: LoadGenConnection.delta}},
+            None,
+            "to",
+            id="delta",
+        ),
+        pytest.param(
+            {"load_type": LoadGenType.const_power, "extra": {CT.asym_line: _asym_line_from_secondary()}},
+            None,
+            "to",
+            id="line-capacitance",
+        ),
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance}, CalculationType.short_circuit, "to", id="short-circuit"
+        ),
+        pytest.param(
+            {
+                "load_type": LoadGenType.const_impedance,
+                "spt_overrides": {AT.from_node: NODE_PRIMARY, AT.to_connection: WindingConnection1P.a, AT.u2: 240.0},
+                "extra": {CT.transformer: _three_phase_transformer(WindingType.wye_n, WindingType.delta, 1)},
+            },
+            None,
+            "from",
+            id="primary-behind-delta",
+        ),
+    ],
+)
+def test_floating_winding_not_anchored_by(kwargs: dict, calculation_type: CalculationType | None, side: str):
+    record = _warned(_floating_input(**kwargs), calculation_type)
+    assert len(record) == 1
+    assert FLOAT_NO_REFERENCE in str(record[0].message)
+    assert f"{FLOAT_SPT_ID} ({side} side)" in str(record[0].message)
+
+
+def _primary_variant(winding_from: WindingType, winding_to: WindingType, clock: int, **kwargs) -> dict:
+    """Node 0 is fed through a three-phase transformer and transformer 151 goes from node 0 (ab) to node 3 (a)"""
+    return {
+        "load_type": LoadGenType.const_power,
+        "spt_overrides": {AT.from_node: NODE_PRIMARY, AT.to_connection: WindingConnection1P.a, AT.u2: 240.0},
+        "extra": {CT.transformer: _three_phase_transformer(winding_from, winding_to, clock), **kwargs.pop("extra", {})},
+        **kwargs,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance, "load_overrides": {AT.connection: LoadGenConnection.wye}},
+            id="const-impedance-asym-load",
+        ),
+        pytest.param(
+            {"load_type": LoadGenType.const_impedance, "load_component": CT.asym_gen}, id="const-impedance-asym-gen"
+        ),
+        pytest.param(
+            {
+                "extra": {
+                    CT.single_phase_transformer: _floating_spt(
+                        **{
+                            AT.id: FLOAT_SPT_ID + 1,
+                            AT.from_node: NODE_SECONDARY,
+                            AT.to_node: NODE_EXTRA,
+                            AT.from_connection: WindingConnection1P.a,
+                            AT.to_connection: WindingConnection1P.a,
+                            AT.u1: 415.0 / np.sqrt(3.0),
+                            AT.u2: 415.0 / np.sqrt(3.0),
+                        }
+                    )
+                }
+            },
+            id="phase-to-earth-winding",
+        ),
+        pytest.param(
+            {
+                "spt_overrides": {AT.to_connection: WindingConnection1P.ab_center_tapped, AT.u2: 830.0 / np.sqrt(3.0)},
+                "with_load": False,
+            },
+            id="center-tapped",
+        ),
+        pytest.param(_primary_variant(WindingType.wye_n, WindingType.wye_n, 0), id="primary-wye-n"),
+        pytest.param(_primary_variant(WindingType.delta, WindingType.wye_n, 11), id="primary-delta-wye-n"),
+        pytest.param(_primary_variant(WindingType.delta, WindingType.zigzag_n, 0), id="primary-zigzag-n"),
+        pytest.param(
+            _primary_variant(WindingType.wye_n, WindingType.delta, 1, extra={CT.shunt: _floating_shunt(NODE_PRIMARY)}),
+            id="primary-shunt",
+        ),
+    ],
+)
+def test_floating_winding_anchored_by(kwargs: dict):
+    data = _floating_input(**kwargs)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValidationWarning)
+        assert validate_input_data(data, symmetric=False) is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"source_status": None}, id="no-source"),
+        pytest.param({"source_status": 0}, id="source-off"),
+        pytest.param({"spt_overrides": {AT.from_status: 0}}, id="from-side-off"),
+    ],
+)
+def test_floating_winding_not_energised(kwargs: dict):
+    assert _warned(_floating_input(**kwargs)) == []
+
+
+def _load_status_update(statuses: list[list[int]]) -> dict[CT, np.ndarray]:
+    update = initialize_array(DatasetType.update, CT.asym_load, (len(statuses), 1))
+    update[AT.id] = FLOAT_LOAD_ID
+    update[AT.status] = statuses
+    return {CT.asym_load: update}
+
+
+def _batch_warnings(data: dict[CT, np.ndarray], update: dict[CT, np.ndarray]) -> list:
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        assert validate_batch_data(data, update, symmetric=False) is None
+    return [warning for warning in record if issubclass(warning.category, ValidationWarning)]
+
+
+def test_floating_winding_batch():
+    # the input data is anchored, and only scenario 1 switches the load off
+    data = _floating_input(LoadGenType.const_impedance)
+    update = _load_status_update([[1], [0], [1]])
+    record = _batch_warnings(data, update)
+    assert len(record) == 1
+    message = str(record[0].message)
+    assert FLOAT_NO_REFERENCE in message
+    assert "1 of 3" in message
+    assert "scenario 1" in message
+    with pytest.warns(ValidationWarning, match=FLOAT_NO_REFERENCE):
+        assert_valid_batch_data(data, update, symmetric=False)
+
+    # all scenarios anchored
+    assert _batch_warnings(data, _load_status_update([[1], [1], [1]])) == []
+
+    # the input data is floating, but every scenario switches the load on
+    floating_input = _floating_input(LoadGenType.const_impedance, load_overrides={AT.status: 0})
+    assert _batch_warnings(floating_input, _load_status_update([[1], [1], [1]])) == []
+
+    # one warning for several scenarios
+    record = _batch_warnings(data, _load_status_update([[0], [1], [0]]))
+    assert len(record) == 1
+    assert "2 of 3" in str(record[0].message)
+    assert "scenario 0" in str(record[0].message)
+
+
+def _calculate_floating_power_flow(model: PowerGridModel, calculation_method: CalculationMethod):
+    return model._calculate_power_flow(  # noqa: SLF001
+        symmetric=False, calculation_method=calculation_method, experimental_features="enabled"
+    )
+
+
+def test_floating_winding_mirror():
+    # the warned network: the iterative current method does not converge
+    data = _floating_input()
+    assert len(_warned(data)) == 1
+    with pytest.raises(IterationDiverge):
+        _calculate_floating_power_flow(PowerGridModel(data), CalculationMethod.iterative_current)
+
+    # with a const_impedance load there is no warning and the methods agree
+    data = _floating_input(LoadGenType.const_impedance)
+    assert _warned(data) == []
+    model = PowerGridModel(data)
+    iterative = _calculate_floating_power_flow(model, CalculationMethod.iterative_current)
+    newton = _calculate_floating_power_flow(model, CalculationMethod.newton_raphson)
+    np.testing.assert_allclose(iterative[CT.node][AT.u], newton[CT.node][AT.u], rtol=1e-6)
+
+
+def _reference_components(n_node: int, from_idx: np.ndarray, to_idx: np.ndarray) -> np.ndarray:
+    """A plain BFS reference: the smallest node index of the component of every node"""
+    neighbours: list[list[int]] = [[] for _ in range(n_node)]
+    for first, second in zip(from_idx.tolist(), to_idx.tolist(), strict=True):
+        neighbours[first].append(second)
+        neighbours[second].append(first)
+    labels = [-1] * n_node
+    for start in range(n_node):
+        if labels[start] >= 0:
+            continue
+        labels[start] = start
+        queue = [start]
+        while queue:
+            current = queue.pop()
+            for other in neighbours[current]:
+                if labels[other] < 0:
+                    labels[other] = start
+                    queue.append(other)
+    return np.array(labels)
+
+
+def _edges(*pairs: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    return np.array([pair[0] for pair in pairs], dtype=np.intp), np.array([pair[1] for pair in pairs], dtype=np.intp)
+
+
+@pytest.mark.parametrize(
+    ("n_node", "edges", "expected"),
+    [
+        pytest.param(5, [(0, 1), (1, 2), (2, 3), (3, 4)], [0, 0, 0, 0, 0], id="chain"),
+        pytest.param(5, [(4, 3), (3, 2), (2, 1), (1, 0)], [0, 0, 0, 0, 0], id="reversed-chain"),
+        pytest.param(6, [(0, 1), (3, 4), (4, 5)], [0, 0, 2, 3, 3, 3], id="two-islands"),
+        pytest.param(4, [], [0, 1, 2, 3], id="no-edges"),
+        pytest.param(4, [(1, 2)], [0, 1, 1, 3], id="isolated-nodes"),
+        pytest.param(3, [(1, 1), (2, 2)], [0, 1, 2], id="self-loop"),
+        pytest.param(0, [], [], id="no-nodes"),
+    ],
+)
+def test_connected_components(n_node: int, edges: list[tuple[int, int]], expected: list[int]):
+    from_idx, to_idx = _edges(*edges)
+    np.testing.assert_array_equal(_connected_components(n_node, from_idx, to_idx), expected)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_connected_components_random(seed: int):
+    rng = np.random.default_rng(seed)
+    n_node, n_edge = 50, 40
+    from_idx = rng.integers(0, n_node, n_edge)
+    to_idx = rng.integers(0, n_node, n_edge)
+    labels = _connected_components(n_node, from_idx, to_idx)
+    reference = _reference_components(n_node, from_idx, to_idx)
+    # the same partition, and every label is the smallest index of its component
+    _, inverse = np.unique(labels, return_inverse=True)
+    _, reference_inverse = np.unique(reference, return_inverse=True)
+    np.testing.assert_array_equal(inverse, reference_inverse)
+    np.testing.assert_array_equal(labels, reference)

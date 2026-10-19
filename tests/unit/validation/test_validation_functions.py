@@ -30,7 +30,7 @@ from power_grid_model.enum import (
     FaultType,
     WindingConnection1P,
 )
-from power_grid_model.validation import assert_valid_input_data
+from power_grid_model.validation import ValidationWarning, assert_valid_input_data
 from power_grid_model.validation._validation import (
     assert_valid_data_structure,
     validate_generic_current_sensor,
@@ -1430,7 +1430,10 @@ def test_all_default_values():
         CT.fault: fault,
     }
 
-    assert_valid_input_data(input_data=input_data, calculation_type=CalculationType.power_flow)
+    # node 0 is fed only through delta windings (transformer 4 and three_winding_transformer 6), so the ab side of
+    # single_phase_transformer 7 has no earth reference (D67)
+    with pytest.warns(ValidationWarning, match="no earth reference"):
+        assert_valid_input_data(input_data=input_data, calculation_type=CalculationType.power_flow)
 
 
 @patch("power_grid_model.validation._validation.validate_transformer", new=MagicMock(return_value=[]))

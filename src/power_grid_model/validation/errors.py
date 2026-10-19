@@ -643,4 +643,5 @@ class ValidationWarning(UserWarning):
 
     It is raised with warnings.warn and does not change the result of the validation.
     E.g. u1 of a single_phase_transformer that differs by more than 20% from the nominal winding voltage of its node.
+    Or a phase-to-phase winding of a single_phase_transformer that has no earth reference.
     """

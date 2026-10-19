@@ -12,7 +12,8 @@ The expected-error cases (e.g. delta-on-absent-phase, swer-fault-on-absent-phase
 included on purpose: their errors depend on the topology (the phases present at each node), which only the C++ core
 checks. The Python validation checks each component's own data, so it must accept them.
 
-No case may raise a ValidationWarning either: the winding voltages of every single_phase_transformer are nominal.
+No case may raise a ValidationWarning either: the winding voltages of every single_phase_transformer are nominal, and
+every phase-to-phase winding has an earth reference (D67).
 """
 
 import json

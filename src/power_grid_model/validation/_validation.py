@@ -11,8 +11,8 @@ Although all functions are 'public', you probably only need validate_input_data(
 
 import copy
 import warnings
-from collections.abc import Sized as ABCSized
-from itertools import chain
+from collections.abc import Callable, Sized as ABCSized
+from itertools import chain, combinations
 from typing import Literal
 
 import numpy as np
@@ -119,6 +119,9 @@ def validate_input_data(
         ValidationWarning: once per side, if u1 or u2 of a single_phase_transformer differs by more than 20% from the
         nominal winding voltage implied by the u_rated of its node. The data is still valid, so this does not change
         the returned value.
+
+        ValidationWarning: once, if a phase-to-phase winding of a single_phase_transformer has no earth reference.
+        The data is still valid, so this does not change the returned value.
     """
     input_data = _map_to_component_types(input_data)
 
@@ -130,6 +133,7 @@ def validate_input_data(
 
     assert_valid_data_structure(input_data_copy, DatasetType.input)
     _warn_single_phase_transformer_winding_voltages(input_data_copy)
+    _warn_floating_phase_to_phase_windings(_floating_phase_to_phase_windings(input_data_copy, calculation_type))
 
     errors: list[ValidationError] = []
     errors += validate_required_values(input_data_copy, calculation_type, symmetric)
@@ -175,6 +179,10 @@ def validate_batch_data(
         ValidationWarning: once per side, on the input data and not per scenario, if u1 or u2 of a
         single_phase_transformer differs by more than 20% from the nominal winding voltage implied by the u_rated of
         its node. The data is still valid, so this does not change the returned value.
+
+        ValidationWarning: once per call, on the merged data of every scenario, if a phase-to-phase winding of a
+        single_phase_transformer has no earth reference. The warning names the scenarios. The data is still valid, so
+        this does not change the returned value.
     """
     input_data = _map_to_component_types(input_data)
     update_data = _map_to_component_types(update_data)
@@ -193,6 +201,8 @@ def validate_batch_data(
     batch_data = _convert_batch_dataset_to_batch_list(update_data, DatasetType.update)
 
     errors = {}
+    floating_windings: set[tuple[int, str]] = set()
+    floating_scenarios: list[int] = []
     for batch, batch_update_data in enumerate(batch_data):
         row_update_data = _compatibility_convert_row_columnar_dataset(batch_update_data, None, DatasetType.update)
         assert_valid_data_structure(row_update_data, DatasetType.update)
@@ -208,12 +218,18 @@ def validate_batch_data(
 
         if not id_errors:
             merged_data = _update_input_data(input_data_copy, row_update_data)
+            # status, p/q_specified, the source status and shunt g0/b0 can be updated, so each scenario is checked
+            floating = _floating_phase_to_phase_windings(merged_data, calculation_type)
+            if floating:
+                floating_windings.update(floating)
+                floating_scenarios.append(batch)
             batch_errors += validate_required_values(merged_data, calculation_type, symmetric)
             batch_errors += validate_values(merged_data, calculation_type)
 
         if batch_errors:
             errors[batch] = batch_errors
 
+    _warn_floating_phase_to_phase_windings(sorted(floating_windings), floating_scenarios, len(batch_data))
     return errors or None
 
 
@@ -1171,6 +1187,239 @@ def _warn_single_phase_transformer_winding_voltages(data: SingleDataset) -> None
                 ValidationWarning,
                 stacklevel=3,
             )
+
+
+_EARTHED_WINDINGS = [*_PHASE_TO_EARTH_WINDINGS, WindingConnection1P.ab_center_tapped]
+_EARTHED_WINDING_TYPES = [WindingType.wye_n, WindingType.zigzag_n]
+
+
+def _connected_components(n_node: int, from_idx: np.ndarray, to_idx: np.ndarray) -> np.ndarray:
+    """Label each node with the smallest node index of its connected component (hook and pointer-jump)."""
+    labels = np.arange(n_node)
+    while True:
+        from_label, to_label = labels[from_idx], labels[to_idx]
+        low = np.minimum(from_label, to_label)
+        hooked = labels.copy()
+        np.minimum.at(hooked, from_label, low)
+        np.minimum.at(hooked, to_label, low)
+        while not np.array_equal(jumped := hooked[hooked], hooked):
+            hooked = jumped
+        if np.array_equal(hooked, labels):
+            return labels
+        labels = hooked
+
+
+def _anchor_nodes(
+    data: SingleDataset, calculation_type: CalculationType | None, node_index: Callable[[np.ndarray], np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The nodes with a source with status on, and the nodes with any anchor (a source or an earth reference).
+
+    Args:
+        data: A power-grid-model input dataset
+        calculation_type: The calculation type, if known
+        node_index: Maps node ids to node indices, -1 for unknown nodes
+
+    Returns:
+        Two boolean arrays over the nodes: the source nodes and the anchor nodes
+    """
+    n_node = data[CT.node].size
+
+    def node_mask(ids: np.ndarray, selected: np.ndarray) -> np.ndarray:
+        """The nodes that are at the selected rows; unknown nodes are skipped"""
+        mask = np.zeros(n_node, dtype=bool)
+        idx = node_index(ids)
+        mask[idx[selected & (idx >= 0)]] = True
+        return mask
+
+    def present(component: CT) -> bool:
+        return component in data and data[component].size > 0
+
+    source_node = np.zeros(n_node, dtype=bool)
+    if present(CT.source):
+        source_node = node_mask(data[CT.source][AT.node], data[CT.source][AT.status] != 0)
+    anchor_node = source_node.copy()
+
+    spt_data = data[CT.single_phase_transformer]
+    for node_field, connection_field, status_field in (
+        (AT.from_node, AT.from_connection, AT.from_status),
+        (AT.to_node, AT.to_connection, AT.to_status),
+    ):
+        earthed = np.isin(spt_data[connection_field], _EARTHED_WINDINGS) & (spt_data[status_field] != 0)
+        anchor_node |= node_mask(spt_data[node_field], earthed)
+
+    # (component, node, winding type and status) of the sides of the (three winding) transformers
+    for component, sides in (
+        (CT.transformer, ((AT.from_node, AT.winding_from, AT.from_status), (AT.to_node, AT.winding_to, AT.to_status))),
+        (
+            CT.three_winding_transformer,
+            (
+                (AT.node_1, AT.winding_1, AT.status_1),
+                (AT.node_2, AT.winding_2, AT.status_2),
+                (AT.node_3, AT.winding_3, AT.status_3),
+            ),
+        ),
+    ):
+        if not present(component):
+            continue
+        for node_field, winding_field, status_field in sides:
+            earthed = np.isin(data[component][winding_field], _EARTHED_WINDING_TYPES) & (
+                data[component][status_field] != 0
+            )
+            anchor_node |= node_mask(data[component][node_field], earthed)
+
+    if present(CT.shunt):
+        shunt = data[CT.shunt]
+        has_zero_sequence = (np.nan_to_num(shunt[AT.g0]) != 0) | (np.nan_to_num(shunt[AT.b0]) != 0)
+        anchor_node |= node_mask(shunt[AT.node], (shunt[AT.status] != 0) & has_zero_sequence)
+
+    if calculation_type != CalculationType.short_circuit:
+        for component in (CT.sym_load, CT.sym_gen, CT.asym_load, CT.asym_gen):
+            if not present(component):
+                continue
+            load_gen = data[component]
+            has_power = (np.nan_to_num(load_gen[AT.p_specified]) != 0) | (np.nan_to_num(load_gen[AT.q_specified]) != 0)
+            if has_power.ndim > 1:
+                has_power = has_power.any(axis=1)
+            earthed = (
+                (load_gen[AT.status] != 0)
+                & (load_gen[AT.type] == LoadGenType.const_impedance)
+                & (load_gen[AT.connection] != LoadGenConnection.delta)
+                & has_power
+            )
+            anchor_node |= node_mask(load_gen[AT.node], earthed)
+    return source_node, anchor_node
+
+
+def _branch_edges(
+    data: SingleDataset,
+    components: tuple[CT, ...],
+    node_fields: list[AT],
+    status_fields: list[AT],
+    node_index: Callable[[np.ndarray], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """The edges between the nodes of every pair of sides of the components that have status on and a known node"""
+    from_edges: list[np.ndarray] = [np.empty(0, dtype=np.intp)]
+    to_edges: list[np.ndarray] = [np.empty(0, dtype=np.intp)]
+    for component in components:
+        if component not in data or data[component].size == 0:
+            continue
+        idx = [node_index(data[component][field]) for field in node_fields]
+        on = [(data[component][field] != 0) & (index >= 0) for field, index in zip(status_fields, idx, strict=True)]
+        for first, second in combinations(range(len(idx)), 2):
+            both = on[first] & on[second]
+            from_edges.append(idx[first][both])
+            to_edges.append(idx[second][both])
+    return np.concatenate(from_edges), np.concatenate(to_edges)
+
+
+def _floating_phase_to_phase_windings(
+    data: SingleDataset, calculation_type: CalculationType | None
+) -> list[tuple[int, str]]:
+    """
+    Finds the phase-to-phase windings of single_phase_transformers that have no earth reference.
+
+    A side is reported if it is a phase-to-phase winding with status on, its node is energised (connected through
+    branches with both sides on, windings included, to a source with status on) and the network of that node, up to
+    the next transformer (the nodes reached through lines, asym_lines and links), holds no anchor: a source, an earthed
+    winding (a phase-to-earth or centre-tapped single_phase_transformer winding, or a wye_n or zigzag_n winding of a
+    transformer or three_winding_transformer), a shunt with g0 or b0, or a wye const_impedance load or generator with
+    power (loads and generators are ignored in a short circuit). The node phases are not considered.
+
+    Args:
+        data: A power-grid-model input dataset
+        calculation_type: The calculation type, if known
+
+    Returns:
+        A sorted list of (id, "from" or "to") tuples.
+    """
+    spt, node = CT.single_phase_transformer, CT.node
+    if spt not in data or node not in data or data[spt].size == 0 or data[node].size == 0:
+        return []
+    spt_data = data[spt]
+    node_ids = data[node][AT.id]
+
+    sides = (
+        ("from", spt_data[AT.from_connection], spt_data[AT.from_status], spt_data[AT.from_node]),
+        ("to", spt_data[AT.to_connection], spt_data[AT.to_status], spt_data[AT.to_node]),
+    )
+    phase_to_phase = [
+        np.isin(connection, _PHASE_TO_PHASE_WINDINGS) & (status != 0) for _, connection, status, _ in sides
+    ]
+    if not any(mask.any() for mask in phase_to_phase):
+        return []
+
+    def node_index(ids: np.ndarray) -> np.ndarray:
+        return _get_indexer(node_ids, ids, default_value=-1)
+
+    two_sided = [AT.from_node, AT.to_node], [AT.from_status, AT.to_status]
+    galvanic = _branch_edges(data, (CT.line, CT.asym_line, CT.link), *two_sided, node_index)
+    winding = _branch_edges(data, (CT.transformer, CT.generic_branch, spt), *two_sided, node_index)
+    winding_3 = _branch_edges(
+        data,
+        (CT.three_winding_transformer,),
+        [AT.node_1, AT.node_2, AT.node_3],
+        [AT.status_1, AT.status_2, AT.status_3],
+        node_index,
+    )
+    island = _connected_components(node_ids.size, *galvanic)
+    component_label = _connected_components(
+        node_ids.size, *(np.concatenate([galvanic[i], winding[i], winding_3[i]]) for i in range(2))
+    )
+
+    source_node, anchor_node = _anchor_nodes(data, calculation_type, node_index)
+    anchored = np.zeros(node_ids.size, dtype=bool)
+    anchored[island[anchor_node]] = True
+    energised = np.zeros(node_ids.size, dtype=bool)
+    energised[component_label[source_node]] = True
+
+    floating: list[tuple[int, str]] = []
+    for (name, _, _, node_field), selected in zip(sides, phase_to_phase, strict=True):
+        idx = node_index(node_field)
+        known = idx >= 0
+        safe_idx = np.where(known, idx, 0)
+        reported = selected & known & energised[component_label[safe_idx]] & ~anchored[island[safe_idx]]
+        floating += [(int(spt_id), name) for spt_id in spt_data[AT.id][reported]]
+    return sorted(floating)
+
+
+def _warn_floating_phase_to_phase_windings(
+    windings: list[tuple[int, str]], scenarios: list[int] | None = None, n_scenarios: int = 0
+) -> None:
+    """
+    Warns about phase-to-phase windings of single_phase_transformers that have no earth reference.
+
+    Args:
+        windings: The (id, side) tuples from _floating_phase_to_phase_windings
+        scenarios: For batch data, the scenarios in which windings were found
+        n_scenarios: For batch data, the total number of scenarios
+
+    Warns:
+        ValidationWarning: once, listing the windings (and, for batch data, the number of scenarios).
+
+    Note:
+        The warning is attributed (stacklevel 3) to the caller of validate_input_data or validate_batch_data. When it is
+        reached through an assert_valid_* function, that is the assertion function.
+    """
+    if not windings:
+        return
+    listing = ", ".join(f"{spt_id} ({side} side)" for spt_id, side in windings)
+    where = (
+        f" in {len(scenarios)} of {n_scenarios} batch scenarios (the first is scenario {scenarios[0]})"
+        if scenarios
+        else ""
+    )
+    warnings.warn(
+        f"The phase-to-phase winding(s) {listing} of {CT.single_phase_transformer} have no earth reference{where}. "
+        "The network on that side, up to the next transformer, has no source, no earthed winding (a phase-to-earth or "
+        "centre-tapped single_phase_transformer winding, or a wye_n or zigzag_n transformer winding), no shunt with "
+        "g0 or b0 and no wye const_impedance load or generator with power (loads are ignored in a short circuit). "
+        "Only the low-susceptance fallback of the winding (1e-8 sn/uk) and line capacitance hold its common-mode "
+        "voltage to earth: the iterative current method does not converge with constant-power or constant-current "
+        "loads there, and the other methods give a common-mode voltage that those loads alone set.",
+        ValidationWarning,
+        stacklevel=3,
+    )
 
 
 def validate_branch3(data: SingleDataset, component: CT) -> list[ValidationError]:
