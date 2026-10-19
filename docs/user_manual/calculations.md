@@ -357,6 +357,16 @@ This signal can be ignored when using linear methods.
 Similarly, having atleast some results from linear methods can aid in finding data errors or the reason
 for non convergence of newton raphson method.
 
+The advice to try the flat start has a caveat.
+The flat start can also fail: it puts every node at 1 p.u., which ignores the ratio of the transformers.
+With a stiff transformer (a very small short-circuit impedance) whose ratio is off nominal by a few percent, it can
+raise `IterationDiverge` or a `SparseMatrixError` where the default (linear) start converges.
+The `average_source` start has the same limitation.
+In that case, keep the default start or use the
+[Iterative current](../algorithms/pf-algorithms.md#iterative-current-power-flow) method, which is not affected.
+The limitation is described in item b of
+[To raise upstream](../advanced_documentation/multi-phase-and-swer-design.md#to-raise-upstream).
+
 #### Networks with near-zero impedance branches
 
 Real utility data often contains dummy connectors with an impedance far below 1 mΩ.
@@ -408,6 +418,15 @@ option.
 
 For detailed control logic, initialization behavior, search methods, and error handling for automatic tap changing,
 see [Automatic Tap Changing Algorithm Details](../algorithms/tap-changing-algorithms.md).
+
+```{note}
+A [Single-Phase Transformer](../user_manual/components.md#single-phase-transformer) can be regulated as well, in an
+asymmetric power flow only (it is an experimental feature).
+It needs both `tap_min` and `tap_max`.
+The controlled voltage is the voltage of the controlled winding to earth, and `u_set` and `u_band` are in volts across
+that winding; see
+[Single-phase transformer regulated by a tap regulator](../user_manual/components.md#single-phase-transformer-regulated-by-a-tap-regulator).
+```
 
 ### State estimation algorithms
 

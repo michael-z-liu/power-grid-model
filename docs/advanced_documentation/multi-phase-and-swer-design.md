@@ -370,8 +370,9 @@ The `single_phase_transformer` (all decided by Michael, 2026-10-15):
   * Without limits the tap position is not limited and the direction is normal.
 
   `uk_min`/`pk_min` only apply when `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided;
-  otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The tap regulator is listed under
-  [Later work](#later-work); a `transformer_tap_regulator` on a `single_phase_transformer` raises `InvalidRegulatedObject`.
+  otherwise the short circuit parameters stay at `uk`/`pk` on that side of `tap_nom`. The automatic tap changer was added
+  in FU5: a `transformer_tap_regulator` can regulate a `single_phase_transformer` that provides both limits (D68 to D75,
+  [Taken in FU5](#taken-in-fu5)); an omitted limit stays unbounded for a fixed tap.
 
 #### Taken in M6
 
@@ -668,8 +669,8 @@ Python validation and documentation (decided by recommendation under Michael's b
 * **D44. Sensors can measure a `single_phase_transformer`.** It is added to the branch lists of the power and current
   sensors (the general list, `branch_from` and `branch_to`). C++ accepts any `Branch`, a power flow ignores sensors,
   and state estimation raises `ReducedPhaseNotSupported` anyway. A tap regulator on a `single_phase_transformer`
-  already gives `InvalidIdError`, because `validate_regulator` only lists `transformer` and
-  `three_winding_transformer`; a test pins this.
+  gave `InvalidIdError` in M9, because `validate_regulator` only listed `transformer` and
+  `three_winding_transformer`; a test pinned this. FU5 made it valid (D68, D73).
 * **D45. The experimental gate stays (D9, D33a).** Only the wording that tied the gate to M9 changed, to "until the maintainers
   graduate the feature". The pull request proposes removing it.
   * Graduating a feature is the decision of the maintainers (`terminology.md`: undefined behaviour, no guarantees).
@@ -964,6 +965,182 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
   * **The M11 C++ test** (`make_floating_common_mode_grid` in `test_math_solver_pf_reduced_phase.cpp`) works at the math
     model level, so Python validation never sees it. Its const_y loads would anchor it anyway.
 
+#### Taken in FU5
+
+A `transformer_tap_regulator` can regulate a `single_phase_transformer` (decisions D68 to D75; taken under the blanket
+approval of 2026-10-19). The work was done in five steps: the ranking graph (4fb4c1278), the C++ support (8b67c287f), the
+Python validation (635f5bc65), a fix of a latent defect in the Python validation (4f918d3e0) and the OpenDSS cases
+(5010a3521).
+
+* **D68. Reuse `transformer_tap_regulator`; no new attributes.** `regulated_object` may be a `single_phase_transformer`
+  and `control_side` is a `BranchSide` (`from` or `to`; any other value raises `MissingCaseForEnumError`, as for
+  `transformer`). `u_set`, `u_band`, `line_drop_compensation_r/x`, `status` and the output (`tap_pos`) are unchanged, so
+  there is no JSON or code generation change.
+  * **The optimizer already covered the type.** `TapPositionOptimizer` filters the component types by the concept
+    `transformer_c`, which `SinglePhaseTransformer` satisfies (`static_assert` in `test_single_phase_transformer.cpp`), so
+    the update buffer, the tap cache and the search compile for it. Only the construction of the regulator rejected it
+    (`InvalidRegulatedObject`), and the ranking graph and the controlled voltage were missing (D69, D72).
+  * **Valid.** `control_side` equal to `tap_side`, reversed numbering (`tap_max < tap_min`, the direction rule of D18),
+    `tap_min == tap_max` (a fixed tap) and a centre-tapped control side. A control side that is nearer to the source than
+    the other side raises `AutomaticTapInputError`, as for `transformer`.
+  * **Unchanged.** At most one regulator per object (`DuplicativelyRegulatedObject`), the combination with a
+    `voltage_regulator`, and the short circuit, which ignores regulators. The experimental gate and the rejection of a
+    symmetric calculation apply on their own: `check_reduced_phase_support` runs before the optimizer. The symmetric
+    `controlled_voltage` throws `ReducedPhaseNotSupported` as a backstop and is unreachable.
+  * **The three-phase code is untouched.** `Transformer` and `ThreeWindingTransformer` keep the `NodeState` path; a
+    `SinglePhaseNodeState` is only used for the new type (D75).
+* **D69. The regulated quantity is the voltage of the control-side winding, in winding volts, measured to earth.** It
+  is computed from the per-slot compensated voltages $V_s = U_s + Z_c I_s$ of the slots of that winding, where $U_s$ is
+  the node voltage and $I_s$ the branch current into the transformer.
+
+  | Control-side winding | Regulated voltage | `u_set` and `u_band` are |
+  |---|---|---|
+  | `a`, `b`, `c` | $\lvert V_p \rvert$ | phase-to-earth volts (12.7 kV SWER, 240 V LV) |
+  | `ab`, `ac`, `bc` | $\lvert V_p - V_q \rvert$ | phase-to-phase volts (22 kV, 415 V) |
+  | `ab_center_tapped` | $(\lvert V_a \rvert + \lvert V_b \rvert) / 2$ | leg-to-earth volts (240 V) |
+
+  * **Unit.** `u_set` and `u_band` are volts across the winding, consistent with D15 and D21, not volts at the `u_rated`
+    scale of the node. The regulator is constructed with `u_rated` of the node divided by $\sqrt3$, the phase-to-earth
+    base, so the existing `calc_param` gives `u_set` and `u_band` in per unit of that base, and `TransformerTapRegulator`
+    itself is unchanged. The Python validation warns about a `u_set` on the wrong scale (D73).
+  * **Node to earth, not the winding voltage.** The node voltage is what the loads see and what the power flow outputs,
+    and the node of an earth electrode is eliminated, so its voltage is not available. The two differ only when the
+    control-side winding has an electrode: in an OpenDSS probe with a 5 Ω electrode at 12.7 kV they differ by about 49 V.
+  * **Centre-tapped: the mean of the legs.** It is the rule of the three-phase regulator (the mean over the present
+    phases) and the service voltage of the customer, and `u_set` is the leg voltage (240 V or 250 V) that engineers
+    specify. Each leg gets its own line drop compensation. Rejected: $\lvert V_a - V_b \rvert / 2$, which ignores the
+    shift of the centre tap and needs a differential-current compensation.
+  * **Evidence.** A 22 kV `ab` → 12.7 kV `a` isolating transformer (electrode 5 Ω, from-side taps −4..4 × 275 V, 50 kW
+    load): `any_valid_tap`, `fast_any_tap`, `min_voltage_tap` and `max_voltage_tap` all end at tap −2 with
+    $\lvert U_a \rvert$ = 12974.6 V, inside the band [12935 V, 13015 V]; tap −1 gives 12809.0 V and tap −3 gives
+    13144.4 V, both outside. A hand check from the closed form (no-load voltage 22000 × 12700 / 21450 = 13025.6 V, minus
+    the drop 3.85 A × (8.06 + 5) Ω = 50.3 V in phase and 0.6 V in quadrature) gives 12974.7 V.
+* **D70. Line drop compensation: ohms per conductor, on the per-phase base.** $Z_c$ = `line_drop_compensation_r` +
+  j `line_drop_compensation_x`, as for the three-phase regulator, where r and x are the impedance per phase.
+  * **Phase-to-earth winding.** $Z_c$ is the impedance of the conductor including its earth return, for example
+    $r_{aa} + j x_{aa}$ of a SWER `asym_line`.
+  * **Phase-to-phase winding.** The per-slot form gives $U_{pq} + Z_c (I_p - I_q) \approx U_{pq} + 2 Z_c I$: a 2-wire
+    loop of $2 Z_c$, where $Z_c$ is the impedance per conductor of the two-phase line. OpenDSS needs R = 2r and X = 2x.
+  * **Centre-tapped winding.** Per leg, with the neutral drop ignored, as in the three-phase regulator. Only magnitudes
+    are used, so the clock does not matter.
+  * **The per-phase base.** With `u_rated` / $\sqrt3$ (D69) and the per-phase base power, `calc_param` gives
+    $z_{base} = (u_{rated}^2 / 3) / (S_3 / 3) = u_{rated}^2 / S_3$, which is correct.
+  * **The three-phase regulator is 3x too weak in an asymmetric calculation.** `TransformerTapRegulator::calc_param`
+    uses $u_{rated}^2$ / `base_power<sym>`, which for an asymmetric calculation is $3 u_{rated}^2 / S_3$ instead of the
+    per-phase $u_{rated}^2 / S_3$, so the per-unit compensation impedance is a third of what it should be. Measured on a
+    10/0.4 kV transformer with `line_drop_compensation_r` = 0.05 Ω: tap −9 (u2 = 436.6 V) in a symmetric calculation and
+    tap −4 (u2 = 413.4 V) in an asymmetric one; with r = 0 both give tap −1. The fork does not fix it, because that
+    changes three-phase results, which is for the maintainers (item j of [To raise upstream](#to-raise-upstream)). The
+    consequence is that in one asymmetric model the compensation of a three-phase regulator acts at a third of the
+    strength of a single-phase one with the same ohms.
+* **D71. A regulated `single_phase_transformer` must provide both `tap_min` and `tap_max`.** D18 leaves an omitted limit
+  unbounded, and its getter then returns $\min(t, t_{nom})$ or $\max(t, t_{nom})$, a bound that moves with the tap
+  position. That blocks `one_step_tap_up/down` and makes the tap range, and with it the budget of `MaxIterationReached`
+  (twice the range), meaningless. At construction the core raises `AutomaticTapInputError`: "The single_phase_transformer
+  152 regulated by transformer_tap_regulator 402 needs both tap_min and tap_max." The check does not depend on the
+  status of the regulator, because it is deterministic and only looks at the input. `tap_size` is not checked in C++: it
+  cannot be told from 0, and a regulator with `tap_size` 0 changes nothing, as for `transformer` (D73 reports it in
+  Python).
+* **D72. The transformer ranking graph covers every branch type.** The graph that ranks the regulated transformers by
+  their distance from the sources only had `transformer`, `three_winding_transformer`, `line` and `link` edges. A
+  regulated transformer that is reachable from a source only through another branch type had both ranks at infinity and
+  was silently not regulated. This is a pre-existing defect that affects three-phase models too, and it blocks SWER line
+  regulators, because SWER lines are `asym_line`s.
+  * **Measured** on a three-phase model (source → branch → regulated 10/0.4 kV `transformer`, `u_set` 420 V, `u_band`
+    8 V, `any_valid_tap`): with an `asym_line` or a `generic_branch` the regulator reports `tap_pos` na (−128) and the
+    voltage stays at 396.5 V, outside the band, in a symmetric and in an asymmetric calculation; with a `line` it lands on
+    tap −5 and 417.7 V, inside the band [416 V, 424 V]. After the fix all three give tap −5 and 417.7 V.
+  * **Fix.** `asym_line` and `generic_branch` are bidirectional weight-0 edges, added through `add_edges_if_present`, which
+    skips the types that the component container of the model does not hold (the unit-test container lacks them). The
+    two-winding `add_edge` covers `transformer` and `single_phase_transformer`: a directional weight-1 edge from the
+    non-control side to the control side when regulated, and a bidirectional weight-0 edge otherwise, skipped unless both
+    sides are on. The graph is on user nodes, so the phase masks do not matter, and the slots of a winding are always
+    present (D1).
+  * **Scope.** The fix changes three-phase behaviour only where a regulator is silently skipped today. It is its own
+    commit (4fb4c1278) and can be proposed on its own (item k).
+  * **Tests.** Ranking through an `asym_line` and through a `generic_branch`, an open `asym_line`, control towards the
+    source through either branch (`AutomaticTapInputError`), two ranks coupled through an `asym_line`, an isolating
+    transformer followed by a SWER line regulator (ranks 1 and 2) and an unregulated `single_phase_transformer` that
+    passes the rank on; and the end-to-end reproduction above for `line`, `asym_line` and `generic_branch`.
+* **D73. Python validation.** `validate_regulator` and `validate_transformer_tap_regulator` accept a
+  `single_phase_transformer` as the regulated object, with the `BranchSide` check on `control_side` (a `Branch3Side` or
+  an unknown side is reported). The test that pinned D44 now expects valid data.
+  * **Required values.** A `single_phase_transformer` that is the regulated object of any `transformer_tap_regulator`,
+    whatever the status of the regulator, must provide `tap_min`, `tap_max` and `tap_size` (`MissingValueError`).
+    `tap_min` and `tap_max` mirror the C++ error of D71. `tap_size` is Python-only and catches a regulator that would
+    silently do nothing.
+  * **A `ValidationWarning` for a `u_set` on the wrong scale** (D42 style): `u_set` more than 20 % from the nominal voltage of
+    the control-side winding, which is `u_rated` / $\sqrt3$ of the node for `a`, `b`, `c` and one leg of a centre-tapped
+    winding, and `u_rated` for `ab`, `ac`, `bc`. It catches 22 kV on a SWER winding and 480 V on a split-phase winding.
+    `validate_input_data` checks the input once and `validate_batch_data` checks the merged data of each scenario
+    (`u_set` is updatable), with one warning per call that names the IDs and "in k of n batch scenarios", as in D67. It
+    is only checked for a power flow or no calculation type.
+  * **A latent defect found on the way (item m).** The warning looks up the regulated transformers and nodes with
+    `validation.utils._get_indexer(..., default_value=...)`, which applied the sort permutation twice and returned wrong
+    positions whenever the source IDs were not sorted. Without a `default_value` it was correct, and upstream never uses
+    the branch. With the `single_phase_transformer` IDs 151, 154, 152 the regulator of 154 was mapped to 152, a 240 V
+    winding, and warned about a nominal 12.9 kV `u_set`. The same defect gave wrong results for the winding-voltage
+    warning (D42, M9) and the earth-reference warning (D67). Fixed in 4f918d3e0 (one line) with direct tests for sorted
+    and unsorted sources, and an unsorted-ID test of the `u_set` warning that fails without the fix. The FU5 validation
+    case keeps the IDs 151, 154, 152 unsorted as a regression test.
+  * **Tests.** Control side, missing tap fields (status on and off, each mirrored against the C++ calculation), the
+    warning (three winding kinds, both sides, skipped cases, calculation types, batch) and the assertion functions. A run
+    of `tests/unit` with `ValidationWarning` as an error finds no test that warns.
+* **D74. Validation against OpenDSS: a scan of the fixed taps, and `RegControl` as a cross-check.** The method does not
+  depend on matching the iterative stepping of OpenDSS.
+  * **Scan.** The generator solves OpenDSS with fixed taps for every tap combination and computes the rule of D69 and D70
+    independently from the OpenDSS phasors. `u_set` is the scanned voltage at the target tap, rounded to 1 V, and `u_band`
+    is half of the local tap step (three steps for the wide-band cases). The generator asserts that exactly one
+    combination is inside every band, with at least 10 % of the band to each edge (at least two valid taps for a wide
+    band), so the expected tap does not depend on the accuracy of the solver. The reference output is the OpenDSS solve at
+    the expected taps, plus `tap_pos` of every regulator.
+  * **`RegControl`.** The same network with OpenDSS `RegControl` elements (`ptratio=1`, `CTprim=1`, R and X in ohms; the
+    taps range aligned to the PGM tap grid, reversed numbering included) is written as `test_regcontrol.dss`, solved from
+    the initial taps, and must land on the scanned taps. A control winding with an electrode uses `bus=`, which regulates
+    the node-to-earth voltage and disables the compensation. Centre-tapped cases have no `RegControl` check, because it
+    watches one half only; the scan covers them. Taps are on the from side only, as in M5; `control_at_tap_side` is
+    covered by unit tests.
+  * **Cases** (`tests/data/power_flow/single-phase-transformer-tap-regulator/`, 16 cases, each with `newton_raphson` and
+    `iterative_current`, the IC-only `error_tolerance` of D63 and `experimental_features` enabled). Each strategy has
+    its own case.
+
+    | Case | Network | Expected taps | Valid combinations | Margins (inside / outside, % of the band) | `RegControl` |
+    |---|---|---|---|---|---|
+    | `swer-chain-{any,fast-any,min,max}` | 22 kV feeder → SWER isolating transformer 151 (regulated through its electrode, rank 1) → 20 km `asym_line` → SWER line regulator 154 (reversed numbering 8..−8, line drop compensation of a 10 km SWER line, rank 2) → SWER line → 240 V transformer 152 | 151: −2, 154: 4 | 1 of 153 | 49.3 / 146.9 | agrees, 6 iterations |
+    | `split-phase-{any,fast-any,min,max}` | `ab` → `ab_center_tapped`, mean of the legs with per-leg compensation | −2 | 1 of 9 | 42.4 / 138.0 | not applicable |
+    | `split-phase-wide-band-{min,max}` | the same with a 3-step band | −1 (min), −3 (max) | 3 of 9 | 14.6 / 12.1 | not applicable |
+    | `phase-to-phase-{any,fast-any,min,max}` | 11 kV `ab` → `ab` 415 V, $\lvert V_a - V_b \rvert$ with the 2-wire compensation | −2 | 1 of 9 | 42.5 / 138.3 | agrees, 3 iterations |
+    | `swer-chain-batch` | the swer-chain, two scenarios (maximum and 30 % demand) | (−2, 4) and (−1, 2) | 1 of 153 each | 49.3 / 146.9 and 29.9 / 125.1 | agrees, 6 and 4 iterations |
+    | `missing-tap-limits` | the swer-chain without `tap_max` on 154 | `AutomaticTapInputError` | | | |
+
+  * **Worst ratio** against OpenDSS (`|actual − expected| / (atol + rtol |expected|)`, below 0.1 everywhere; the
+    tolerances by the existing rule: the smallest round `rtol`, then the smallest `atol`, with a worst ratio below 0.1): `phase-to-phase` 0.034 (rtol 1e-8, atol 1e-8); `split-phase` 0.078 and
+    `swer-chain` 0.074 (iterative current; Newton-Raphson 0.034), both at rtol 1e-8 and atol 1e-6; `swer-chain-batch`
+    0.052 (rtol 1e-8, atol 1e-5); `split-phase-wide-band` 0.087 (max) and 0.094 (min), the largest of the family. The
+    `tap_pos` of every regulator matches exactly.
+  * **A batch with a regulator needs a valid tap in its input** (item l). A batch first runs the optimizer on the input
+    data itself (the cache run), so it fails with `MaxIterationReached` when the input has no valid tap, even if every
+    scenario has one. The generator asserts that the input of `swer-chain-batch` is valid. Regenerating all other
+    cases gives byte-identical files.
+  * **Tests.** `test_reduced_phase_cases.py`: `MIN_CASE_COUNT` 53 and the expected Python error of `missing-tap-limits`.
+    Native API tests on a 22/12.7 kV isolating transformer: all strategies, wide band, line drop compensation (the tap is
+    decided by the compensation, while $\lvert U_a \rvert$ itself is outside the band), control at the tap side, reversed
+    numbering, missing `tap_max`, a symmetric calculation, the gate, a two-scenario batch and a centre-tapped regulator.
+* **D75. Bit-identity of the existing results, and the measured test results.**
+  * **The capture.** `fu5_capture.py` runs every power-flow case in `tests/data` that has a `transformer_tap_regulator`
+    with each of the five strategies (`disabled` and the four others), in a symmetric Newton-Raphson, an asymmetric
+    Newton-Raphson and an asymmetric iterative current calculation, in a batch where `update_batch.json` exists, and all
+    runs of the M11 capture: 45011 keys over 144 cases (1184 successful runs, 254 batch runs and 465 runs that raise, stored as text), 30772 of
+    them from the 45 regulator cases (23463 from the strategy runs). The M11 capture alone never passed
+    `tap_changing_strategy`, so it could not prove the optimizer. A rerun at the base is bit-identical.
+  * **Result.** The tip after the ranking graph (4fb4c1278) and the tip after the C++ support (8b67c287f) both give
+    45011 of 45011 keys bit-identical to the base at 7de259a6d, with no allow-list. The new case folder is excluded from
+    the capture. The reason is that the new graph edges only come from types that no existing regulator case has, and
+    the `SinglePhaseTransformer` branches only run for that type.
+  * **Tests.** ctest 328 of 328 (including `PGMExample`); pytest 2599 passed, 4 skipped and 7 xfailed (2498 before FU5),
+    coverage 97.68 %; clang-tidy clean on the four changed C++ test files. In ctest the power-flow validation tests take 8.5 s (single cases) and 254.3 s (batch cases; 256.6 s at the end
+    of M11). Pre-commit passes.
+
 ### Decision index
 
 | Decision | Subject | Section |
@@ -1035,6 +1212,14 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
 | D65 | Iterative current ignores `calculation_initialization` | [Taken in M11](#taken-in-m11) |
 | D66 | Scope of iterative current in the validation cases | [Taken in M11](#taken-in-m11) |
 | D67 | A `ValidationWarning` for a phase-to-phase winding without an earth reference | [Taken in FU4](#taken-in-fu4) |
+| D68 | A `transformer_tap_regulator` regulates a `single_phase_transformer`; no new attributes | [Taken in FU5](#taken-in-fu5) |
+| D69 | Regulated quantity: the voltage of the control-side winding to earth, in winding volts | [Taken in FU5](#taken-in-fu5) |
+| D70 | Line drop compensation per conductor on the per-phase base; the three-phase asymmetric regulator is 3x too weak | [Taken in FU5](#taken-in-fu5) |
+| D71 | A regulated `single_phase_transformer` must provide `tap_min` and `tap_max` | [Taken in FU5](#taken-in-fu5) |
+| D72 | The transformer ranking graph covers every branch type | [Taken in FU5](#taken-in-fu5) |
+| D73 | Python validation: required tap values, `u_set` warning, and the `_get_indexer` fix | [Taken in FU5](#taken-in-fu5) |
+| D74 | Validation against OpenDSS: a scan of fixed taps with a `RegControl` cross-check | [Taken in FU5](#taken-in-fu5) |
+| D75 | Bit-identity of the existing results and the measured test results | [Taken in FU5](#taken-in-fu5) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
@@ -1516,6 +1701,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M10 (implemented) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`, BSD-3-Clause, AusNet Services data). Only the 22 kV and SWER (12.7 kV) parts are modelled; the LV side is lumped into one constant-power load per distribution transformer (three-phase, centre-tapped 250-0-250 V, SWER 12.7 kV / 240 V, and the 44 phase-to-earth units of KLO14) on its secondary busbar. Minimum demand is 10 % and maximum demand 20 % of the transformer kVA, at power factor 0.95. The generator writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py`; decisions D47-D59 | `tests/data/generators/australian_swer_networks.py` (new: downloads the workbooks at the pinned commit and checks their sha256, maps them to OpenDSS and PGM, runs the self-checks, runs OpenDSS and writes the cases); `tests/data/generators/reduced_phase_compare_pgm.py` (extended: compact JSON rows, power-flow batches, a wider tolerance grid when no standard candidate passes); `LICENSES/BSD-3-Clause.txt`; `tests/unit/validation/test_reduced_phase_cases.py` (`MIN_CASE_COUNT` 37); no library changes | Four case folders, each with a generated `README.md` that lists every deviation from `backend.py`: power flow `tests/data/power_flow/australian-swer/{smr8,klo14}` (asymmetric batch of two scenarios, minimum and maximum demand; `newton_raphson` on both, `iterative_current` on SMR8 only until M11) and short circuit `tests/data/short_circuit/australian-swer/{smr8,klo14}` (IEC 60909, maximum voltage scaling, a batch of 8 (SMR8) and 9 (KLO14) faults on 22 kV, SWER and LV busbars). Measured agreement with OpenDSS: power flow rtol 1e-6, atol 1e-8 (1e-3 on `[pq]_(from|to)`), worst ratio 0.066 (SMR8) and 0.069 (KLO14), node voltages to 1.1e-10 and 9.8e-11 relative; short circuit rtol 1e-8, atol 1e-8 (1e-6 on `i_(from|to)` and its angle), worst ratio 0.033 and 0.030, fault currents to 6.7e-11 and 9.2e-11 relative. The data is 4.9 MB for power flow and 4.1 MB for short circuit | M / medium (data size, convergence, conditioning) |
 | M11 (implemented) | The iterative current method works for every reduced-phase, split-phase, delta and real-network power-flow case (decisions D60-D66). Solver: const_y loads in the iterative current matrix at networks with an absent phase, refactorised when they change; a NaN deviation raises `IterationDiverge`; NaN folding of the maximum deviation over buses and phases. Validation: `iterative_current` with `error_tolerance` 1e-10 on every case that lists `newton_raphson` (including `australian-swer/klo14`, `single-phase-transformer/phase-to-phase`, both `split-phase-flat-start` cases and the expected-error cases) and tighter tolerances. The residual (defect-correction) form C1 was tried and reverted (D62) | `<core>/math_solver/iterative_current_pf_solver.hpp` (`absent_phase_` gate, cached const_y admittance, refactorisation), `<core>/math_solver/iterative_pf_solver.hpp` (NaN check), `<core>/math_solver/common_solver_functions.hpp` (`add_linear_load`, `add_const_y_loads`, `fold_max_deviation`), `<core>/math_solver/newton_raphson_pf_solver.hpp`; `tests/cpp_validation_tests/test_validation.cpp` (per-method `extra_params`); `tests/data/generators/{reduced_phase_opendss_cases,australian_swer_networks,reduced_phase_compare_pgm}.py`; `params.json` and READMEs of the power-flow cases | `tests/cpp_unit_tests/math_solver/test_math_solver_pf_reduced_phase.cpp` (NaN deviation raises, NaN folding of any bus and phase, IC with const_y loads on a floating common mode, refactorisation when the const_y loads change, delta const_y loads at buses with an absent phase, linear current with exact const_y loads and a NaN load); validation cases with IC on all power-flow cases; a capture of 21506 result keys before and after each solver commit: NR, linear, symmetric and three-phase results bit-identical. Results: `phase-to-phase` IC 11 iterations (worst ratio 0.034, equal to Newton-Raphson); worst ratio against OpenDSS 0.033 to 0.080 on the M3 to M9 cases (D63), 0.044 on SMR8 and 0.018 on KLO14 for IC; the PF batch takes 256.6 s (was 238.6 s before KLO14 IC); ctest 323/323, pytest 2465 passed | M / medium-high (core numerics, gated) |
 | FU4 (implemented) | A `ValidationWarning` for a phase-to-phase `single_phase_transformer` winding without an earth reference (decision D67). Python only | `src/power_grid_model/validation/_validation.py` (`_floating_phase_to_phase_windings`, `_connected_components`, the hooks in `validate_input_data` and `validate_batch_data`), `src/power_grid_model/validation/errors.py` (docstring) | `tests/unit/validation/test_reduced_phase_validation.py` (warns, not anchored by, anchored by, not energised, batch, mirror against the C++ behaviour, connected components), `test_validation_functions.py::test_all_default_values`; every reduced-phase validation case stays free of warnings | S / low |
+| FU5 (implemented) | A `transformer_tap_regulator` regulates a `single_phase_transformer` (decisions D68-D75): the control-side winding voltage to earth in winding volts (phase-to-earth, phase-to-phase, mean of the legs of a centre-tapped winding), line drop compensation per conductor, both tap limits required. The ranking graph covers `asym_line`, `generic_branch` and `single_phase_transformer` (also a fix for three-phase models). Python validation of the regulator, a `u_set` warning and a fix of `_get_indexer` with a default value. 16 OpenDSS cases | `<core>/optimizer/tap_position_optimizer.hpp` (`add_edges_if_present`, two-winding `add_edge`, `SinglePhaseNodeState`), `<core>/component/single_phase_transformer.hpp` (`controlled_voltage`, `tap_limits_provided`), `<core>/main_core/input.hpp`, `<core>/main_core/main_model_type.hpp`; `src/power_grid_model/validation/_validation.py` (`_regulated_single_phase_transformer_taps`, `_off_nominal_tap_regulator_u_set`), `src/power_grid_model/validation/utils.py` (`_get_indexer`); `tests/data/generators/{reduced_phase_opendss_cases,reduced_phase_compare_pgm}.py`; `tests/data/power_flow/single-phase-transformer-tap-regulator/*` | `tests/cpp_unit_tests/optimizer/test_tap_position_optimizer.cpp` (ranking through `asym_line`, `generic_branch` and `single_phase_transformer`), `component/test_single_phase_transformer.cpp` (`controlled_voltage` for every connection), `component/test_transformer_tap_regulator.cpp` (base), `tests/native_api_tests/test_api_model.cpp` (all strategies, wide band, line drop compensation, control side, reversed numbering, missing limits, batch, centre-tapped); `tests/unit/test_error_handling.py`, `tests/unit/validation/{test_reduced_phase_validation,test_utils,test_reduced_phase_cases}.py`; 16 validation cases against OpenDSS. Results: the ranking reproduction tap -128 (na) before and -5 after (417.7 V in the band); the isolating transformer hand check 12974.7 V (native run 12974.6 V, tap -2); the cases settle at taps -2 and 4 (swer-chain), -2 (split-phase and phase-to-phase), -1 and -3 (wide band), with `RegControl` on the same taps and worst ratio 0.034 to 0.094; a capture of 45011 result keys before and after the two C++ commits, all bit-identical; ctest 328/328, pytest 2599 passed | M / medium |
 | Later | See [Later work](#later-work) | — | — | — |
 
 ### Cross-cutting concerns
@@ -1530,9 +1716,11 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
       winding, and the tap limits (D41).
     * `connection` of the four load_gen types, `delta` only on `asym_load` and `asym_gen`, and no voltage regulator
       on a delta load_gen (D43).
-    * Sensors on a `single_phase_transformer` are valid, a tap regulator on it is not (D44).
+    * Sensors on a `single_phase_transformer` are valid (D44), and so is a tap regulator on it since FU5, which needs
+      `tap_min`, `tap_max` and `tap_size` (D73).
   * The warning-level rule of D15 and D21 is a `ValidationWarning` (D42).
-  * A phase-to-phase winding without an earth reference is a `ValidationWarning` (D67).
+  * A phase-to-phase winding without an earth reference is a `ValidationWarning` (D67), and so is a `u_set` of a tap
+    regulator of a `single_phase_transformer` that is far from the winding voltage (D73).
   * Only C++ checks the rules that need the derived node phases: winding terminals, dangling conductors, load and
     shunt on absent phases, fault phases against node phases, and the calculation gates (D38). A valid result of the
     Python validation therefore does not guarantee that the calculation succeeds. A best-effort Python check is
@@ -1613,7 +1801,31 @@ Items for the upstream maintainers. Nothing has been submitted: Michael wants ev
 * **h. Two documentation bugs in `docs/user_manual/calculations.md`**, fixed in this fork: an unclosed `{note}` block in
   the short-circuit section, and the link `calulations.md#floating-grid-handling` (twice), which has a typo and should
   point to `#floating-grid-handling` on the same page.
-* **i. The main pull request:** everything in this branch, to be proposed when the items above are settled.
+* **i. The main pull request:** everything in this branch, to be proposed when the other items are settled. It includes
+  the fork fixes of items k (4fb4c1278) and m (4f918d3e0) and the tap regulator on a `single_phase_transformer`
+  (D68 to D75). Items j and l are not fixed in the fork and are raised as issues, together with the proposals below.
+* **j. The asymmetric line drop compensation of `transformer_tap_regulator` uses `base_power_1p` and is 3x too weak** (D70).
+  * **Description.** `TransformerTapRegulator::calc_param` computes `z_base = u_rated^2 / base_power<sym>`. For an
+    asymmetric calculation that is $3 u_{rated}^2 / S_3$, but the per-phase impedance base is $u_{rated}^2 / S_3$, so the
+    compensation impedance in per unit is a third of what it should be. The symmetric calculation is correct.
+  * **Evidence.** A 10/0.4 kV transformer with `line_drop_compensation_r` = 0.05 Ω: tap −9 (u2 = 436.6 V) in a symmetric
+    calculation and tap −4 (u2 = 413.4 V) in an asymmetric one. With r = 0 both give tap −1. The single-phase regulator
+    uses the correct base (D70).
+  * **Proposal.** Use the per-phase base power for the asymmetric calculation. It changes three-phase results of models
+    with line drop compensation, so it is the maintainers' call.
+* **k. The transformer ranking graph misses `asym_line` and `generic_branch`** (D72). A regulated transformer reached from
+  the source only through one of them is silently not regulated: `tap_pos` na (−128) and 396.5 V, outside the band,
+  where a `line` gives tap −5 and 417.7 V. The fork commit 4fb4c1278 fixes it (the two types, added only when the model
+  holds them) with tests, and can be proposed on its own, like M0 and D40. Existing results are bit-identical.
+* **l. A batch with a tap regulator fails when the input data has no valid tap.** A batch first runs the optimizer on
+  the base input (the cache run) and raises `MaxIterationReached` when that has no valid tap, even if every scenario
+  has one. Reproduced on a three-phase model: a source, a `line` and a regulated 10/0.4 kV transformer with `u_band`
+  3 V; the base load of 15 kW has no valid tap, a load of 0 kW alone has tap −5, and the batch of that scenario fails.
+  Pre-existing and not changed in the fork; the validation case `swer-chain-batch` has a valid input to avoid it. A
+  fix would let the cache run skip or tolerate the regulation, or document the requirement.
+* **m. `validation.utils._get_indexer` with a `default_value` is wrong for unsorted IDs** (D73). The sort permutation is
+  applied twice, so the positions are wrong unless the source IDs are sorted. Upstream never calls the branch; the fork
+  does in three warnings. The fork commit 4f918d3e0 is a one-line fix with direct tests and can be proposed on its own.
 
 ## Later work
 
@@ -1622,7 +1834,7 @@ scope by Michael (2026-10-15). Items marked *scheduled* are follow-ups planned i
 maintainers are under [To raise upstream](#to-raise-upstream).
 
 * **State estimation with masks** (open question 5), with per-phase observability rules.
-* **A tap regulator on a `single_phase_transformer`** (D18, D44). *Scheduled (2026-10-19).*
+* **A tap regulator on a `single_phase_transformer`** (D18, D44). *Implemented in FU5 (D68–D75).*
 * **A warning for windings left floating,** that is a winding with no earth path (D14-B). *Implemented in FU4 (D67).*
 * **A C++ diagnostic for windings without an earth reference** in the opt-in logger (`LogEvent::warning`), using the per-scenario
   topology (D67).

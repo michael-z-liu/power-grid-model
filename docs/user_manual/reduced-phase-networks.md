@@ -96,6 +96,7 @@ from the input.
 | earth electrodes                           | `r_grounding_<side>` and `x_grounding_<side>` of a phase-to-earth winding or of the centre tap                                              | [Single-Phase Transformer](components.md#single-phase-transformer)                |
 | 240-0-240 V split-phase secondaries        | `to_connection` `ab_center_tapped`, optionally with `uk_half` and `pk_half`                                                                 | [Centre-tapped secondary](components.md#centre-tapped-split-phase-secondary)       |
 | fixed taps of a single-phase transformer   | the optional tap attributes; each tap limit is optional                                                                                     | [Single-Phase Transformer](components.md#single-phase-transformer)                |
+| automatic tap changing                     | a `transformer_tap_regulator` that regulates a `single_phase_transformer` (asymmetric power flow); the transformer needs `tap_min`, `tap_max` and `tap_size`  | [Single-phase transformer regulated by a tap regulator](components.md#single-phase-transformer-regulated-by-a-tap-regulator) |
 | phase-to-earth loads and generators        | `asym_load` and `asym_gen` with power only on the phases present at the node                                                                | [Generic Load and Generator](components.md#generic-load-and-generator)             |
 | phase-to-phase (for example 480 V) loads   | `asym_load` and `asym_gen` with `connection` `delta`; the entries are the ab, bc and ca branches                                            | [Generic Load and Generator](components.md#generic-load-and-generator)             |
 | faults at a SWER or split-phase node       | `fault` with a `fault_phase` that is present at the node                                                                                    | [Fault](components.md#fault)                                                      |
@@ -213,8 +214,6 @@ u = result[ComponentType.node]["u"]  # phase-to-earth voltages in V, one row per
 u_angle = np.degrees(result[ComponentType.node]["u_angle"])
 ```
 
-<!-- example-end -->
-
 The voltages and angles are about:
 
 | node | `u` (V)                    | `u_angle` (°)           |
@@ -234,6 +233,60 @@ The voltages and angles are about:
 * **The 480 V load appears on both legs.** The output of a delta load is per phase at its node.
   Between two legs that are 180° apart, the 4 kW of load 41 is split about evenly: `p` is about 2.0 kW on each leg and
   `q` is about ±0.6 var, because the legs are not exactly opposite.
+
+### Automatic tap changing
+
+A `transformer_tap_regulator` can regulate the tap position of a `single_phase_transformer`, with the tap changing
+strategies of the [regulated power flow](calculations.md#power-flow-with-automatic-tap-changing).
+In the example, the isolating transformer 20 gets a tap changer on its 22 kV side and a regulator that keeps the voltage
+on its SWER side between 12.8 kV and 13.0 kV.
+The transformer needs `tap_min`, `tap_max` and `tap_size` (see [Validation](#validation)).
+`u_set` and `u_band` are in volts across the controlled winding, here 12.9 kV and 200 V, and the voltage that is
+regulated is the voltage of the SWER node to earth.
+The extra code continues the example above.
+
+```python
+from power_grid_model.enum import BranchSide, TapChangingStrategy
+
+# 20: a tap changer on the 22 kV side, taps -4 to 4 of 1.25 % (275 V) each; a higher position lowers the voltage
+regulated_transformer = transformer.copy()
+regulated_transformer["tap_side"][0] = BranchSide.from_side
+regulated_transformer["tap_nom"][0] = 0
+regulated_transformer["tap_pos"][0] = 0
+regulated_transformer["tap_min"][0] = -4
+regulated_transformer["tap_max"][0] = 4
+regulated_transformer["tap_size"][0] = 275.0
+
+# 50: keeps the voltage of the SWER side of transformer 20 (to earth, in volts) between 12.8 kV and 13.0 kV
+regulator = initialize_array(DatasetType.input, ComponentType.transformer_tap_regulator, 1)
+regulator["id"] = 50
+regulator["regulated_object"] = 20
+regulator["status"] = 1
+regulator["control_side"] = BranchSide.to_side
+regulator["u_set"] = 12.9e3
+regulator["u_band"] = 200.0
+
+regulated_input = {
+    **input_data,
+    ComponentType.single_phase_transformer: regulated_transformer,
+    ComponentType.transformer_tap_regulator: regulator,
+}
+regulated_errors = validate_input_data(regulated_input, symmetric=False)
+
+regulated_result = PowerGridModel(regulated_input)._calculate_power_flow(
+    symmetric=False,
+    experimental_features="enabled",
+    tap_changing_strategy=TapChangingStrategy.any_valid_tap,
+)
+tap_pos = regulated_result[ComponentType.transformer_tap_regulator]["tap_pos"]  # -1
+u_swer = regulated_result[ComponentType.node]["u"][1, 0]  # V, about 12855
+```
+
+Without the regulator the voltage of node 2 is 12694 V.
+The regulator lowers the tap position to −1, which raises the voltage of node 2 to about 12855 V, inside the band.
+A symmetric calculation of this model raises `ReducedPhaseNotSupported`.
+
+<!-- example-end -->
 
 ## Validation
 
@@ -260,7 +313,12 @@ The Python validation checks the attributes of each component and the references
     `pk / 4 <= pk_half <= pk / 2` and `uk_half >= pk_half / (sn / 2)`, using the defaults for a value that is not
     provided;
   * `tap_pos` must lie within the tap limits that are provided, and `tap_nom` between them when both are provided;
-  * a `transformer_tap_regulator` cannot regulate it (`InvalidIdError`); power and current sensors can measure it.
+  * power and current sensors can measure it;
+* **`transformer_tap_regulator` on a `single_phase_transformer`:** `control_side` must be a
+  {py:class}`BranchSide <power_grid_model.enum.BranchSide>` (`InvalidAssociatedEnumValueError`).
+  The regulated transformer must provide `tap_min`, `tap_max` and `tap_size` (`MissingValueError`), whatever the status
+  of the regulator: without a limit the range of the tap changer is not bounded, which the calculation rejects with an
+  `AutomaticTapInputError`, and with a `tap_size` of 0 the regulator would change nothing.
 * **`connection` of the load_gen components:** it must be a valid
   {py:class}`LoadGenConnection <power_grid_model.enum.LoadGenConnection>`, `delta` is only allowed for `asym_load` and
   `asym_gen` (`InvalidValueError`), and a `voltage_regulator` cannot regulate a delta load or generator
@@ -272,6 +330,14 @@ phase-to-earth winding, $u_{\text{rated}}$ for a phase-to-phase winding and $2 u
 centre-tapped winding.
 A typical mistake it catches is `u1` = 22 kV on an `a` winding at a 22 kV node, where 12.7 kV is meant.
 The warning does not make the data invalid (see [Validation warnings](data-validator.md#validation-warnings)).
+
+The validation also emits a `ValidationWarning` when the `u_set` of a `transformer_tap_regulator` of a
+`single_phase_transformer` differs by more than 20% from the nominal voltage of the controlled winding, which is
+$u_{\text{rated}} / \sqrt3$ of the node for a phase-to-earth winding and for one leg of a centre-tapped winding, and
+$u_{\text{rated}}$ for a phase-to-phase winding.
+`u_set` is in volts across the winding, not at the `u_rated` of the node: the warning catches a `u_set` of 22 kV for a
+12.7 kV SWER winding, or 480 V for the legs of a split-phase winding.
+For batch data every scenario is checked after its update, and the warning is emitted once per call.
 
 The validation also emits a `ValidationWarning` when a phase-to-phase winding (`ab`, `ac` or `bc`) of a
 `single_phase_transformer` has no earth reference.
@@ -339,9 +405,7 @@ A valid result of `validate_input_data` therefore does not guarantee that the ca
 * **Not supported:**
   * sources at a node without all phases: a node with a source always has all three phases;
   * voltage regulators at a node without all phases, and on a delta load or generator
-    (`UnsupportedLoadGenTypeForVoltageRegulator`);
-  * the automatic tap changer (`transformer_tap_regulator`) on a `single_phase_transformer`
-    (`InvalidRegulatedObject`).
+    (`UnsupportedLoadGenTypeForVoltageRegulator`).
 
 ## C API compatibility
 
@@ -366,8 +430,10 @@ See [Backwards compatibility](../advanced_documentation/c-api.md#backwards-compa
 ## Limitations
 
 * The features above are experimental (see [Experimental feature](#experimental-feature)).
-* State estimation, symmetric power flow, sources and voltage regulators at nodes without all phases, and the
-  automatic tap changer on a `single_phase_transformer` are not supported.
+* State estimation, symmetric power flow, and sources and voltage regulators at nodes without all phases are not
+  supported.
+* The automatic tap changer of a `single_phase_transformer` works in asymmetric power flow only, like the transformer
+  itself.
 * A node has no neutral conductor: a wye load at a split-phase node is connected between its leg and true earth, and
   the two windings of an `a` → `a` transformer cannot share one earth electrode.
 * A delta load or generator gives per-phase output only, not per branch; a delta `sym_load` or `sym_gen` is not

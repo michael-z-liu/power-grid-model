@@ -393,7 +393,8 @@ by the calculation.
   leaves its side unbounded. For example, with `tap_nom` 5 and only `tap_min` 9 the tap changer is reversed, a
   `tap_pos` of 10 is limited to 9 and every `tap_pos` below 9 is allowed. `uk_min`/`pk_min` only apply when
   `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided. The automatic tap changer
-  (`transformer_tap_regulator`) does not support this component.
+  ([`transformer_tap_regulator`](#single-phase-transformer-regulated-by-a-tap-regulator)) can regulate this component
+  in an asymmetric power flow. It needs both `tap_min` and `tap_max`, and a `tap_size` that is not 0.
 * **Calculations.** As for [one- and two-phase lines](#asym-line), symmetric calculations and state
   estimation are not supported (`ReducedPhaseNotSupported`) and a short circuit is always calculated
   asymmetrically. The output of a phase that is not part of a winding is 0.
@@ -1538,9 +1539,11 @@ Which object types are supported as `regulated_object` is regulator type-depende
 * base: [regulator](#regulator)
 
 `transformer_tap_regulator` defines a regulator for transformers in the grid.
-A transformer tap regulator regulates a component that is either a
-[transformer](#transformer) or a
-[Three-Winding Transformer](#three-winding-transformer).
+A transformer tap regulator regulates a component that is a
+[transformer](#transformer), a
+[Three-Winding Transformer](#three-winding-transformer) or a
+[Single-Phase Transformer](#single-phase-transformer) (see
+[below](#single-phase-transformer-regulated-by-a-tap-regulator)).
 
 The transformer tap regulator changes the `tap_pos` of the transformer it regulates in the range set by the user via
 `tap_min` and `tap_max` (i.e., `(tap_min <= tap_pos <= tap_max)` or `(tap_min >= tap_pos >= tap_max)`).
@@ -1559,7 +1562,7 @@ The actual grid state is not changed after calculations are done.
 
 | name                       | data type                                                                                                                                                                                                                                                                  | unit     | description                                                                                             |           required           |  update  |                           valid values                           |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------------------------------------------------------------------------------------------------------|:----------------------------:|:--------:|:----------------------------------------------------------------:|
-| `control_side`             | {py:class}`BranchSide <power_grid_model.enum.BranchSide>` if the regulated object is a [transformer](#transformer) and {py:class}`Branch3Side <power_grid_model.enum.Branch3Side>` if it the regulated object is a [Three-Winding Transformer](#three-winding-transformer) | -        | the controlled side of the transformer                                                                  | &#10024; only for power flow | &#10060; | `control_side` should be the relatively further side to a source |
+| `control_side`             | {py:class}`BranchSide <power_grid_model.enum.BranchSide>` if the regulated object is a [transformer](#transformer) or a [Single-Phase Transformer](#single-phase-transformer) and {py:class}`Branch3Side <power_grid_model.enum.Branch3Side>` if it the regulated object is a [Three-Winding Transformer](#three-winding-transformer) | -        | the controlled side of the transformer                                                                  | &#10024; only for power flow | &#10060; | `control_side` should be the relatively further side to a source |
 | `u_set`                    | `double`                                                                                                                                                                                                                                                                   | volt (V) | the voltage setpoint (at the center of the band)                                                        | &#10024; only for power flow | &#10004; |                              `>= 0`                              |
 | `u_band`                   | `double`                                                                                                                                                                                                                                                                   | volt (V) | the width of the voltage band ($=2*\left(\Delta U\right)_{\text{acceptable}}$)                          | &#10024; only for power flow | &#10004; |                        `> 0` (see below)                         |
 | `line_drop_compensation_r` | `double`                                                                                                                                                                                                                                                                   | ohm (Ω)  | compensation for voltage drop due to resistance during transport (see [below](#line-drop-compensation)) |    &#10060; default `0.0`    | &#10004; |                              `>= 0`                              |
@@ -1639,6 +1642,52 @@ node_1 --- transformer_4 --- node_2 --- line_5 --- node_3
 source_6     |                                    load_7
       transformer_tap_regulator_8
 ```
+
+##### Single-phase transformer regulated by a tap regulator
+
+A [Single-Phase Transformer](#single-phase-transformer) is regulated in the same way, with the following differences.
+The regulation is experimental, like the component itself (see
+[Reduced-phase networks](reduced-phase-networks.md#experimental-feature)).
+
+**Regulated voltage.** The controlled voltage is the voltage of the winding at the `control_side`, measured from the
+node to earth, after the line drop compensation.
+It depends on the connection of that winding:
+
+| connection of the winding at `control_side` | controlled voltage                                    | `u_set` and `u_band` are                                 | example `u_set`           |
+|---------------------------------------------|-------------------------------------------------------|----------------------------------------------------------|---------------------------|
+| `a`, `b`, `c` (phase-to-earth)              | the voltage of that phase                             | phase-to-earth volts                                     | 12.7 kV (SWER), 240 V     |
+| `ab`, `ac`, `bc` (phase-to-phase)           | the voltage between the two phases                    | phase-to-phase volts                                     | 22 kV, 415 V              |
+| `ab_center_tapped`                          | the mean of the voltages of the two legs to earth     | leg-to-earth volts (half of the voltage of the winding)  | 240 V                     |
+
+* **Unit.** `u_set` and `u_band` are in volts across the winding, like `u1` and `u2` of the transformer, and not at the
+  scale of `u_rated` of the node.
+  For a SWER winding at a 22 kV node, `u_set` is about 12.7 kV and not 22 kV.
+  The validation warns when `u_set` is more than 20% away from the nominal voltage of the winding.
+* **Node to earth.** The voltage is the one at the node, which is what the loads see and what the node output shows.
+  When the control side winding has an earth electrode (`r_grounding_<side>`), the voltage of the node to earth is
+  regulated, not the voltage across the winding, and the two differ by the drop over the electrode.
+* **Line drop compensation.** `line_drop_compensation_r` and `line_drop_compensation_x` are the impedance of one
+  conductor in ohm, as the compensation is applied to the current of each conductor of the winding.
+  * For a phase-to-earth winding, it is the impedance of the line to the regulated point including the earth return,
+    for example $r_{aa}$ and $x_{aa}$ of a SWER `asym_line`.
+  * For a phase-to-phase winding, the current flows out through one conductor and back through the other, so the
+    compensation is the loop of two conductors: $2 Z_{\text{compensation}}$, with $Z_{\text{compensation}}$ the impedance
+    of one conductor of the two-phase line.
+  * For a centre-tapped winding, each leg has its own compensation with the same impedance; the neutral is ignored.
+* **Requirements.**
+  * The transformer must provide both `tap_min` and `tap_max`, and `tap_size`.
+    Without a tap limit the range of the tap changer is not bounded, and the calculation raises an
+    `AutomaticTapInputError`; the validation reports a missing `tap_min`, `tap_max` or `tap_size`
+    (`MissingValueError`) of a regulated single-phase transformer, whatever the status of the regulator.
+    With a `tap_size` of 0 the tap position has no effect.
+  * The numbering of the tap positions may be reversed (`tap_max < tap_min`); `control_side` may be the side of the tap
+    changer or the other side.
+  * Only asymmetric power flow is supported; a symmetric calculation raises `ReducedPhaseNotSupported`, as for the
+    component itself.
+  * The `control_side` must be the side further from the source, as for the other transformers.
+  * Several regulators in series, for example an isolating transformer and a regulator in the SWER line behind it, are
+    regulated in order of their distance from the source, also when the transformers are connected through
+    `asym_line`s.
 
 ### Voltage Regulator
 

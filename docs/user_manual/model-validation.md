@@ -313,6 +313,11 @@ The case families are:
 * power flow, `single-phase-transformer/*`: a SWER chain (22 kV between two phases → 12.7 kV SWER → 240 V),
   phase-to-phase windings and 240-0-240 V split-phase secondaries, including earth electrodes;
 * power flow, `asym-load-delta/*`: delta loads and generators on three-phase, two-phase and split-phase nodes;
+* power flow, `single-phase-transformer-tap-regulator/*`: the automatic tap changer of a `single_phase_transformer`
+  in a SWER chain (an isolating transformer regulated through its earth electrode, followed by a SWER line regulator
+  with line drop compensation, reached through an `asym_line`), a 240-0-240 V centre-tapped secondary and a
+  phase-to-phase secondary, each with every tap changing strategy, a wide-band case for the minimum and maximum voltage
+  strategies, a batch with two demand levels and an expected error for a missing tap limit;
 * short circuit: `asym-line-reduced-phase`, `asym-line-swer-a`, `single-phase-transformer-swer`,
   `single-phase-transformer-split-phase`, `swer-fault-impedance`, `swer-multiple-faults` and `swer-c-minimum`;
 * expected errors: for example a symmetric calculation, a missing phase of a winding, a delta entry or a fault on an
@@ -321,6 +326,9 @@ The case families are:
 Before a case is written, the generator checks the conventions of the OpenDSS model itself, for example the primitive
 admittance of every centre-tapped transformer against an independent model, the voltage base of every delta load and
 the current through every fault impedance.
+For the tap regulator cases the expected tap positions come from solving OpenDSS with every combination of fixed
+taps: the generator chooses `u_set` and `u_band` so that exactly one combination is inside every band, with a margin, and
+checks that OpenDSS `RegControl` elements end at the same taps.
 power-grid-model and OpenDSS agree to about 3.4e-10 relative.
 Most cases are compared with a relative and absolute tolerance of 1e-8; a few cases use a relative tolerance of 1e-6
 or 1e-7, limited by the convergence criterion of the iterative current method or by cancellation in the reactive
