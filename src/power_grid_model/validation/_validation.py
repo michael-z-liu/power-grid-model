@@ -122,6 +122,11 @@ def validate_input_data(
 
         ValidationWarning: once, if a phase-to-phase winding of a single_phase_transformer has no earth reference.
         The data is still valid, so this does not change the returned value.
+
+        ValidationWarning: once, if u_set of a transformer_tap_regulator of a single_phase_transformer differs by more
+        than 20% from the nominal voltage of the control side winding (u_rated/sqrt(3) of its node for a
+        phase-to-earth winding and for one leg of a centre-tapped winding, u_rated for a phase-to-phase winding). The
+        data is still valid, so this does not change the returned value.
     """
     input_data = _map_to_component_types(input_data)
 
@@ -134,6 +139,7 @@ def validate_input_data(
     assert_valid_data_structure(input_data_copy, DatasetType.input)
     _warn_single_phase_transformer_winding_voltages(input_data_copy)
     _warn_floating_phase_to_phase_windings(_floating_phase_to_phase_windings(input_data_copy, calculation_type))
+    _warn_off_nominal_tap_regulator_u_set(_off_nominal_tap_regulator_u_set(input_data_copy, calculation_type))
 
     errors: list[ValidationError] = []
     errors += validate_required_values(input_data_copy, calculation_type, symmetric)
@@ -183,6 +189,11 @@ def validate_batch_data(
         ValidationWarning: once per call, on the merged data of every scenario, if a phase-to-phase winding of a
         single_phase_transformer has no earth reference. The warning names the scenarios. The data is still valid, so
         this does not change the returned value.
+
+        ValidationWarning: once per call, on the merged data of every scenario, if u_set of a transformer_tap_regulator
+        of a single_phase_transformer differs by more than 20% from the nominal voltage of the control side winding
+        (see validate_input_data). The warning names the scenarios. The data is still valid, so this does not change
+        the returned value.
     """
     input_data = _map_to_component_types(input_data)
     update_data = _map_to_component_types(update_data)
@@ -203,6 +214,8 @@ def validate_batch_data(
     errors = {}
     floating_windings: set[tuple[int, str]] = set()
     floating_scenarios: list[int] = []
+    off_nominal_regulators: set[int] = set()
+    off_nominal_scenarios: list[int] = []
     for batch, batch_update_data in enumerate(batch_data):
         row_update_data = _compatibility_convert_row_columnar_dataset(batch_update_data, None, DatasetType.update)
         assert_valid_data_structure(row_update_data, DatasetType.update)
@@ -223,6 +236,11 @@ def validate_batch_data(
             if floating:
                 floating_windings.update(floating)
                 floating_scenarios.append(batch)
+            # u_set can be updated too
+            off_nominal = _off_nominal_tap_regulator_u_set(merged_data, calculation_type)
+            if off_nominal:
+                off_nominal_regulators.update(off_nominal)
+                off_nominal_scenarios.append(batch)
             batch_errors += validate_required_values(merged_data, calculation_type, symmetric)
             batch_errors += validate_values(merged_data, calculation_type)
 
@@ -230,6 +248,7 @@ def validate_batch_data(
             errors[batch] = batch_errors
 
     _warn_floating_phase_to_phase_windings(sorted(floating_windings), floating_scenarios, len(batch_data))
+    _warn_off_nominal_tap_regulator_u_set(sorted(off_nominal_regulators), off_nominal_scenarios, len(batch_data))
     return errors or None
 
 
@@ -2120,12 +2139,28 @@ def validate_regulator(data: SingleDataset, component: CT) -> list[ValidationErr
         data,
         component,
         field=AT.regulated_object,
-        ref_components=[CT.transformer, CT.three_winding_transformer],
+        ref_components=[CT.transformer, CT.three_winding_transformer, CT.single_phase_transformer],
     )
     return errors
 
 
 def validate_transformer_tap_regulator(data: SingleDataset) -> list[ValidationError]:
+    """
+    Checks the values of the transformer_tap_regulator: the regulated object (a transformer, a three_winding_transformer
+    or a single_phase_transformer), the control side (a BranchSide for the two-winding transformers, a Branch3Side for
+    the three_winding_transformer), u_set, u_band and the line drop compensation. A single_phase_transformer that is
+    regulated, whatever the status of the regulator, must provide tap_min, tap_max and tap_size.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero or more ValidationErrors.
+
+    Warns:
+        ValidationWarning: this function does not warn; validate_input_data and validate_batch_data warn if u_set of a
+        regulator of a single_phase_transformer differs by more than 20% from the nominal winding voltage.
+    """
     errors = validate_regulator(data, CT.transformer_tap_regulator)
     errors += _all_boolean(data, CT.transformer_tap_regulator, AT.status)
     errors += _all_unique(data, CT.transformer_tap_regulator, AT.regulated_object)
@@ -2146,11 +2181,137 @@ def validate_transformer_tap_regulator(data: SingleDataset) -> list[ValidationEr
         [CT.three_winding_transformer],
         [Branch3Side],
     )
+    errors += _all_valid_associated_enum_values(
+        data,
+        CT.transformer_tap_regulator,
+        AT.control_side,
+        AT.regulated_object,
+        [CT.single_phase_transformer],
+        [BranchSide],
+    )
+    errors += _regulated_single_phase_transformer_taps(data)
     errors += _all_greater_than_or_equal_to_zero(data, CT.transformer_tap_regulator, AT.u_set)
     errors += _all_greater_than_zero(data, CT.transformer_tap_regulator, AT.u_band)
     errors += _all_greater_than_or_equal_to_zero(data, CT.transformer_tap_regulator, AT.line_drop_compensation_r, 0.0)
     errors += _all_greater_than_or_equal_to_zero(data, CT.transformer_tap_regulator, AT.line_drop_compensation_x, 0.0)
     return errors
+
+
+def _regulated_single_phase_transformer_taps(data: SingleDataset) -> list[MissingValueError]:
+    """
+    Checks that every single_phase_transformer that is the regulated object of a transformer_tap_regulator provides
+    tap_min, tap_max and tap_size, whatever the status of the regulator.
+
+    The C++ core raises an AutomaticTapInputError if tap_min or tap_max is missing: an omitted limit leaves the range
+    unbounded, which the automatic tap changer cannot search. tap_size is only checked here: the core cannot tell an
+    omitted tap_size from 0, and a regulator without a tap_size silently has no effect.
+
+    Args:
+        data: A power-grid-model input dataset
+
+    Returns:
+        A list containing zero to three MissingValueErrors, for tap_min, tap_max and tap_size.
+    """
+    spt = CT.single_phase_transformer
+    if spt not in data or data[spt].size == 0 or CT.transformer_tap_regulator not in data:
+        return []
+    spt_data = data[spt]
+    regulated = np.isin(spt_data[AT.id], data[CT.transformer_tap_regulator][AT.regulated_object])
+    errors = []
+    for field in (AT.tap_min, AT.tap_max, AT.tap_size):
+        nan = _nan_type(spt, field)
+        missing = np.isnan(spt_data[field]) if np.isnan(nan) else spt_data[field] == nan
+        missing &= regulated
+        if missing.any():
+            errors.append(MissingValueError(spt, field, spt_data[AT.id][missing].flatten().tolist()))
+    return errors
+
+
+def _off_nominal_tap_regulator_u_set(data: SingleDataset, calculation_type: CalculationType | None = None) -> list[int]:
+    """
+    Finds the transformer_tap_regulators of a single_phase_transformer whose u_set differs by more than 20% from the
+    nominal voltage of the control side winding, whatever the status of the regulator.
+
+    The nominal voltage is the voltage u_set is expressed in: u_rated/sqrt(3) of the node at the control side for a
+    phase-to-earth winding and for one leg of a centre-tapped winding, and u_rated for a phase-to-phase winding. Unknown
+    objects, nodes, connections and control sides and a missing u_set are skipped; they are reported by the validation
+    itself.
+
+    Args:
+        data: A power-grid-model input dataset
+        calculation_type: The calculation type; the regulator is only used in a power flow
+
+    Returns:
+        The sorted IDs of the regulators.
+    """
+    spt = CT.single_phase_transformer
+    regulator = CT.transformer_tap_regulator
+    if calculation_type not in (None, CalculationType.power_flow) or any(
+        component not in data or data[component].size == 0 for component in (spt, regulator, CT.node)
+    ):
+        return []
+    regulator_data = data[regulator]
+    spt_data = data[spt]
+    node_data = data[CT.node]
+    spt_idx = _get_indexer(spt_data[AT.id], regulator_data[AT.regulated_object], default_value=-1)
+    known = spt_idx >= 0
+    safe_idx = np.where(known, spt_idx, 0)
+    at_to_side = regulator_data[AT.control_side] == BranchSide.to_side
+    at_from_side = regulator_data[AT.control_side] == BranchSide.from_side
+    node_id = np.where(at_to_side, spt_data[AT.to_node][safe_idx], spt_data[AT.from_node][safe_idx])
+    connection = np.where(at_to_side, spt_data[AT.to_connection][safe_idx], spt_data[AT.from_connection][safe_idx])
+    node_idx = _get_indexer(node_data[AT.id], node_id, default_value=-1)
+    u_rated = np.where(node_idx >= 0, node_data[AT.u_rated][np.where(node_idx >= 0, node_idx, 0)], np.nan)
+    factor = np.select(
+        [
+            np.isin(connection, [*_PHASE_TO_EARTH_WINDINGS, WindingConnection1P.ab_center_tapped]),
+            np.isin(connection, _PHASE_TO_PHASE_WINDINGS),
+        ],
+        [1.0 / np.sqrt(3.0), 1.0],
+        default=np.nan,
+    )
+    u_nominal = factor * u_rated
+    u_set = regulator_data[AT.u_set]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        off_nominal = (
+            known & (at_to_side | at_from_side) & (u_nominal > 0) & (np.abs(u_set / u_nominal - 1.0) > 0.2)  # noqa: PLR2004
+        )
+    return sorted(regulator_data[AT.id][off_nominal].flatten().tolist())
+
+
+def _warn_off_nominal_tap_regulator_u_set(
+    regulators: list[int], scenarios: list[int] | None = None, n_scenarios: int = 0
+) -> None:
+    """
+    Warns about transformer_tap_regulators of single_phase_transformers whose u_set is far from the nominal voltage.
+
+    Args:
+        regulators: The IDs from _off_nominal_tap_regulator_u_set
+        scenarios: For batch data, the scenarios in which regulators were found
+        n_scenarios: For batch data, the total number of scenarios
+
+    Warns:
+        ValidationWarning: once, listing the regulators (and, for batch data, the number of scenarios).
+
+    Note:
+        The warning is attributed (stacklevel 3) to the caller of validate_input_data or validate_batch_data. When it is
+        reached through an assert_valid_* function, that is the assertion function.
+    """
+    if not regulators:
+        return
+    where = (
+        f" in {len(scenarios)} of {n_scenarios} batch scenarios (the first is scenario {scenarios[0]})"
+        if scenarios
+        else ""
+    )
+    warnings.warn(
+        f"{AT.u_set} of {CT.transformer_tap_regulator}(s) {regulators} of a {CT.single_phase_transformer}{where} "
+        "differs by more than 20% from the nominal voltage of the control side winding: the voltage of the winding "
+        "(u_rated/sqrt(3) of its node for a phase-to-earth winding and for one leg of a centre-tapped winding, and "
+        f"u_rated for a phase-to-phase winding), not the u_rated of the node. {AT.u_band} is in the same unit.",
+        ValidationWarning,
+        stacklevel=3,
+    )
 
 
 def validate_no_mixed_sensors_on_same_terminal(data: SingleDataset) -> list[ValidationError]:

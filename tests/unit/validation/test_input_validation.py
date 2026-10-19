@@ -1020,7 +1020,7 @@ def test_validate_input_data_transformer_tap_regulator(input_data):
             CT.transformer_tap_regulator,
             AT.regulated_object,
             [1],
-            [CT.transformer, CT.three_winding_transformer],
+            [CT.transformer, CT.three_winding_transformer, CT.single_phase_transformer],
         )
         in validation_errors
     )

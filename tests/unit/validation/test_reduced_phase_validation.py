@@ -10,6 +10,7 @@ two do not drift apart.
 """
 
 import warnings
+from typing import Any
 
 import numpy as np
 import pytest
@@ -24,16 +25,19 @@ from power_grid_model import (
 )
 from power_grid_model.enum import (
     AngleMeasurementType,
+    Branch3Side,
     BranchSide,
     CalculationType,
     LoadGenConnection,
     LoadGenType,
     MeasuredTerminalType,
     PhaseConnection,
+    TapChangingStrategy,
     WindingConnection1P,
     WindingType,
 )
 from power_grid_model.errors import (
+    AutomaticTapInputError,
     InvalidPhaseConnection,
     InvalidTransformerClock,
     IterationDiverge,
@@ -49,6 +53,7 @@ from power_grid_model.validation import (
 )
 from power_grid_model.validation._validation import _connected_components
 from power_grid_model.validation.errors import (
+    InvalidAssociatedEnumValueError,
     InvalidEnumValueError,
     InvalidIdError,
     InvalidValueError,
@@ -752,26 +757,289 @@ def test_single_phase_transformer_sensor_wrong_terminal_type(sensor_type: CT):
     )
 
 
+# Tap regulator on a single_phase_transformer
+REGULATOR_SPT_ID = 40
+SPT_TAPS = {AT.tap_side: BranchSide.from_side, AT.tap_min: -4, AT.tap_max: 4, AT.tap_size: 275.0}
+
+
+def _regulated_spt_input(
+    spt: np.ndarray | None = None, u_rated_to: float | None = None, regulator: dict | None = None
+) -> dict[CT, np.ndarray]:
+    """
+    A source at the from node, a load at the to node and a transformer_tap_regulator (to side, u_set 12.7 kV) of the
+    single_phase_transformer, which has from-side taps -4..4 of 275 V.
+    """
+    spt = _spt(**SPT_TAPS) if spt is None else spt
+    data = _spt_input(spt, u_rated_to=u_rated_to)
+
+    source = initialize_array(DatasetType.input, CT.source, 1)
+    source_values: dict[AT, float] = {AT.id: 2, AT.node: FROM_NODE, AT.status: 1, AT.u_ref: 1.0, AT.sk: 1e8}
+    for source_field, source_value in source_values.items():
+        source[source_field] = source_value
+    load = initialize_array(DatasetType.input, CT.asym_load, 1)
+    load_values: dict[AT, Any] = {
+        AT.id: 3,
+        AT.node: TO_NODE,
+        AT.status: 1,
+        AT.type: LoadGenType.const_power,
+        AT.p_specified: [[10e3, 0.0, 0.0]],
+        AT.q_specified: [[1e3, 0.0, 0.0]],
+    }
+    for load_field, load_value in load_values.items():
+        load[load_field] = load_value
+
+    regulator_array = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
+    regulator_values: dict[AT, Any] = {
+        AT.id: REGULATOR_SPT_ID,
+        AT.regulated_object: SPT_ID,
+        AT.status: 1,
+        AT.control_side: BranchSide.to_side,
+        AT.u_set: U_SWER,
+        AT.u_band: 400.0,
+        **(regulator or {}),
+    }
+    for regulator_field, regulator_value in regulator_values.items():
+        regulator_array[regulator_field] = regulator_value
+    return {**data, CT.source: source, CT.asym_load: load, CT.transformer_tap_regulator: regulator_array}
+
+
+def _validate_regulated(data: dict[CT, np.ndarray]):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValidationWarning)
+        return validate_input_data(data, CalculationType.power_flow, symmetric=False)
+
+
 def test_single_phase_transformer_tap_regulator():
-    regulator = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
-    regulator[AT.id] = 40
-    regulator[AT.regulated_object] = SPT_ID
-    regulator[AT.status] = 1
-    regulator[AT.control_side] = BranchSide.to_side
-    regulator[AT.u_set] = U_SWER
-    regulator[AT.u_band] = 200.0
-    input_data = _spt_input(_spt(), components={CT.transformer_tap_regulator: regulator})
-    errors = validate_input_data(input_data, CalculationType.power_flow, symmetric=False)
+    u_set, u_band = 13.1e3, 300.0
+    data = _regulated_spt_input(regulator={AT.u_set: u_set, AT.u_band: u_band})
+    assert _validate_regulated(data) is None
+    assert validate_input_data(data, symmetric=False) is None
+
+    # mirror: the C++ core regulates it
+    model = PowerGridModel(data)
+    result = model._calculate_power_flow(  # noqa: SLF001
+        symmetric=False,
+        tap_changing_strategy=TapChangingStrategy.any_valid_tap,
+        experimental_features="enabled",
+    )
+    u_a = result[CT.node][AT.u][1][0]
+    assert abs(u_a - u_set) <= u_band / 2
+    assert result[CT.transformer_tap_regulator][AT.tap_pos][0] != 0
+
+
+@pytest.mark.parametrize("control_side", [BranchSide.from_side, BranchSide.to_side])
+def test_single_phase_transformer_tap_regulator_control_side_valid(control_side: BranchSide):
+    u_set = U_SWER if control_side == BranchSide.to_side else U_MV
+    assert _validate_regulated(_regulated_spt_input(regulator={AT.control_side: control_side, AT.u_set: u_set})) is None
+
+
+def test_single_phase_transformer_tap_regulator_invalid_control_side():
+    # a three-winding transformer side
+    data = _regulated_spt_input(regulator={AT.control_side: Branch3Side.side_3})
+    assert _validate_regulated(data) == [
+        InvalidAssociatedEnumValueError(
+            CT.transformer_tap_regulator, [AT.control_side, AT.regulated_object], [REGULATOR_SPT_ID], [BranchSide]
+        )
+    ]
+    # not a side at all
+    errors = _validate_regulated(_regulated_spt_input(regulator={AT.control_side: 5}))
     assert errors is not None
     assert (
-        InvalidIdError(
-            CT.transformer_tap_regulator,
-            AT.regulated_object,
-            [40],
-            [CT.transformer, CT.three_winding_transformer],
+        InvalidEnumValueError(
+            CT.transformer_tap_regulator, AT.control_side, [REGULATOR_SPT_ID], [BranchSide, Branch3Side]
         )
         in errors
     )
+    # mirror
+    with pytest.raises(MissingCaseForEnumError):
+        PowerGridModel(data)._calculate_power_flow(  # noqa: SLF001
+            symmetric=False, tap_changing_strategy="any_valid_tap", experimental_features="enabled"
+        )
+
+
+@pytest.mark.parametrize("regulator_status", [1, 0])
+@pytest.mark.parametrize("field", [AT.tap_min, AT.tap_max, AT.tap_size])
+def test_single_phase_transformer_tap_regulator_missing_tap_field(field: AT, regulator_status: int):
+    # whatever the status of the regulator
+    taps = {key: value for key, value in SPT_TAPS.items() if key != field}
+    data = _regulated_spt_input(_spt(**taps), regulator={AT.status: regulator_status})
+    assert _validate_regulated(data) == [MissingValueError(CT.single_phase_transformer, field, [SPT_ID])]
+
+    # mirror: tap_min and tap_max are rejected by the C++ core; it cannot tell an omitted tap_size from 0
+    if field == AT.tap_size:
+        PowerGridModel(data)
+    else:
+        with pytest.raises(AutomaticTapInputError, match=rf"single_phase_transformer {SPT_ID} .* tap_min and tap_max"):
+            PowerGridModel(data)
+
+
+def test_single_phase_transformer_tap_regulator_missing_all_tap_fields():
+    data = _regulated_spt_input(_spt())
+    assert _validate_regulated(data) == [
+        MissingValueError(CT.single_phase_transformer, field, [SPT_ID])
+        for field in (AT.tap_min, AT.tap_max, AT.tap_size)
+    ]
+    with pytest.raises(AutomaticTapInputError):
+        PowerGridModel(data)
+
+
+def test_single_phase_transformer_tap_fields_optional_without_regulator():
+    data = _regulated_spt_input(_spt())
+    del data[CT.transformer_tap_regulator]
+    assert _validate_regulated(data) is None
+    PowerGridModel(data)
+
+    # another single_phase_transformer is regulated: only that one needs the tap fields
+    other = _spt(**{AT.id: SPT_ID + 1, AT.from_node: FROM_NODE, AT.to_node: TO_NODE})
+    data = _regulated_spt_input()
+    data[CT.single_phase_transformer] = np.concatenate([data[CT.single_phase_transformer], other])
+    assert _validate_regulated(data) is None
+
+
+def _u_set_warned(data: dict[CT, np.ndarray]) -> list:
+    """The u_set warnings (a phase-to-phase to side of this network has no earth reference)"""
+    return [warning for warning in _warned(data, CalculationType.power_flow) if "u_set" in str(warning.message)]
+
+
+@pytest.mark.parametrize(
+    ("spt_overrides", "regulator_overrides", "u_rated_to"),
+    [
+        pytest.param({}, {AT.u_set: U_MV}, None, id="phase-to-earth-line-voltage"),
+        pytest.param({}, {AT.u_set: 1.25 * U_SWER}, None, id="phase-to-earth-high"),
+        pytest.param({}, {AT.u_set: 0.75 * U_SWER}, None, id="phase-to-earth-low"),
+        pytest.param({}, {AT.u_set: U_MV, AT.status: 0}, None, id="status-off"),
+        pytest.param(
+            {AT.to_connection: WindingConnection1P.b}, {AT.u_set: U_MV}, None, id="phase-to-earth-other-phase"
+        ),
+        pytest.param(
+            {AT.u2: U_MV, AT.to_connection: WindingConnection1P.bc},
+            {AT.u_set: U_SWER},
+            None,
+            id="phase-to-phase-to-side",
+        ),
+        pytest.param(
+            {}, {AT.control_side: BranchSide.from_side, AT.u_set: U_SWER}, None, id="phase-to-phase-from-side"
+        ),
+        pytest.param(
+            {AT.u2: 480.0, AT.to_connection: WindingConnection1P.ab_center_tapped},
+            {AT.u_set: 480.0},
+            U_SPLIT_PHASE,
+            id="center-tapped-full-winding",
+        ),
+        pytest.param(
+            {AT.u2: 480.0, AT.to_connection: WindingConnection1P.ab_center_tapped},
+            {AT.u_set: 0.0},
+            U_SPLIT_PHASE,
+            id="center-tapped-zero",
+        ),
+    ],
+)
+def test_single_phase_transformer_tap_regulator_u_set_warning(
+    spt_overrides: dict, regulator_overrides: dict, u_rated_to: float | None
+):
+    data = _regulated_spt_input(_spt(**SPT_TAPS, **spt_overrides), u_rated_to, regulator_overrides)
+    record = _u_set_warned(data)
+    assert len(record) == 1
+    message = str(record[0].message)
+    assert f"[{REGULATOR_SPT_ID}]" in message
+    assert "u_set" in message
+    # the data is still valid (the phase-to-phase to side of this network has no earth reference either)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ValidationWarning)
+        assert validate_input_data(data, CalculationType.power_flow, symmetric=False) is None
+        assert_valid_input_data(data, CalculationType.power_flow, symmetric=False)
+
+
+@pytest.mark.parametrize(
+    ("spt_overrides", "regulator_overrides", "u_rated_to"),
+    [
+        pytest.param({}, {}, None, id="phase-to-earth"),
+        pytest.param({}, {AT.u_set: 1.15 * U_SWER}, None, id="phase-to-earth-fifteen-percent-high"),
+        pytest.param({}, {AT.u_set: 0.85 * U_SWER}, None, id="phase-to-earth-fifteen-percent-low"),
+        pytest.param({}, {AT.control_side: BranchSide.from_side, AT.u_set: U_MV}, None, id="phase-to-phase-from-side"),
+        pytest.param(
+            {AT.u2: U_MV, AT.to_connection: WindingConnection1P.bc}, {AT.u_set: U_MV}, None, id="phase-to-phase-to-side"
+        ),
+        pytest.param(
+            {AT.u2: 480.0, AT.to_connection: WindingConnection1P.ab_center_tapped},
+            {AT.u_set: 240.0},
+            U_SPLIT_PHASE,
+            id="center-tapped-leg",
+        ),
+        pytest.param(
+            {AT.u2: 480.0, AT.to_connection: WindingConnection1P.ab_center_tapped},
+            {AT.u_set: 250.0},
+            U_SPLIT_PHASE,
+            id="center-tapped-leg-250",
+        ),
+        pytest.param({}, {AT.regulated_object: 99, AT.u_set: U_MV}, None, id="unknown-regulated-object"),
+        pytest.param({}, {AT.control_side: 5, AT.u_set: U_MV}, None, id="unknown-control-side"),
+        pytest.param({AT.to_node: 99}, {AT.u_set: U_MV}, None, id="unknown-node"),
+        pytest.param({}, {AT.u_set: np.nan}, None, id="missing-u-set"),
+    ],
+)
+def test_single_phase_transformer_tap_regulator_u_set_no_warning(
+    spt_overrides: dict, regulator_overrides: dict, u_rated_to: float | None
+):
+    data = _regulated_spt_input(_spt(**SPT_TAPS, **spt_overrides), u_rated_to, regulator_overrides)
+    assert _u_set_warned(data) == []
+
+
+def test_single_phase_transformer_tap_regulator_u_set_warning_assertion():
+    data = _regulated_spt_input(regulator={AT.u_set: U_MV})
+    with pytest.warns(ValidationWarning, match="u_set") as record:
+        assert_valid_input_data(data, CalculationType.power_flow, symmetric=False)
+    assert len(record) == 1
+
+
+def test_single_phase_transformer_tap_regulator_u_set_only_checked_for_power_flow():
+    data = _regulated_spt_input(regulator={AT.u_set: U_MV})
+    assert len(_warned(data)) == 1
+    assert len(_warned(data, CalculationType.power_flow)) == 1
+    assert _warned(data, CalculationType.state_estimation) == []
+    assert _warned(data, CalculationType.short_circuit) == []
+
+
+def _u_set_update(u_set: list[float]) -> dict[CT, np.ndarray]:
+    update = initialize_array(DatasetType.update, CT.transformer_tap_regulator, (len(u_set), 1))
+    update[AT.id] = REGULATOR_SPT_ID
+    update[AT.u_set] = [[value] for value in u_set]
+    return {CT.transformer_tap_regulator: update}
+
+
+def _u_set_batch_warnings(data: dict[CT, np.ndarray], update: dict[CT, np.ndarray]) -> list:
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        assert validate_batch_data(data, update, CalculationType.power_flow, symmetric=False) is None
+    return [warning for warning in record if issubclass(warning.category, ValidationWarning)]
+
+
+def test_single_phase_transformer_tap_regulator_u_set_warning_batch():
+    # the input data is nominal, and only scenario 1 updates u_set far off
+    data = _regulated_spt_input()
+    record = _u_set_batch_warnings(data, _u_set_update([U_SWER, U_MV, 1.1 * U_SWER]))
+    assert len(record) == 1
+    message = str(record[0].message)
+    assert f"[{REGULATOR_SPT_ID}]" in message
+    assert "1 of 3" in message
+    assert "scenario 1" in message
+    with pytest.warns(ValidationWarning, match="u_set"):
+        assert_valid_batch_data(
+            data, _u_set_update([U_SWER, U_MV, 1.1 * U_SWER]), CalculationType.power_flow, symmetric=False
+        )
+
+    # one warning for several scenarios
+    record = _u_set_batch_warnings(data, _u_set_update([U_MV, U_SWER, 2 * U_SWER]))
+    assert len(record) == 1
+    assert "2 of 3" in str(record[0].message)
+    assert "scenario 0" in str(record[0].message)
+
+    # all scenarios nominal
+    assert _u_set_batch_warnings(data, _u_set_update([U_SWER, 1.1 * U_SWER, 0.9 * U_SWER])) == []
+
+    # the input data is off, but every scenario updates u_set
+    off_data = _regulated_spt_input(regulator={AT.u_set: U_MV})
+    assert _u_set_batch_warnings(off_data, _u_set_update([U_SWER, U_SWER])) == []
 
 
 # Load and generator connection
