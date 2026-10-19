@@ -1,0 +1,14 @@
+{
+  "calculation_method": [
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-06,
+  "atol": 0.0001,
+  "experimental_features": "enabled",
+  "raises": {
+    "raises": "AutomaticTapInputError",
+    "reason": "Automatic tap changer has invalid configuration. The single_phase_transformer 154 regulated by transformer_tap_regulator 402 needs both tap_min and tap_max."
+  },
+  "tap_changing_strategy": "any_valid_tap"
+}

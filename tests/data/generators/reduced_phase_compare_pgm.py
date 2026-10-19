@@ -10,9 +10,10 @@ The fields are transformed exactly like tests/unit/utils.py compare_result does 
 normalised on the first entry). A ratio below 0.1 means the tolerance passes with a 10x margin.
 
 Per calculation method the parameters are those of params.json overridden by params["extra_params"][<method>], as in
-the validation harnesses: rtol, atol, error_tolerance (default 1e-8), max_iterations (default 20) and
-calculation_initialization (default "default"). The "ratio with params" of a method uses its own rtol and atol. The
-candidate search is over all methods together, so it is not affected by extra_params.
+the validation harnesses: rtol, atol, error_tolerance (default 1e-8), max_iterations (default 20),
+calculation_initialization (default "default") and, for a power flow, tap_changing_strategy (default "disabled"). The
+"ratio with params" of a method uses its own rtol and atol. The candidate search is over all methods together, so it is
+not affected by extra_params.
 
 If no candidate of the standard grid (rtol up to 1e-6, atol up to 1e-4) passes, it also prints the passing
 candidates of a wider grid (rtol up to 1e-5, atol up to 1e-2). Reference rows may be in the compact format (lists, with
@@ -36,7 +37,12 @@ from pathlib import Path
 import numpy as np
 
 from power_grid_model import PowerGridModel
-from power_grid_model.enum import CalculationMethod, ShortCircuitVoltageScaling, _ExperimentalFeatures
+from power_grid_model.enum import (
+    CalculationMethod,
+    ShortCircuitVoltageScaling,
+    TapChangingStrategy,
+    _ExperimentalFeatures,
+)
 from power_grid_model.utils import json_deserialize_from_file
 
 CANDIDATES = [(r, a) for r in (1e-10, 1e-9, 1e-8, 1e-7, 1e-6) for a in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4)]
@@ -106,11 +112,13 @@ def run(case, params, method):
     }
     model = PowerGridModel(json_deserialize_from_file(case / "input.json"))
     enabled = _ExperimentalFeatures.enabled
+    tap_changing_strategy = TapChangingStrategy[mp.get("tap_changing_strategy", "disabled")]
     if (case / "asym_output.json").exists():
         result = model._calculate_power_flow(
             symmetric=False,
             calculation_method=CalculationMethod[method],
             **solver_options,
+            tap_changing_strategy=tap_changing_strategy,
             experimental_features=enabled,
         )
         return [(result, reference_data(case / "asym_output.json"))]
@@ -121,6 +129,7 @@ def run(case, params, method):
             calculation_method=CalculationMethod[method],
             **solver_options,
             update_data=update,
+            tap_changing_strategy=tap_changing_strategy,
             experimental_features=enabled,
         )
         references = reference_data(case / "asym_output_batch.json")

@@ -1,0 +1,19 @@
+Clear
+Set DefaultBaseFrequency=50
+New Circuit.c phases=3 basekv=11.0 pu=1.0 angle=0 bus1=n1 Z1=[0.1203995000154087, 1.203995000154087] Z0=[0.1203995000154087, 1.203995000154087]
+New Line.l101 phases=3 bus1=n1.1.2.3 bus2=n2.1.2.3 length=1 units=km rmatrix=[0.25 | 0.05 0.25 | 0.048 0.05 0.25] xmatrix=[0.4 | 0.15 0.4 | 0.13 0.15 0.4] cmatrix=[9.0 | -1.5 9.2 | -1.2 -1.5 9.0]
+New Transformer.t151 phases=1 windings=2 buses=[n2.1.2 n3.1.2] conns=[wye wye] kVs=[11.0 0.415] kVAs=[50.0 50.0] XHL=3.8157568056677826 %loadloss=1.2 %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[0.95 1.0]
+New Reactor.lo151n2 phases=2 bus1=n2.1.2 rmatrix=[0.0 | 0.0 0.0] xmatrix=[3226668279999193.5 | -3226665053334140.0 3226668279999193.5]
+New Reactor.lo151n3 phases=2 bus1=n3.1.2 rmatrix=[0.0 | 0.0 0.0] xmatrix=[4592668962998.852 | -4592664370334.481 4592668962998.852]
+New Transformer.t152 phases=1 windings=2 buses=[n2.2.3 n4.0.1] conns=[wye wye] kVs=[11.0 0.24] kVAs=[25.0 25.0] XHL=3.746998799039039 %loadloss=1.4 %noloadloss=0.0 %imag=0.0 ppm_antifloat=0 taps=[1.0 1.0]
+New Reactor.lo152n2 phases=2 bus1=n2.2.3 rmatrix=[0.0 | 0.0 0.0] xmatrix=[6453336559998387.0 | -6453330106668280.0 6453336559998387.0]
+New Load.ld301_a bus1=n3.1 phases=1 conn=wye model=2 kV=0.2396003617136947 kW=19.0 kvar=4.75 vminpu=0.1 vmaxpu=2
+New Load.ld301_b bus1=n3.2 phases=1 conn=wye model=2 kV=0.2396003617136947 kW=11.5 kvar=2.875 vminpu=0.1 vmaxpu=2
+New Load.ld303_a bus1=n3.1 phases=1 conn=wye model=1 kV=0.2396003617136947 kW=1.0 kvar=0.25 vminpu=0.1 vmaxpu=2
+New Load.ld303_b bus1=n3.2 phases=1 conn=wye model=1 kV=0.2396003617136947 kW=0.5 kvar=0.125 vminpu=0.1 vmaxpu=2
+New Load.ld302_a bus1=n4.1 phases=1 conn=wye model=1 kV=0.24 kW=15.0 kvar=4.0 vminpu=0.1 vmaxpu=2
+Set VoltageBases=[11.0, 0.4156921938165305, 0.415]
+CalcVoltageBases
+Set Tolerance=1e-12
+Set MaxIterations=200
+Solve

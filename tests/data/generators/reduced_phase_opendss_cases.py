@@ -18,6 +18,8 @@ model (test.dss) and the reference output computed by OpenDSS, plus a .license f
 - tests/data/power_flow/asym-load-delta/{three-phase, three-phase-linear, two-phase, two-phase-linear, split-phase,
   split-phase-flat-start, split-phase-linear, symmetric-not-supported, delta-on-absent-phase}
 - tests/data/state_estimation/asym-load-delta-not-supported
+- tests/data/power_flow/single-phase-transformer-tap-regulator/{swer-chain, split-phase, phase-to-phase}-{any,
+  fast-any, min, max}, split-phase-wide-band-{min, max}, swer-chain-batch and missing-tap-limits
 
 Run from the repository root (opendssdirect.py is not a project dependency, so it is added on the fly):
 
@@ -95,8 +97,28 @@ Modelling choices:
   |U_a| = u2 / 2. The to-side powers are the sums per node over both halves, the loading is
   max(|sum s_from|, 2 |s_a|, 2 |s_b|) / sn (each half is rated sn / 2), and the centre-tap electrode current is checked
   to equal I_a + I_b (KCL at node 4)
+- tap regulators (transformer_tap_regulator on a single_phase_transformer, D74): the expected taps do not depend on
+  how OpenDSS steps its own regulators. OpenDSS is solved with fixed taps for every combination of the tap positions
+  of the regulated transformers (the scan), and PGM's rule (D69, D70) is computed from the OpenDSS phasors: per slot of
+  the control side V_s = U_s + Z_c I_s (U_s the node voltage to true earth, I_s the current into the transformer, the
+  half-winding currents at the legs for a centre-tapped winding, Z_c = ldc_r + j ldc_x in ohm), then |V_p|,
+  |V_p - V_q| or the mean of the two legs. u_set is the controlled voltage at the target taps, rounded to 1 V, and
+  u_band is band_steps local tap steps. A narrow band (0.5 steps) must have exactly one valid combination, at least 10 %
+  of the band inside every band, with every other combination at least 10 % of the band outside some band; every
+  strategy must end there. A wide band (3 steps, a single regulator) must have at least 2 valid taps, and the expected
+  tap is the valid tap with the lowest (min_voltage_tap) or highest (max_voltage_tap) controlled voltage. The PGM input
+  starts at tap_nom; the reference (test.dss) is the fixed-tap solve at the expected taps, with tap_pos of every
+  regulator. Cross-check (test_regcontrol.dss): OpenDSS RegControls (ptratio=1, CTprim=1, vreg = u_set, band = u_band,
+  R and X = ldc_r and ldc_x, doubled for a phase-to-phase winding; bus= for a control winding with an electrode, which
+  watches the node-to-earth voltage without line drop compensation), with the tap grid of the from winding aligned with
+  the PGM positions, solved from the initial taps (ControlMode=STATIC), must land on the scanned taps, mapped back with
+  the inverse of taps(); a centre-tapped control winding is covered by the scan only (RegControl watches one half). A
+  power-flow batch (update_batch.json with asym_load updates, asym_output_batch.json) scans every scenario and the input
+  itself, which must have a valid combination too (a batch first regulates its input), and its scenarios must need
+  different taps
 """
 
+import itertools
 import json
 import math
 import sys
@@ -520,6 +542,67 @@ class Transformer1P:
         )
         return [transformer, *shunts]
 
+    def tap_positions(self):
+        """all tap positions of a transformer with both limits, from the lowest to the highest number"""
+        assert self.tap_min is not None, "a regulated transformer has both tap limits"
+        assert self.tap_max is not None, "a regulated transformer has both tap limits"
+        return list(range(min(self.tap_min, self.tap_max), max(self.tap_min, self.tap_max) + 1))
+
+    def tap_direction(self):
+        """+1, or -1 for reversed numbering (tap_max < tap_min); a higher position raises the tapped winding voltage
+        by direction * tap_size"""
+        return -1 if self.tap_max < self.tap_min else 1
+
+    def dss_tap_grid(self):
+        """the OpenDSS tap grid of the from winding (MinTap, MaxTap, NumTaps), aligned with the PGM positions, so that
+        each OpenDSS tap step is one PGM position; OpenDSS numbers the taps from MinTap whatever the PGM numbering"""
+        assert self.tap_side == "from", "the OpenDSS cases only have from-side taps"
+        offsets = [self.tap_direction() * (p - self.tap_nom) * self.tap_size for p in self.tap_positions()]
+        return 1.0 + min(offsets) / self.u1, 1.0 + max(offsets) / self.u1, abs(self.tap_max - self.tap_min)
+
+    def position_of_dss_tap(self, tap):
+        """the PGM tap position of an OpenDSS tap ratio of the from winding (the inverse of taps())"""
+        steps = (tap - 1.0) * self.u1 / self.tap_size
+        k = round(steps)
+        assert abs(steps - k) < 1e-6, f"OpenDSS tap {tap} of transformer {self.id} is not on the PGM grid ({steps})"
+        position = self.tap_nom + self.tap_direction() * k
+        assert position in self.tap_positions(), f"OpenDSS tap {tap} of transformer {self.id} is out of range"
+        return position
+
+
+@dataclass
+class Regulator:
+    """a transformer_tap_regulator of a single_phase_transformer; the generator chooses u_set and u_band (see
+    design_regulators), unless they are given"""
+
+    id: int
+    transformer: int  # the regulated single_phase_transformer
+    # the tap position at which the controlled voltage defines u_set (the other regulators at their targets)
+    target: int
+    control_side: str = "to"
+    # line drop compensation (ohm per conductor)
+    ldc_r: float = 0.0
+    ldc_x: float = 0.0
+    # u_band in local tap steps: below 1 exactly one tap combination is valid, above 1 several (the wide band, where
+    # min_voltage_tap and max_voltage_tap differ)
+    band_steps: float = 0.5
+    u_set: float | None = None
+    u_band: float | None = None
+
+    def pgm(self):
+        assert self.u_set is not None, "u_set is designed before the input is written"
+        assert self.u_band is not None, "u_band is designed before the input is written"
+        return {
+            "id": self.id,
+            "regulated_object": self.transformer,
+            "status": 1,
+            "control_side": BRANCH_SIDE[self.control_side],
+            "u_set": self.u_set,
+            "u_band": self.u_band,
+            "line_drop_compensation_r": self.ldc_r,
+            "line_drop_compensation_x": self.ldc_x,
+        }
+
 
 # OpenDSS replaces r = 0 of a Fault by 1e-4 ohm, so a bolted fault gets this resistance instead
 DSS_BOLTED_FAULT_R = 1e-13
@@ -611,9 +694,16 @@ class Case:
     transformers: list = field(default_factory=list)
     # write the asym_load / asym_gen outputs (p, q, i per phase) to the reference as well
     load_output: bool = False
+    # transformer_tap_regulators (power flow); the transformers start at tap_nom in the input
+    regulators: list = field(default_factory=list)
+    # a power-flow batch: per scenario the asym_loads that the update changes (p and q, by ID)
+    pf_scenarios: list = field(default_factory=list)
 
     def u_node(self, node):
         return self.node_u_rated.get(node, self.u_rated)
+
+    def transformer(self, transformer_id):
+        return next(t for t in self.transformers if t.id == transformer_id)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -666,6 +756,8 @@ def pgm_input(case: Case, scenario: tuple[Fault, ...]):
         items = [load.pgm() for load in case.loads if load.kind == kind]
         if items:
             data[kind] = items
+    if case.regulators:
+        data["transformer_tap_regulator"] = [regulator.pgm() for regulator in case.regulators]
     if case.faults:
         # every fault ID: the faults of the scenario with status 1, the others with status 0 (at their first appearance)
         present = {f.id: f for f in scenario}
@@ -1315,8 +1407,10 @@ def fault_currents(fault: Fault):
     return i_f
 
 
-def transformer_sc_reference(transformer: Transformer1P, i_f):
-    """per-phase winding currents of both sides (the conductors at earth and at the electrode are dropped)"""
+def transformer_currents(transformer: Transformer1P):
+    """per-phase currents into the transformer at both sides, as PGM's branch currents: the winding currents (the
+    conductors at earth and at the electrode dropped; the two halves of a centre-tapped winding at their legs) plus the
+    current of the low susceptance of a phase-to-phase winding"""
     i_from, i_to = terminal_values(f"Transformer.t{transformer.id}", dss.CktElement.Currents, 2)
     for k, (node, conn) in enumerate(
         ((transformer.from_node, transformer.from_conn), (transformer.to_node, transformer.to_conn))
@@ -1325,6 +1419,12 @@ def transformer_sc_reference(transformer: Transformer1P, i_f):
             # PGM includes the low susceptance of a phase-to-phase winding in the branch, as for the powers
             i_low, _ = terminal_values(f"Reactor.lo{transformer.id}n{node}", dss.CktElement.Currents, 2)
             (i_from if k == 0 else i_to)[:] += i_low
+    return i_from, i_to
+
+
+def transformer_sc_reference(transformer: Transformer1P, i_f):
+    """per-phase winding currents of both sides (the conductors at earth and at the electrode are dropped)"""
+    i_from, i_to = transformer_currents(transformer)
     check_electrodes(transformer, i_f)
     if not transformer.from_status:
         i_from = np.zeros(3, dtype=complex)
@@ -1400,6 +1500,277 @@ def check_center_tap_electrode(transformer: Transformer1P, i_f=None):
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# tap regulators
+
+# a valid tap combination puts every controlled voltage at least this fraction of u_band inside its band (from both
+# edges); every other combination puts some controlled voltage at least this fraction of u_band outside its band
+BAND_MARGIN = 0.1
+# the OpenDSS RegControl check: control iterations allowed (Set MaxControlIter)
+REGCONTROL_MAX_ITERATIONS = 100
+
+
+def with_taps(case: Case, taps: dict[int, int]):
+    """the case with the given tap positions (transformer ID -> position); for the OpenDSS model only, since the PGM
+    input keeps the initial taps"""
+    return replace(
+        case, transformers=[replace(t, tap_pos=taps[t.id]) if t.id in taps else t for t in case.transformers]
+    )
+
+
+def control_winding(case: Case, regulator: Regulator):
+    """(node, connection, r_g, x_g) of the control side of a regulator"""
+    t = case.transformer(regulator.transformer)
+    if regulator.control_side == "to":
+        return t.to_node, t.to_conn, t.r_g_to, t.x_g_to
+    return t.from_node, t.from_conn, t.r_g_from, t.x_g_from
+
+
+def controlled_voltage(case: Case, regulator: Regulator):
+    """PGM's controlled voltage of a regulator (D69, D70), computed independently of PGM from the OpenDSS phasors
+    after a solve: per slot s of the control side the compensated voltage V_s = U_s + Z_c I_s, with U_s the node
+    voltage to true earth, I_s the current into the transformer (transformer_currents) and Z_c = ldc_r + j ldc_x; then
+    |V_p| for a phase-to-earth winding, |V_p - V_q| for a phase-to-phase winding and (|V_a| + |V_b|) / 2 for a
+    centre-tapped winding (the mean of the legs)"""
+    node, conn, _, _ = control_winding(case, regulator)
+    u = bus_phasors(node)
+    i_from, i_to = transformer_currents(case.transformer(regulator.transformer))
+    i = i_to if regulator.control_side == "to" else i_from
+    z = complex(regulator.ldc_r, regulator.ldc_x)
+    v = [u.get(k + 1, 0j) + z * i[k] for k in range(3)]
+    if conn == CENTER_TAPPED:
+        return 0.5 * (abs(v[0]) + abs(v[1]))
+    if len(conn) == 2:
+        p, q = ("abc".index(x) for x in conn)
+        return abs(v[p] - v[q])
+    return abs(v["abc".index(conn)])
+
+
+def solve_controlled_voltages(case: Case, taps: dict[int, int]):
+    """the controlled voltage of every regulator, with fixed taps in OpenDSS"""
+    run_dss(dss_script(with_taps(case, taps), (), 1.0, with_loads=True))
+    return [controlled_voltage(case, regulator) for regulator in case.regulators]
+
+
+def design_regulators(case: Case):
+    """u_set and u_band of the regulators without them: u_set is the controlled voltage with every regulator at its
+    target tap (with the loads of the input), rounded to 1 V; u_band is band_steps local tap steps, rounded to 0.1 V,
+    where the local tap step is the mean change of the controlled voltage for one position down and up (the other
+    regulators at their targets)"""
+    targets = {r.transformer: r.target for r in case.regulators}
+    at_target = solve_controlled_voltages(case, targets)
+    designed = []
+    for k, regulator in enumerate(case.regulators):
+        if regulator.u_set is not None:
+            designed.append(regulator)
+            continue
+        transformer = case.transformer(regulator.transformer)
+        steps = [
+            abs(solve_controlled_voltages(case, {**targets, transformer.id: position})[k] - at_target[k])
+            for position in (regulator.target - 1, regulator.target + 1)
+            if position in transformer.tap_positions()
+        ]
+        step = sum(steps) / len(steps)
+        u_set = float(round(float(at_target[k])))
+        u_band = float(round(regulator.band_steps * step, 1))
+        print(
+            f"  regulator {regulator.id}: {at_target[k]:.3f} V at tap {regulator.target}, local step {step:.3f} V:"
+            f" u_set {u_set} V, u_band {u_band} V"
+        )
+        designed.append(replace(regulator, u_set=u_set, u_band=u_band))
+    return replace(case, regulators=designed)
+
+
+def scan(case: Case):
+    """the controlled voltages of all regulators for every combination of the tap positions of the regulated
+    transformers (fixed taps in OpenDSS)"""
+    transformers = [case.transformer(r.transformer) for r in case.regulators]
+    ids = [t.id for t in transformers]
+    return {
+        combination: solve_controlled_voltages(case, dict(zip(ids, combination)))
+        for combination in itertools.product(*(t.tap_positions() for t in transformers))
+    }
+
+
+def band_position(regulator: Regulator, voltage):
+    """|voltage - u_set| / u_band: up to 0.5 is inside the band"""
+    return abs(voltage - regulator.u_set) / regulator.u_band
+
+
+def valid_combinations(case: Case, voltages, label):
+    """the tap combinations that put every controlled voltage inside its band, at least BAND_MARGIN of the band from
+    both edges; every other combination must put some controlled voltage at least BAND_MARGIN of the band outside its
+    band, so that the valid set does not depend on the solver accuracy; prints the margins (in % of u_band)"""
+    positions = {c: [band_position(r, v) for r, v in zip(case.regulators, vs)] for c, vs in voltages.items()}
+    valid = [c for c, d in positions.items() if max(d) <= 0.5 - BAND_MARGIN]
+    inside = min(0.5 - max(positions[c]) for c in valid) if valid else float("nan")
+    outside = min(max(d) - 0.5 for c, d in positions.items() if c not in valid)
+    assert valid, f"{label}: no tap combination is inside every band with margin"
+    assert outside >= BAND_MARGIN, f"{label}: an invalid tap combination is too close to a band edge ({outside:.3f})"
+    print(
+        f"  {label}: {len(valid)} of {len(voltages)} tap combinations valid {valid}; margins: valid"
+        f" {100 * inside:.1f} % of the band inside, invalid {100 * outside:.1f} % outside"
+    )
+    return valid
+
+
+def expected_taps(case: Case, voltages, label):
+    """the tap positions that PGM must find (transformer ID -> position): the only valid combination for a narrow
+    band (band_steps < 1, for every strategy); for a wide band (a single regulator) the valid tap with the lowest
+    (min_voltage_tap) or highest (max_voltage_tap) controlled voltage"""
+    valid = valid_combinations(case, voltages, label)
+    ids = [r.transformer for r in case.regulators]
+    strategy = case.params["tap_changing_strategy"]
+    if all(r.band_steps < 1.0 for r in case.regulators):
+        assert len(valid) == 1, f"{label}: the narrow band has {len(valid)} valid tap combinations"
+        return dict(zip(ids, valid[0])), valid
+    assert len(case.regulators) == 1, "a wide band is only defined for a single regulator"
+    assert len(valid) >= 2, f"{label}: the wide band has a single valid tap, so min and max do not differ"
+    choose = {"min_voltage_tap": min, "max_voltage_tap": max}[strategy]
+    return dict(zip(ids, choose(valid, key=lambda c: voltages[c][0]))), valid
+
+
+def regcontrol_applicable(case: Case):
+    """OpenDSS RegControl watches one winding, so a centre-tapped control winding is checked by the scan only"""
+    return all(control_winding(case, r)[1] != CENTER_TAPPED for r in case.regulators)
+
+
+def regcontrol_script(case: Case):
+    """the network with an OpenDSS RegControl per regulator, from the initial taps of the input: ptratio=1 and
+    CTprim=1, so vreg and band are winding volts and R and X ohms (twice the per-conductor ldc_r and ldc_x for a
+    phase-to-phase winding, the 2-wire loop); a control winding with an electrode watches the voltage of its node to
+    earth (bus=, which has no line drop compensation); the transformer's tap grid is aligned with the PGM positions,
+    and the regulators act in order (the delay grows with the position in Case.regulators)"""
+    script = dss_script(case, (), 1.0, with_loads=True)
+    assert script[-1] == "Solve"
+    lines = script[:-1]
+    for k, regulator in enumerate(case.regulators):
+        transformer = case.transformer(regulator.transformer)
+        min_tap, max_tap, num_taps = transformer.dss_tap_grid()
+        lines.append(
+            f"Edit Transformer.t{transformer.id} wdg=1 MinTap={min_tap!r} MaxTap={max_tap!r} NumTaps={num_taps}"
+        )
+        node, conn, r_g, x_g = control_winding(case, regulator)
+        if r_g is not None or x_g is not None:
+            assert len(conn) == 1, "an electrode is only on a phase-to-earth winding here"
+            assert regulator.ldc_r == 0.0, "OpenDSS has no line drop compensation with bus="
+            assert regulator.ldc_x == 0.0, "OpenDSS has no line drop compensation with bus="
+            watched = f"bus=n{node}.{'abc'.index(conn) + 1}"
+        else:
+            loop = 2.0 if len(conn) == 2 else 1.0
+            watched = f"R={loop * regulator.ldc_r!r} X={loop * regulator.ldc_x!r}"
+        lines.append(
+            f"New RegControl.r{regulator.id} transformer=t{transformer.id}"
+            f" winding={2 if regulator.control_side == 'to' else 1} TapWinding=1 vreg={regulator.u_set!r}"
+            f" band={regulator.u_band!r} ptratio=1 CTprim=1 {watched} delay={15.0 * (k + 1)!r}"
+        )
+    return [*lines, "Set ControlMode=STATIC", f"Set MaxControlIter={REGCONTROL_MAX_ITERATIONS}", "Solve"]
+
+
+def check_regcontrol(case: Case, valid, expected, label):
+    """the RegControl cross-check: OpenDSS's own regulators, from the initial taps, land on a valid combination of the
+    scan, which for a narrow band is the expected one; returns the script"""
+    script = regcontrol_script(case)
+    run_dss(script)
+    iterations = dss.Solution.ControlIterations()
+    assert iterations < REGCONTROL_MAX_ITERATIONS, f"{label}: RegControl did not settle in {iterations} iterations"
+    taps = {}
+    for regulator in case.regulators:
+        transformer = case.transformer(regulator.transformer)
+        dss.Transformers.Name(f"t{transformer.id}")
+        assert dss.Transformers.Name() == f"t{transformer.id}"
+        dss.Transformers.Wdg(1)
+        taps[transformer.id] = transformer.position_of_dss_tap(dss.Transformers.Tap())
+    combination = tuple(taps[r.transformer] for r in case.regulators)
+    assert combination in valid, f"{label}: RegControl landed on {combination}, not on a valid combination {valid}"
+    if len(valid) == 1:
+        assert taps == expected, f"{label}: RegControl landed on {taps} instead of {expected}"
+    print(f"  {label}: OpenDSS RegControl lands on the taps {taps} ({iterations} control iterations)")
+    return script
+
+
+def merged_loads(case: Case, updates: list[Load]):
+    """the loads of the case with the p and q of the updated loads (by ID)"""
+    by_id = {load.id: load for load in updates}
+    for load in updates:
+        base = next(b for b in case.loads if b.id == load.id)
+        assert base.kind == load.kind == "asym_load", "the power-flow batch updates asym_loads only"
+        assert (base.node, base.type, base.status, base.connection) == (load.node, load.type, load.status, "wye")
+    return [by_id.get(load.id, load) for load in case.loads]
+
+
+def generate_regulated_power_flow(case: Case, target: Path):
+    """a power flow with tap regulators (single or batch): per scenario the fixed-tap scan gives the expected taps,
+    the OpenDSS solve at those taps is the reference (test.dss), and RegControl must agree (test_regcontrol.dss)"""
+    if case.pf_scenarios:
+        # a batch first regulates the input itself (the cache run of the optimizer), which then needs a valid tap too
+        valid_combinations(case, scan(case), "input")
+        scenario_cases = [replace(case, loads=merged_loads(case, updates)) for updates in case.pf_scenarios]
+    else:
+        scenario_cases = [case]
+    scripts = []
+    regcontrol_scripts = []
+    references = []
+    expected_per_scenario = []
+    for k, scenario_case in enumerate(scenario_cases):
+        label = f"scenario {k}" if case.pf_scenarios else "scan"
+        expected, valid = expected_taps(scenario_case, scan(scenario_case), label)
+        expected_per_scenario.append(expected)
+        print(f"  {label}: expected taps {expected} ({case.params['tap_changing_strategy']})")
+        reference_case = with_taps(scenario_case, expected)
+        script = dss_script(reference_case, (), 1.0, with_loads=True)
+        run_dss(script, reference_case)
+        check_delta_load_bases(reference_case)
+        reference = pf_reference(reference_case)
+        for transformer in reference_case.transformers:
+            if transformer.center_tapped():
+                check_electrodes(transformer)
+        reference["transformer_tap_regulator"] = [
+            {"id": r.id, "tap_pos": expected[r.transformer]} for r in case.regulators
+        ]
+        references.append(reference)
+        scripts.append(script)
+        if regcontrol_applicable(scenario_case):
+            regcontrol_scripts.append(check_regcontrol(scenario_case, valid, expected, label))
+    if case.pf_scenarios:
+        distinct = {tuple(sorted(e.items())) for e in expected_per_scenario}
+        assert len(distinct) == len(expected_per_scenario), "the scenarios of the batch need different taps"
+
+    def joined(script_list):
+        text = []
+        for k, script in enumerate(script_list):
+            if len(script_list) > 1:
+                text.append(f"! scenario {k}")
+            text += script
+            text.append("")
+        return "\n".join(text)
+
+    write_text(target / "test.dss", joined(scripts))
+    if regcontrol_scripts:
+        write_text(target / "test_regcontrol.dss", joined(regcontrol_scripts))
+    if not case.pf_scenarios:
+        write_json(target / "asym_output.json", output_dataset("asym_output", references[0]))
+        return
+    write_json(
+        target / "update_batch.json",
+        {
+            "version": "1.0",
+            "type": "update",
+            "is_batch": True,
+            "attributes": {},
+            "data": [
+                {
+                    "asym_load": [
+                        {"id": load.id, "p_specified": list(load.p), "q_specified": list(load.q)} for load in updates
+                    ]
+                }
+                for updates in case.pf_scenarios
+            ],
+        },
+    )
+    write_json(target / "asym_output_batch.json", output_dataset("asym_output", references, is_batch=True))
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # writing
 
 
@@ -1421,6 +1792,8 @@ def generate(case: Case, root: Path):
     target = root / case.path
     target.mkdir(parents=True, exist_ok=True)
     print(f"{case.path}")
+    if case.regulators and case.raises_only is None:
+        case = design_regulators(case)
     scenarios = fault_scenarios(case)
     write_json(target / "input.json", pgm_input(case, scenarios[0] if scenarios else ()))
     write_json(target / "params.json", case.params)
@@ -1444,6 +1817,9 @@ def generate(case: Case, root: Path):
             check_transformer(transformer)
 
     if case.calculation == "power_flow":
+        if case.regulators:
+            generate_regulated_power_flow(case, target)
+            return
         script = dss_script(case, (), 1.0, with_loads=True)
         run_dss(script, case)
         check_delta_load_bases(case)
@@ -1519,8 +1895,10 @@ def sc_raises_params(raises, reason):
 IC_ERROR_TOLERANCE = 1e-10
 
 
-def pf_params(methods, rtol, atol):
+def pf_params(methods, rtol, atol, tap_changing_strategy=None):
     params = {"calculation_method": methods, "rtol": rtol, "atol": atol, "experimental_features": "enabled"}
+    if tap_changing_strategy is not None:
+        params["tap_changing_strategy"] = tap_changing_strategy
     if "iterative_current" in methods:
         params["extra_params"] = {"iterative_current": {"error_tolerance": IC_ERROR_TOLERANCE}}
     return params
@@ -1987,6 +2365,238 @@ def delta_cases():
     ]
 
 
+REGULATOR_PATH = "power_flow/single-phase-transformer-tap-regulator/"
+STRATEGY_SUFFIX = {
+    "any_valid_tap": "any",
+    "fast_any_tap": "fast-any",
+    "min_voltage_tap": "min",
+    "max_voltage_tap": "max",
+}
+
+
+def regulator_params(strategy, rtol, atol):
+    return pf_params(["newton_raphson", "iterative_current"], rtol, atol, strategy)
+
+
+def swer_regulator_case(path, params):
+    """22 kV abc -> SWER isolating transformer 151 ab -> a (electrode, from-side taps -4..4, regulator 401 on its
+    12.7 kV side, rank 1) -> 20 km SWER line -> SWER line regulator 154 a -> a (reversed numbering 8..-8, regulator 402
+    on its to side with the line drop compensation of the 10 km SWER line after it; rank 2, reached only through the
+    asym_line) -> 10 km SWER line -> 240 V distribution transformer 152 (fixed tap)"""
+    return Case(
+        path=path,
+        u_rated=SWER_U,
+        nodes=[1, 2, 3, 4, 5, 6, 7],
+        node_u_rated={7: LV_U},
+        lines=[
+            Line(101, 1, 2, "abc", 2.0),
+            Line(102, 3, 4, "a", 20.0, swer=True),
+            Line(103, 5, 6, "a", 10.0, swer=True),
+        ],
+        transformers=[
+            Transformer1P(
+                151,
+                2,
+                3,
+                "ab",
+                "a",
+                22e3,
+                12.7e3,
+                200e3,
+                0.05,
+                2000.0,
+                r_g_to=5.0,
+                x_g_to=0.1,
+                tap_pos=0,
+                tap_nom=0,
+                tap_min=-4,
+                tap_max=4,
+                tap_size=275.0,
+                tap_side="from",
+            ),
+            Transformer1P(
+                154,
+                4,
+                5,
+                "a",
+                "a",
+                12.7e3,
+                12.7e3,
+                100e3,
+                0.01,
+                300.0,
+                tap_pos=0,
+                tap_nom=0,
+                tap_min=8,
+                tap_max=-8,
+                tap_size=0.00625 * 12.7e3,
+                tap_side="from",
+            ),
+            Transformer1P(
+                152,
+                6,
+                7,
+                "a",
+                "a",
+                12.7e3,
+                240.0,
+                25e3,
+                0.04,
+                400.0,
+                tap_pos=1,
+                tap_nom=0,
+                tap_min=-2,
+                tap_max=2,
+                tap_size=0.025 * 12.7e3,
+                tap_side="from",
+            ),
+        ],
+        loads=swer_regulator_loads(1.0),
+        regulators=[
+            Regulator(401, 151, target=-2),
+            Regulator(402, 154, target=4, ldc_r=10.0 * R_SWER_PER_KM, ldc_x=10.0 * X_SWER_PER_KM),
+        ],
+        params=params,
+    )
+
+
+def swer_regulator_loads(scale):
+    """the loads of the swer regulator network, all scaled by scale"""
+    return [
+        Load(301, 3, "asym_load", "const_pq", [scale * 30e3, 0.0, 0.0], [scale * 10e3, 0.0, 0.0]),
+        Load(302, 4, "asym_load", "const_pq", [scale * 20e3, 0.0, 0.0], [scale * 6e3, 0.0, 0.0]),
+        Load(303, 5, "asym_load", "const_pq", [scale * 15e3, 0.0, 0.0], [scale * 5e3, 0.0, 0.0]),
+        Load(304, 6, "asym_load", "const_pq", [scale * 10e3, 0.0, 0.0], [scale * 3e3, 0.0, 0.0]),
+        Load(305, 7, "asym_load", "const_pq", [scale * 12e3, 0.0, 0.0], [scale * 4e3, 0.0, 0.0]),
+        Load(306, 7, "asym_load", "const_y", [scale * 6e3, 0.0, 0.0], [scale * 2e3, 0.0, 0.0]),
+    ]
+
+
+def split_phase_regulator_case(path, params, band_steps):
+    """22 kV abc -> bc -> 240-0-240 V centre-tapped transformer 151 (clock 6, uk_half/pk_half, centre-tap electrode,
+    from-side taps -4..4 x 2.5 %) with an ab service line; regulator 401 on the to side regulates the mean of the two
+    leg voltages, each with the line drop compensation of the service line (its Kron-reduced self impedance);
+    unbalanced leg loads"""
+    service_line = Line(102, 3, 4, "ab", 0.3, neutral=True)
+    z_service = service_line.z_phase()[0, 0]
+    return Case(
+        path=path,
+        u_rated=SWER_U,
+        nodes=[1, 2, 3, 4],
+        node_u_rated={3: LV_U, 4: LV_U},
+        lines=[Line(101, 1, 2, "abc", 2.0), service_line],
+        transformers=[
+            Transformer1P(
+                151,
+                2,
+                3,
+                "bc",
+                CENTER_TAPPED,
+                22e3,
+                480.0,
+                50e3,
+                0.035,
+                500.0,
+                clock=6,
+                r_g_to=0.5,
+                x_g_to=0.05,
+                uk_half=0.022,
+                pk_half=200.0,
+                tap_pos=0,
+                tap_nom=0,
+                tap_min=-4,
+                tap_max=4,
+                tap_size=0.025 * 22e3,
+                tap_side="from",
+            ),
+        ],
+        loads=[
+            Load(301, 3, "asym_load", "const_pq", [12e3, 5e3, 0.0], [4e3, 1.5e3, 0.0]),
+            Load(302, 3, "asym_load", "const_y", [2e3, 3e3, 0.0], [0.6e3, 1e3, 0.0]),
+            Load(303, 4, "asym_load", "const_pq", [4e3, 2e3, 0.0], [1.2e3, 0.6e3, 0.0]),
+            Load(304, 4, "asym_load", "const_i", [1e3, 2.5e3, 0.0], [0.3e3, 0.8e3, 0.0]),
+        ],
+        regulators=[
+            Regulator(401, 151, target=-2, ldc_r=z_service.real, ldc_x=z_service.imag, band_steps=band_steps),
+        ],
+        params=params,
+    )
+
+
+def phase_to_phase_regulator_case(path, params):
+    """the phase-to-phase network (11 kV abc -> ab -> ab 415 V with mostly const_y loads, and bc -> a with clock 6),
+    with from-side taps -4..4 x 2.5 % on the ab transformer 151 and regulator 401 on its to side, with the line drop
+    compensation of a 0.2 km two-wire service line (per conductor; |V_a - V_b| then compensates the 2-wire loop)"""
+    case = phase_to_phase_case(path, all_const_y=False, methods=["newton_raphson", "iterative_current"])
+    tapped = replace(
+        case.transformer(151), tap_pos=0, tap_nom=0, tap_min=-4, tap_max=4, tap_size=0.025 * 11e3, tap_side="from"
+    )
+    z1_per_km = complex(R_PER_KM[0, 0] - R_PER_KM[0, 1], X_PER_KM[0, 0] - X_PER_KM[0, 1])
+    return replace(
+        case,
+        transformers=[tapped if t.id == 151 else t for t in case.transformers],
+        regulators=[Regulator(401, 151, target=-2, ldc_r=0.2 * z1_per_km.real, ldc_x=0.2 * z1_per_km.imag)],
+        params=params,
+    )
+
+
+def single_phase_regulator_cases():
+    """the tap regulator cases (FU5, D74): per network every strategy, a wide band, a batch and missing tap limits.
+    Tolerances by the rule above: the swer-chain and split-phase cases need atol 1e-6 for the near-zero powers of the
+    22 kV line on its unloaded phase (as swer-chain); swer-chain-batch passes with no atol up to 1e-6 (a near-zero
+    power of 1e-7 W on that phase in the minimum-demand scenario), so it gets the smallest passing atol, 1e-5, with
+    the smallest rtol for it"""
+    cases = []
+    for strategy, suffix in STRATEGY_SUFFIX.items():
+        cases.append(
+            swer_regulator_case(f"{REGULATOR_PATH}swer-chain-{suffix}", regulator_params(strategy, 1e-8, 1e-6))
+        )
+    for strategy, suffix in STRATEGY_SUFFIX.items():
+        cases.append(
+            split_phase_regulator_case(
+                f"{REGULATOR_PATH}split-phase-{suffix}", regulator_params(strategy, 1e-8, 1e-6), band_steps=0.5
+            )
+        )
+    for strategy, suffix in (("min_voltage_tap", "min"), ("max_voltage_tap", "max")):
+        cases.append(
+            split_phase_regulator_case(
+                f"{REGULATOR_PATH}split-phase-wide-band-{suffix}",
+                regulator_params(strategy, 1e-8, 1e-6),
+                band_steps=3.0,
+            )
+        )
+    for strategy, suffix in STRATEGY_SUFFIX.items():
+        cases.append(
+            phase_to_phase_regulator_case(
+                f"{REGULATOR_PATH}phase-to-phase-{suffix}", regulator_params(strategy, 1e-8, 1e-8)
+            )
+        )
+    # maximum and minimum demand (30 %); the input has the maximum demand, which has a valid tap itself (the cache run)
+    batch = swer_regulator_case(f"{REGULATOR_PATH}swer-chain-batch", regulator_params("any_valid_tap", 1e-8, 1e-5))
+    cases.append(replace(batch, pf_scenarios=[swer_regulator_loads(1.0), swer_regulator_loads(0.3)]))
+    missing = swer_regulator_case(
+        f"{REGULATOR_PATH}missing-tap-limits",
+        dict(
+            raises_params(
+                ["newton_raphson", "iterative_current"],
+                "AutomaticTapInputError",
+                "Automatic tap changer has invalid configuration. The single_phase_transformer 154 regulated by"
+                " transformer_tap_regulator 402 needs both tap_min and tap_max.",
+            ),
+            tap_changing_strategy="any_valid_tap",
+        ),
+    )
+    cases.append(
+        replace(
+            missing,
+            transformers=[replace(t, tap_max=None) if t.id == 154 else t for t in missing.transformers],
+            regulators=[replace(r, u_set=12.9e3, u_band=50.0) for r in missing.regulators],
+            raises_only=("asym_output", "AutomaticTapInputError"),
+        )
+    )
+    return cases
+
+
 def small_reduced_case(path, raises_only, params):
     return Case(
         path=path,
@@ -2158,6 +2768,7 @@ CASES = [
         raises_only=("asym_output", "MissingPhaseForWinding"),
     ),
     *delta_cases(),
+    *single_phase_regulator_cases(),
 ]
 
 
