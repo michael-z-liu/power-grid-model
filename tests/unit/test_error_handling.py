@@ -713,6 +713,12 @@ def test_deprecated_invalid_branch3_error():
             id="delta_load_gen_state_estimation",
         ),
         pytest.param(
+            "Automatic tap changer has invalid configuration. The single_phase_transformer 152 regulated by "
+            "transformer_tap_regulator 402 needs both tap_min and tap_max.",
+            AutomaticTapInputError,
+            id="single_phase_transformer_regulator_tap_limits",
+        ),
+        pytest.param(
             "Shunt 500 is connected to a node without all phases. A shunt at a node without all phases is not "
             "supported.\n",
             ShuntAtReducedPhaseNode,
@@ -1183,18 +1189,69 @@ def test_single_phase_transformer_tap_batch():
     assert u[1] / u[2] == pytest.approx(22.44e3 / 22e3, rel=1e-3)
 
 
-def test_single_phase_transformer_not_regulated():
-    # the automatic tap changer does not support single_phase_transformer
+def _regulated_single_phase_transformer_input(tap_max_provided: bool = True, regulator_status: int = 1):
+    """_single_phase_transformer_input with from-side taps -4..4 of 275 V and transformer_tap_regulator 500 controlling
+    the a winding at the to side (u_set 12975 V, u_band 80 V)"""
     input_data = _single_phase_transformer_input()
+    transformer_input = input_data[CT.single_phase_transformer]
+    transformer_input[AT.tap_side] = [BranchSide.from_side]
+    transformer_input[AT.tap_pos] = [0]
+    transformer_input[AT.tap_nom] = [0]
+    transformer_input[AT.tap_min] = [-4]
+    if tap_max_provided:
+        transformer_input[AT.tap_max] = [4]
+    transformer_input[AT.tap_size] = [275.0]
+
     regulator_input = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
     regulator_input[AT.id] = [500]
     regulator_input[AT.regulated_object] = [400]
-    regulator_input[AT.status] = [1]
+    regulator_input[AT.status] = [regulator_status]
     regulator_input[AT.control_side] = [BranchSide.to_side]
-    regulator_input[AT.u_set] = [12.7e3]
-    regulator_input[AT.u_band] = [200.0]
+    regulator_input[AT.u_set] = [12975.0]
+    regulator_input[AT.u_band] = [80.0]
     input_data[CT.transformer_tap_regulator] = regulator_input
-    with pytest.raises(InvalidRegulatedObject, match="object with ID 400"):
+    return input_data
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        TapChangingStrategy.any_valid_tap,
+        TapChangingStrategy.fast_any_tap,
+        TapChangingStrategy.min_voltage_tap,
+        TapChangingStrategy.max_voltage_tap,
+    ],
+)
+def test_single_phase_transformer_regulated(strategy: TapChangingStrategy):
+    # fixed-tap scan of |U_a| at the SWER node: 12809.2 V at tap -1, 12974.7 V at tap -2, 13144.6 V at tap -3
+    model = PowerGridModelWithExt(_regulated_single_phase_transformer_input())
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False, tap_changing_strategy=strategy, experimental_features=_ExperimentalFeatures.enabled
+    )
+    expected_tap_pos = -2
+    u_set = 12975.0
+    u_band = 80.0
+    assert result[CT.transformer_tap_regulator][AT.tap_pos][0] == expected_tap_pos
+    u_a = result[CT.node][AT.u][1][0]
+    assert u_a == pytest.approx(12974.7, abs=0.05)
+    assert u_set - u_band / 2 <= u_a <= u_set + u_band / 2
+
+    with pytest.raises(ExperimentalFeature):
+        model.calculate_power_flow(symmetric=False, tap_changing_strategy=strategy)
+    with pytest.raises(ReducedPhaseNotSupported, match="Symmetric power flow"):
+        model.calculate_power_flow_with_ext(
+            symmetric=True, tap_changing_strategy=strategy, experimental_features=_ExperimentalFeatures.enabled
+        )
+
+
+@pytest.mark.parametrize("regulator_status", [1, 0])
+def test_single_phase_transformer_regulator_needs_tap_limits(regulator_status: int):
+    input_data = _regulated_single_phase_transformer_input(tap_max_provided=False, regulator_status=regulator_status)
+    with pytest.raises(
+        AutomaticTapInputError,
+        match=r"The single_phase_transformer 400 regulated by transformer_tap_regulator 500 needs both tap_min and "
+        r"tap_max\.",
+    ):
         PowerGridModel(input_data)
 
 

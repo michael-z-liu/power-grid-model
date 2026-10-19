@@ -1312,6 +1312,320 @@ TEST_CASE("API Model - single phase transformer") {
 }
 
 namespace {
+// the single phase transformer model above with taps and a transformer_tap_regulator 6 on transformer 4; tap_max not
+// provided when tap_max_provided is false
+struct SinglePhaseRegulatorCase {
+    int tap_side{0};
+    int tap_pos{0};
+    int tap_min{-4};
+    int tap_max{4};
+    bool tap_max_provided{true};
+    double tap_size{275.0};
+    int regulator_status{1};
+    int control_side{1};
+    double u_set{12975.0};
+    double u_band{80.0};
+    double line_drop_compensation_r{0.0};
+    double line_drop_compensation_x{0.0};
+    double p_load{50000.0};
+};
+
+std::string single_phase_regulator_model_json(SinglePhaseRegulatorCase const& c) {
+    using namespace std::string_literals;
+    using std::to_string;
+    std::string const tap_max = c.tap_max_provided ? R"json(, "tap_max": )json"s + to_string(c.tap_max) : ""s;
+    return R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 22000},
+      {"id": 2, "u_rated": 22000}
+    ],
+    "source": [
+      {"id": 3, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e9}
+    ],
+    "single_phase_transformer": [
+      {"id": 4, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "u1": 22000, "u2": 12700,
+       "sn": 200000, "uk": 0.04, "pk": 2000, "i0": 0, "p0": 0, "from_connection": 4, "to_connection": 1,
+       "r_grounding_to": 5, "tap_side": )json"s +
+           to_string(c.tap_side) + R"json(, "tap_pos": )json"s + to_string(c.tap_pos) + R"json(, "tap_min": )json"s +
+           to_string(c.tap_min) + tap_max + R"json(, "tap_nom": 0, "tap_size": )json"s + to_string(c.tap_size) +
+           R"json(}
+    ],
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [)json"s +
+           to_string(c.p_load) + R"json(, 0, 0], "q_specified": [0, 0, 0]}
+    ],
+    "transformer_tap_regulator": [
+      {"id": 6, "regulated_object": 4, "status": )json"s +
+           to_string(c.regulator_status) + R"json(, "control_side": )json"s + to_string(c.control_side) +
+           R"json(, "u_set": )json"s + to_string(c.u_set) + R"json(, "u_band": )json"s + to_string(c.u_band) +
+           R"json(, "line_drop_compensation_r": )json"s + to_string(c.line_drop_compensation_r) +
+           R"json(, "line_drop_compensation_x": )json"s + to_string(c.line_drop_compensation_x) + R"json(}
+    ]
+  }
+})json"s;
+}
+
+// two scenarios with a light and a heavy load
+constexpr std::string_view single_phase_regulator_batch_update_json = R"json({
+  "version": "1.0",
+  "type": "update",
+  "is_batch": true,
+  "attributes": {},
+  "data": [
+    {"asym_load": [{"id": 5, "p_specified": [10000, 0, 0]}]},
+    {"asym_load": [{"id": 5, "p_specified": [150000, 0, 0]}]}
+  ]
+})json";
+
+// node 1 (abc, 22 kV, source) -- single_phase_transformer 4 a -> ab_center_tapped (12.7 kV / 240-0-240 V, from-side
+// taps -4..4 of 160 V) -- node 2 (split phase) with unbalanced leg loads; transformer_tap_regulator 6 controls the mean
+// of the two leg voltages to earth
+constexpr std::string_view split_phase_regulator_model_json = R"json({
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 22000},
+      {"id": 2, "u_rated": 415.69219381653056}
+    ],
+    "source": [
+      {"id": 3, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e9}
+    ],
+    "single_phase_transformer": [
+      {"id": 4, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1, "u1": 12701.705922171768, "u2": 480,
+       "sn": 25000, "uk": 0.04, "pk": 400, "i0": 0, "p0": 0, "from_connection": 1, "to_connection": 7,
+       "tap_side": 0, "tap_pos": 0, "tap_min": -4, "tap_max": 4, "tap_nom": 0, "tap_size": 160}
+    ],
+    "asym_load": [
+      {"id": 5, "node": 2, "status": 1, "type": 0, "p_specified": [6000, 2000, 0], "q_specified": [0, 0, 0]}
+    ],
+    "transformer_tap_regulator": [
+      {"id": 6, "regulated_object": 4, "status": 1, "control_side": 1, "u_set": 241.8, "u_band": 1.6}
+    ]
+  }
+})json";
+
+struct SinglePhaseRegulatorResult {
+    int tap_pos{};
+    std::array<double, 3> u{};       // node 2
+    std::array<double, 3> u_angle{}; // node 2
+    std::array<double, 3> p_to{};    // transformer 4
+    std::array<double, 3> q_to{};    // transformer 4
+};
+} // namespace
+
+TEST_CASE("API Model - single phase transformer with a tap regulator") {
+    using namespace std::string_literals;
+
+    Options options{};
+    options.set_experimental_features(PGM_experimental_features_enabled);
+    options.set_symmetric(0);
+    options.set_calculation_method(PGM_newton_raphson);
+
+    Buffer node_output{PGM_def_asym_output_node, 2};
+    Buffer transformer_output{PGM_def_asym_output_single_phase_transformer, 1};
+    Buffer regulator_output{PGM_def_asym_output_transformer_tap_regulator, 1};
+    DatasetMutable asym_output{"asym_output", false, 1};
+    asym_output.add_buffer("node", 2, 2, nullptr, node_output);
+    asym_output.add_buffer("single_phase_transformer", 1, 1, nullptr, transformer_output);
+    asym_output.add_buffer("transformer_tap_regulator", 1, 1, nullptr, regulator_output);
+
+    auto const calculate = [&](std::string const& input_json, Idx strategy) {
+        auto const owning_input_dataset = load_dataset(input_json);
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_tap_changing_strategy(strategy);
+        node_output.set_nan();
+        transformer_output.set_nan();
+        regulator_output.set_nan();
+        model.calculate(options, asym_output);
+
+        std::array<std::array<double, 3>, 2> u{};
+        std::array<std::array<double, 3>, 2> u_angle{};
+        std::array<std::array<double, 3>, 1> p_to{};
+        std::array<std::array<double, 3>, 1> q_to{};
+        std::array<int8_t, 1> tap_pos{};
+        node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+        node_output.get_value(PGM_def_asym_output_node_u_angle, u_angle.data(), -1);
+        transformer_output.get_value(PGM_def_asym_output_single_phase_transformer_p_to, p_to.data(), -1);
+        transformer_output.get_value(PGM_def_asym_output_single_phase_transformer_q_to, q_to.data(), -1);
+        regulator_output.get_value(PGM_def_asym_output_transformer_tap_regulator_tap_pos, tap_pos.data(), -1);
+        return SinglePhaseRegulatorResult{
+            .tap_pos = tap_pos[0], .u = u[1], .u_angle = u_angle[1], .p_to = p_to[0], .q_to = q_to[0]};
+    };
+    auto const in_band = [](double voltage, SinglePhaseRegulatorCase const& c) {
+        return std::abs(voltage - c.u_set) <= 0.5 * c.u_band;
+    };
+    // with the tap fixed at tap_pos and the regulation disabled
+    auto const fixed_tap_voltage = [&calculate](SinglePhaseRegulatorCase c, int tap_pos) {
+        c.tap_pos = tap_pos;
+        return calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_disabled).u[0];
+    };
+
+    SUBCASE("The phase-to-earth winding voltage is regulated into the band") {
+        // fixed-tap scan: |U_a| = 12809.0 V at tap -1, 12974.6 V at tap -2, 13144.4 V at tap -3; band [12935, 13015]
+        SinglePhaseRegulatorCase const c{};
+        for (Idx const strategy :
+             {PGM_tap_changing_strategy_any_valid_tap, PGM_tap_changing_strategy_fast_any_tap,
+              PGM_tap_changing_strategy_min_voltage_tap, PGM_tap_changing_strategy_max_voltage_tap}) {
+            CAPTURE(strategy);
+            auto const result = calculate(single_phase_regulator_model_json(c), strategy);
+            CHECK(result.tap_pos == -2);
+            CHECK(result.u[0] == doctest::Approx(12974.6).epsilon(1e-4));
+            CHECK(in_band(result.u[0], c));
+            CHECK(result.u[1] == 0.0);
+            CHECK(result.u[2] == 0.0);
+        }
+        // the neighbouring taps are outside the band
+        CHECK_FALSE(in_band(fixed_tap_voltage(c, -1), c));
+        CHECK_FALSE(in_band(fixed_tap_voltage(c, -3), c));
+        CHECK(in_band(fixed_tap_voltage(c, -2), c));
+    }
+
+    SUBCASE("The strategy picks the lowest or highest voltage in a wide band") {
+        // band [12600, 13000]: taps 0 (12647.6 V), -1 (12809.0 V) and -2 (12974.6 V) are valid
+        SinglePhaseRegulatorCase const c{.u_set = 12800.0, .u_band = 400.0};
+        auto const min_result =
+            calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_min_voltage_tap);
+        CHECK(min_result.tap_pos == 0);
+        CHECK(in_band(min_result.u[0], c));
+        auto const max_result =
+            calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_max_voltage_tap);
+        CHECK(max_result.tap_pos == -2);
+        CHECK(in_band(max_result.u[0], c));
+        CHECK(max_result.u[0] > min_result.u[0]);
+    }
+
+    SUBCASE("Line drop compensation") {
+        // the controlled voltage is |U_a + Z_c I_a|, with I_a the current into the transformer at the control side
+        SinglePhaseRegulatorCase const c{
+            .u_set = 13030.0, .u_band = 80.0, .line_drop_compensation_r = 30.0, .line_drop_compensation_x = 20.0};
+        auto const result = calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_any_valid_tap);
+        CHECK(result.tap_pos == -3);
+        std::complex<double> const u_a = std::polar(result.u[0], result.u_angle[0]);
+        std::complex<double> const i_a = std::conj(std::complex<double>{result.p_to[0], result.q_to[0]} / u_a);
+        std::complex<double> const z_c{c.line_drop_compensation_r, c.line_drop_compensation_x};
+        double const v_compensated = std::abs(u_a + z_c * i_a);
+        CHECK(v_compensated == doctest::Approx(13030.5).epsilon(1e-4));
+        CHECK(in_band(v_compensated, c));
+        // the voltage itself is outside the band: the compensation decides the tap
+        CHECK_FALSE(in_band(result.u[0], c));
+    }
+
+    SUBCASE("The control side must not be towards the source") {
+        SinglePhaseRegulatorCase const c{.control_side = 0};
+        check_throws_with(
+            [&calculate, &c]() {
+                calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_any_valid_tap);
+            },
+            PGM_regular_error,
+            "Automatic tap changer has invalid configuration. The following transformer(s) are being "
+            "controlled from non-source side towards source side:\n  Transformer IDs: 4"s);
+    }
+
+    SUBCASE("Control at the tap side") {
+        // to-side taps of 160 V: |U_a| = 12807.4 V at tap 1, 12967.3 V at tap 2, 13127.1 V at tap 3
+        SinglePhaseRegulatorCase const c{.tap_side = 1, .tap_size = 160.0, .u_set = 12967.0};
+        auto const result = calculate(single_phase_regulator_model_json(c), PGM_tap_changing_strategy_any_valid_tap);
+        CHECK(result.tap_pos == 2);
+        CHECK(in_band(result.u[0], c));
+        CHECK_FALSE(in_band(fixed_tap_voltage(c, 1), c));
+        CHECK_FALSE(in_band(fixed_tap_voltage(c, 3), c));
+    }
+
+    SUBCASE("Reversed tap numbering") {
+        // tap_min 4, tap_max -4: tap 2 has the ratio of tap -2 of the normal numbering
+        SinglePhaseRegulatorCase const c{.tap_min = 4, .tap_max = -4};
+        for (Idx const strategy :
+             {PGM_tap_changing_strategy_any_valid_tap, PGM_tap_changing_strategy_fast_any_tap,
+              PGM_tap_changing_strategy_min_voltage_tap, PGM_tap_changing_strategy_max_voltage_tap}) {
+            CAPTURE(strategy);
+            auto const result = calculate(single_phase_regulator_model_json(c), strategy);
+            CHECK(result.tap_pos == 2);
+            CHECK(result.u[0] == doctest::Approx(12974.6).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("Both tap limits are required") {
+        for (int const regulator_status : {1, 0}) {
+            CAPTURE(regulator_status);
+            SinglePhaseRegulatorCase const c{.tap_max_provided = false, .regulator_status = regulator_status};
+            auto const owning_input_dataset = load_dataset(single_phase_regulator_model_json(c));
+            check_throws_with([&owning_input_dataset]() { Model const model{50.0, owning_input_dataset.dataset}; },
+                              PGM_regular_error,
+                              "Automatic tap changer has invalid configuration. The single_phase_transformer 4 "
+                              "regulated by transformer_tap_regulator 6 needs both tap_min and tap_max."s);
+        }
+    }
+
+    SUBCASE("Symmetric power flow is not supported") {
+        auto const owning_input_dataset = load_dataset(single_phase_regulator_model_json({}));
+        Model model{50.0, owning_input_dataset.dataset};
+        Buffer sym_node_output{PGM_def_sym_output_node, 2};
+        DatasetMutable sym_output{"sym_output", false, 1};
+        sym_output.add_buffer("node", 2, 2, nullptr, sym_node_output);
+        options.set_symmetric(1);
+        options.set_tap_changing_strategy(PGM_tap_changing_strategy_any_valid_tap);
+        check_throws_with([&model, &sym_output](auto const& opt) { model.calculate(opt, sym_output); },
+                          PGM_regular_error,
+                          "Symmetric power flow is not supported in a network with one- or two-phase nodes"s, options);
+    }
+
+    SUBCASE("Experimental features are required") {
+        auto const owning_input_dataset = load_dataset(single_phase_regulator_model_json({}));
+        Model model{50.0, owning_input_dataset.dataset};
+        options.set_experimental_features(PGM_experimental_features_disabled);
+        options.set_tap_changing_strategy(PGM_tap_changing_strategy_any_valid_tap);
+        check_throws_with([&model, &asym_output](auto const& opt) { model.calculate(opt, asym_output); },
+                          PGM_regular_error, "is an experimental feature"s, options);
+    }
+
+    SUBCASE("Batch: a tap per scenario") {
+        // band [12660, 12740]: tap 0 (12689.7 V) at 10 kW, tap -1 (12700.7 V) at 150 kW; the input itself (10 kW) has a
+        // valid tap too, because a batch calculation first runs the optimizer on the input (the cache run)
+        SinglePhaseRegulatorCase const c{.u_set = 12700.0, .p_load = 10000.0};
+        auto const owning_input_dataset = load_dataset(single_phase_regulator_model_json(c));
+        auto const owning_update_dataset = load_dataset(std::string{single_phase_regulator_batch_update_json});
+        Model model{50.0, owning_input_dataset.dataset};
+        Buffer batch_node_output{PGM_def_asym_output_node, 4};
+        Buffer batch_regulator_output{PGM_def_asym_output_transformer_tap_regulator, 2};
+        DatasetMutable batch_output{"asym_output", true, 2};
+        batch_output.add_buffer("node", 2, 4, nullptr, batch_node_output);
+        batch_output.add_buffer("transformer_tap_regulator", 1, 2, nullptr, batch_regulator_output);
+        options.set_tap_changing_strategy(PGM_tap_changing_strategy_any_valid_tap);
+        model.calculate(options, batch_output, owning_update_dataset.dataset);
+
+        std::array<std::array<double, 3>, 4> u{};
+        std::array<int8_t, 2> tap_pos{};
+        batch_node_output.get_value(PGM_def_asym_output_node_u, u.data(), -1);
+        batch_regulator_output.get_value(PGM_def_asym_output_transformer_tap_regulator_tap_pos, tap_pos.data(), -1);
+        CHECK(tap_pos[0] == 0);
+        CHECK(tap_pos[1] == -1);
+        CHECK(in_band(u[1][0], c));
+        CHECK(in_band(u[3][0], c));
+        CHECK(u[1][0] == doctest::Approx(12689.7).epsilon(1e-4));
+        CHECK(u[3][0] == doctest::Approx(12700.7).epsilon(1e-4));
+    }
+
+    SUBCASE("Centre-tapped: the mean of the two legs") {
+        // fixed-tap scan of the mean (|U_a| + |U_b|) / 2: 238.75 V at tap 0, 241.82 V at tap -1, 244.98 V at tap -2;
+        // band [241.0, 242.6]; the mean over all three slots would be about 161 V
+        auto const result =
+            calculate(std::string{split_phase_regulator_model_json}, PGM_tap_changing_strategy_any_valid_tap);
+        CHECK(result.tap_pos == -1);
+        double const mean_of_legs = 0.5 * (result.u[0] + result.u[1]);
+        CHECK(mean_of_legs == doctest::Approx(241.82).epsilon(1e-4));
+        CHECK(std::abs(mean_of_legs - 241.8) <= 0.8);
+    }
+}
+
+namespace {
 // node 1 (abc, 22 kV, source) -- single_phase_transformer a -> ab_center_tapped (12.7 kV / 240-0-240 V, solidly
 // earthed centre tap, no magnetising) -- node 2 (split phase, u_rated 240 sqrt3); extra_components holds further
 // components of node 2, each preceded by a comma

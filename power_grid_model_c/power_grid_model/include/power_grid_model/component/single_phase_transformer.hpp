@@ -166,6 +166,42 @@ class SinglePhaseTransformer : public Branch {
     }
     constexpr IntS tap_nom() const { return tap_nom_; }
     constexpr IntS clock() const { return clock_; }
+    // both tap limits are provided; an automatic tap regulator needs them, because a limit that is not provided
+    // follows the tap position (see tap_min() and tap_max())
+    constexpr bool tap_limits_provided() const { return tap_min_ != na_IntS && tap_max_ != na_IntS; }
+
+    // the voltage that a tap regulator controls at the winding of the given side, from the voltages v of the slots of
+    // its node (the compensated voltages U + Z_c I for line drop compensation), in per unit of the phase-to-earth
+    // base of that node: |V_p| for a phase-to-earth winding, |V_p - V_q| for a phase-to-phase winding and the mean
+    // (|V_a| + |V_b|) / 2 of the two legs for a centre-tapped winding; only magnitudes are used, so the clock does not
+    // matter
+    double controlled_voltage(BranchSide side, ComplexValue<asymmetric_t> const& v) const {
+        Winding const& winding = [this, side]() -> Winding const& {
+            switch (side) {
+            case BranchSide::from:
+                return from_;
+            case BranchSide::to:
+                return to_;
+            default:
+                throw MissingCaseForEnumError{"single_phase_transformer controlled_voltage", side};
+            }
+        }();
+        switch (winding.kind) {
+        case WindingKind::phase_to_earth:
+            return cabs(v(winding.positive));
+        case WindingKind::phase_to_phase:
+            return cabs(v(winding.positive) - v(winding.negative));
+        case WindingKind::center_tapped:
+            return 0.5 * (cabs(v(winding.positive)) + cabs(v(winding.negative)));
+        default:
+            throw MissingCaseForEnumError{"single_phase_transformer controlled_voltage", winding.kind};
+        }
+    }
+    // a single-phase transformer only takes part in asymmetric calculations; symmetric power flow is rejected before
+    // any tap regulation
+    static double controlled_voltage(BranchSide /* side */, ComplexValue<symmetric_t> const& /* v */) {
+        throw ReducedPhaseNotSupported{"Symmetric power flow"};
+    }
 
     // setter
     constexpr bool set_tap(IntS new_tap) {

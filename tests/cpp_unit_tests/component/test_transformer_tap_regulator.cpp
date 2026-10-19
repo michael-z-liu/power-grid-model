@@ -209,6 +209,34 @@ TEST_CASE("Test transformer tap regulator") {
         CHECK(param.status);
     }
 
+    SUBCASE("Test calc param - single_phase_transformer, on the phase-to-earth base") {
+        // a regulator of a single_phase_transformer is constructed with u_rated / sqrt3 of its node: u_set and u_band
+        // in winding volts are then on the phase-to-earth base, and the impedance base is the per-phase base
+        // u_rated^2 / S3 (D69, D70)
+        double const node_u_rated{22.0e3};
+        TransformerTapRegulator const regulator{{.id = 1,
+                                                 .regulated_object = 2,
+                                                 .status = 1,
+                                                 .control_side = ControlSide::to,
+                                                 .u_set = 12.7e3,
+                                                 .u_band = 150.0,
+                                                 .line_drop_compensation_r = 30.0,
+                                                 .line_drop_compensation_x = 20.0},
+                                                ComponentType::branch,
+                                                node_u_rated / sqrt3};
+
+        TransformerTapRegulatorCalcParam const param = regulator.calc_param<asymmetric_t>();
+        double const base_u = node_u_rated / sqrt3;
+        double const z_base = node_u_rated * node_u_rated / 1e6;
+        CHECK(param.u_set == doctest::Approx(12.7e3 / base_u));
+        CHECK(param.u_band == doctest::Approx(150.0 / base_u));
+        CHECK(param.z_compensation.real() == doctest::Approx(30.0 / z_base));
+        CHECK(param.z_compensation.imag() == doctest::Approx(20.0 / z_base));
+        // Z_pu I_pu U_b = Z I: the impedance base is U_b / I_b with I_b = (S3 / 3) / U_b
+        double const base_i = (1e6 / 3.0) / base_u;
+        CHECK(z_base == doctest::Approx(base_u / base_i));
+    }
+
     SUBCASE("Test default line drop compensation") {
         TransformerTapRegulator const regulator{{.id = 1,
                                                  .regulated_object = 2,

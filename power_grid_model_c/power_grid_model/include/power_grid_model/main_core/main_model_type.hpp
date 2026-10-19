@@ -68,10 +68,11 @@ concept validate_component_types_c =
     dependent_type_check<CompList, SymCurrentSensor, Line, AsymLine, Link, GenericBranch, Transformer,
                          ThreeWindingTransformer> && //
     dependent_type_check<CompList, AsymCurrentSensor, Line, AsymLine, Link, GenericBranch, Transformer,
-                         ThreeWindingTransformer> &&                                                       //
-    dependent_type_check<CompList, TransformerTapRegulator, Node, Transformer, ThreeWindingTransformer> && //
-    dependent_type_check<CompList, Fault, Node> &&                                                         //
-    dependent_type_check<CompList, VoltageRegulator, SymGenerator, AsymGenerator, SymLoad, AsymLoad> &&    //
+                         ThreeWindingTransformer> && //
+    dependent_type_check<CompList, TransformerTapRegulator, Node, Transformer, ThreeWindingTransformer,
+                         SinglePhaseTransformer> &&                                                     //
+    dependent_type_check<CompList, Fault, Node> &&                                                      //
+    dependent_type_check<CompList, VoltageRegulator, SymGenerator, AsymGenerator, SymLoad, AsymLoad> && //
     // We ensure that certain components are registered before others in the component list
     // This is because it affects the sequence of offsets at certain places in the code.
     // Specifically pseudo branches are registered after actual branches.

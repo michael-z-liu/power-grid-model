@@ -14,6 +14,7 @@
 #include <power_grid_model/common/three_phase_tensor.hpp>
 #include <power_grid_model/component/component.hpp>
 #include <power_grid_model/component/line_utils.hpp>
+#include <power_grid_model/component/transformer_utils.hpp>
 
 #include <doctest/doctest.h>
 
@@ -1656,6 +1657,101 @@ TEST_CASE("Test kron_eliminate") {
             CHECK(y.col(k).isZero(0.0));
         }
     }
+}
+
+// the automatic tap changer handles every transformer_c type (FU5, D68)
+static_assert(transformer_c<SinglePhaseTransformer>);
+
+TEST_CASE("Test single phase transformer - controlled voltage") {
+    using enum WindingConnection1P;
+    // arbitrary slot voltages in per unit, with distinct magnitudes and angles
+    ComplexValue<asymmetric_t> const v{DoubleComplex{1.02, 0.11}, DoubleComplex{-0.43, -0.87},
+                                       DoubleComplex{-0.55, 0.91}};
+    // the winding voltage magnitude |sum_k incidence[k] v[k]|
+    auto const expected_voltage = [&v](ConnectionCase const& connection) {
+        DoubleComplex winding_voltage{};
+        for (size_t k = 0; k != 3; ++k) {
+            winding_voltage += connection.incidence[k] * v(static_cast<Idx>(k));
+        }
+        return cabs(winding_voltage);
+    };
+
+    SUBCASE("Every connection on either side, clock 0 and 6") {
+        for (ConnectionCase const& connection : connection_cases()) {
+            CAPTURE(static_cast<int>(connection.connection));
+            ConnectionCase const other = connection_case(connection.phase_to_phase() ? a : ab);
+            for (IntS const clock : {IntS{0}, IntS{6}}) {
+                CAPTURE(clock);
+                SinglePhaseTransformerInput from_input = test_input(connection.connection, other.connection);
+                from_input.clock = clock;
+                SinglePhaseTransformerInput to_input = test_input(other.connection, connection.connection);
+                to_input.clock = clock;
+                CHECK(make_transformer(from_input).controlled_voltage(BranchSide::from, v) ==
+                      doctest::Approx(expected_voltage(connection)).epsilon(test_tolerance));
+                CHECK(make_transformer(to_input).controlled_voltage(BranchSide::to, v) ==
+                      doctest::Approx(expected_voltage(connection)).epsilon(test_tolerance));
+            }
+        }
+    }
+    SUBCASE("Phase-to-earth: the magnitude of the slot voltage") {
+        CHECK(make_transformer(test_input(ab, b)).controlled_voltage(BranchSide::to, v) == cabs(v(1)));
+        CHECK(make_transformer(test_input(c, ab)).controlled_voltage(BranchSide::from, v) == cabs(v(2)));
+    }
+    SUBCASE("Phase-to-phase: the magnitude of the difference, not the mean of the slots") {
+        CHECK(make_transformer(test_input(a, bc)).controlled_voltage(BranchSide::to, v) == cabs(v(1) - v(2)));
+        CHECK(make_transformer(test_input(ac, a)).controlled_voltage(BranchSide::from, v) == cabs(v(0) - v(2)));
+    }
+    SUBCASE("Centre-tapped: the mean of the two legs, with either clock") {
+        double const expected = 0.5 * (cabs(v(0)) + cabs(v(1)));
+        for (WindingConnection1P const primary : {a, b, c, ab, ac, bc}) {
+            CAPTURE(static_cast<int>(primary));
+            for (IntS const clock : {IntS{0}, IntS{6}}) {
+                CAPTURE(clock);
+                SinglePhaseTransformerInput input = test_input(primary, ab_center_tapped);
+                input.clock = clock;
+                SinglePhaseTransformer const transformer = make_transformer(input);
+                CHECK(transformer.controlled_voltage(BranchSide::to, v) == doctest::Approx(expected));
+                // the mean of the legs, not half of the full winding voltage
+                CHECK(transformer.controlled_voltage(BranchSide::to, v) != doctest::Approx(0.5 * cabs(v(0) - v(1))));
+            }
+        }
+    }
+    SUBCASE("Absent slots do not matter") {
+        ComplexValue<asymmetric_t> const v_a_only{v(0), DoubleComplex{}, DoubleComplex{}};
+        CHECK(make_transformer(test_input(ab, a)).controlled_voltage(BranchSide::to, v_a_only) == cabs(v(0)));
+    }
+    SUBCASE("Unknown side") {
+        SinglePhaseTransformer const transformer = make_transformer(test_input(ab, a));
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+        CHECK_THROWS_AS(transformer.controlled_voltage(static_cast<BranchSide>(IntS{2}), v), MissingCaseForEnumError);
+    }
+    SUBCASE("Symmetric is not supported") {
+        CHECK_THROWS_WITH_AS(SinglePhaseTransformer::controlled_voltage(BranchSide::to, DoubleComplex{1.0, 0.0}),
+                             "Symmetric power flow is not supported in a network with one- or two-phase nodes.\n",
+                             ReducedPhaseNotSupported);
+    }
+}
+
+TEST_CASE("Test single phase transformer - tap limits provided") {
+    using enum WindingConnection1P;
+    SinglePhaseTransformerInput input = test_input(ab, a);
+    input.tap_side = BranchSide::from;
+    input.tap_nom = 0;
+    input.tap_size = 100.0;
+    CHECK_FALSE(make_transformer(input).tap_limits_provided());
+    input.tap_min = -4;
+    CHECK_FALSE(make_transformer(input).tap_limits_provided());
+    input.tap_max = 4;
+    CHECK(make_transformer(input).tap_limits_provided());
+    input.tap_min = na_IntS;
+    CHECK_FALSE(make_transformer(input).tap_limits_provided());
+    // reversed numbering and a fixed tap
+    input.tap_min = 4;
+    input.tap_max = -4;
+    CHECK(make_transformer(input).tap_limits_provided());
+    input.tap_min = 2;
+    input.tap_max = 2;
+    CHECK(make_transformer(input).tap_limits_provided());
 }
 
 } // namespace power_grid_model

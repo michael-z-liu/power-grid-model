@@ -32,6 +32,7 @@
 #include <power_grid_model/component/link.hpp>
 #include <power_grid_model/component/node.hpp>
 #include <power_grid_model/component/regulator.hpp>
+#include <power_grid_model/component/single_phase_transformer.hpp>
 #include <power_grid_model/component/source.hpp>
 #include <power_grid_model/component/three_winding_transformer.hpp>
 #include <power_grid_model/component/transformer.hpp>
@@ -72,9 +73,9 @@ TEST_SUITE_BEGIN("Automatic Tap Changer");
 namespace power_grid_model {
 namespace optimizer::tap_position_optimizer::test {
 namespace {
-using TestComponentContainer =
-    Container<ExtraRetrievableTypes<Base, Node, Branch, Branch3, Appliance, Regulator>, Line, Link, Node, Transformer,
-              ThreeWindingTransformer, TransformerTapRegulator, Source, AsymLine, GenericBranch>;
+using TestComponentContainer = Container<ExtraRetrievableTypes<Base, Node, Branch, Branch3, Appliance, Regulator>, Line,
+                                         Link, Node, Transformer, ThreeWindingTransformer, TransformerTapRegulator,
+                                         Source, AsymLine, GenericBranch, SinglePhaseTransformer>;
 using TestState = main_core::MainModelState<TestComponentContainer>;
 
 TransformerInput get_transformer(ID id, ID from, ID to, BranchSide tap_side, IntS tap_pos = na_IntS,
@@ -217,6 +218,32 @@ GenericBranchInput get_generic_branch_input(ID id, ID from, ID to) {
                               .k = 1.0,
                               .theta = 0.0,
                               .sn = nan};
+}
+
+// a 22 kV / 12.7 kV transformer with from-side taps; from_connection ab for an isolating transformer, a for a SWER
+// line regulator
+SinglePhaseTransformerInput get_single_phase_transformer(ID id, ID from, ID to, WindingConnection1P from_connection,
+                                                         IntS from_status = 1) {
+    return SinglePhaseTransformerInput{.id = id,
+                                       .from_node = from,
+                                       .to_node = to,
+                                       .from_status = from_status,
+                                       .to_status = 1,
+                                       .u1 = from_connection == WindingConnection1P::ab ? 22.0e3 : 12.7e3,
+                                       .u2 = 12.7e3,
+                                       .sn = 200.0e3,
+                                       .uk = 0.04,
+                                       .pk = 2.0e3,
+                                       .i0 = 0.0,
+                                       .p0 = 0.0,
+                                       .from_connection = from_connection,
+                                       .to_connection = WindingConnection1P::a,
+                                       .tap_side = BranchSide::from,
+                                       .tap_pos = 0,
+                                       .tap_min = -4,
+                                       .tap_max = 4,
+                                       .tap_nom = 0,
+                                       .tap_size = 275.0};
 }
 
 TransformerTapRegulatorInput get_regulator(ID id, ID regulated_object, ControlSide control_side) {
@@ -929,6 +956,99 @@ TEST_CASE("Test Transformer ranking") {
         pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
         pgm_tap::RankedTransformerGroups const ref_order{{trafo_11_idx}, {trafo_12_idx}};
         CHECK(std::ranges::equal(order, ref_order));
+    }
+}
+
+TEST_CASE("Test Transformer ranking - single_phase_transformer") {
+    using test::get_regulator;
+    using test::get_single_phase_transformer;
+    using test::TestState;
+    using enum WindingConnection1P;
+
+    SUBCASE("Isolating transformer and a SWER line regulator behind an asym_line") {
+        // ========Test Grid========
+        //  [source 20] - [node 0] --[spt 11 ab->a]-- [node 1] --(asym_line 10)-- [node 2] --[spt 12 a->a]-- [node 3]
+        TestState state;
+        std::vector<NodeInput> const nodes{{.id = 0, .u_rated = 22e3},
+                                           {.id = 1, .u_rated = 22e3},
+                                           {.id = 2, .u_rated = 22e3},
+                                           {.id = 3, .u_rated = 22e3}};
+        main_core::add_component<Node>(state.components, nodes, 50.0);
+
+        std::vector const asym_lines{test::get_asym_line_input(10, 1, 2)};
+        main_core::add_component<AsymLine>(state.components, asym_lines, 50.0);
+
+        std::vector const transformers{get_single_phase_transformer(11, 0, 1, ab),
+                                       get_single_phase_transformer(12, 2, 3, a)};
+        main_core::add_component<SinglePhaseTransformer>(state.components, transformers, 50.0);
+
+        std::vector const sources{SourceInput{.id = 20, .node = 0, .status = IntS{1}, .u_ref = 1.0}};
+        main_core::add_component<Source>(state.components, sources, 50.0);
+
+        auto const add_regulators = [&state](ControlSide control_side_12) {
+            std::vector const regulators{get_regulator(30, 11, ControlSide::to),
+                                         get_regulator(31, 12, control_side_12)};
+            main_core::add_component<TransformerTapRegulator>(state.components, regulators, 50.0);
+            state.components.set_construction_complete();
+        };
+
+        Idx2D const spt_11_idx = main_core::get_component_idx_by_id<SinglePhaseTransformer>(state.components, 11);
+        Idx2D const spt_12_idx = main_core::get_component_idx_by_id<SinglePhaseTransformer>(state.components, 12);
+
+        SUBCASE("Ranks 1 and 2") {
+            add_regulators(ControlSide::to);
+            pgm_tap::TrafoGraphEdgeProperties const regulated_edge_weights =
+                pgm_tap::get_edge_weights(pgm_tap::build_transformer_graph(state));
+            pgm_tap::TrafoGraphEdgeProperties const ref_regulated_edge_weights{{spt_11_idx, 1, 11},
+                                                                               {spt_12_idx, 2, 12}};
+            CHECK(regulated_edge_weights == ref_regulated_edge_weights);
+
+            pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
+            pgm_tap::RankedTransformerGroups const ref_order{{spt_11_idx}, {spt_12_idx}};
+            CHECK(std::ranges::equal(order, ref_order));
+        }
+        SUBCASE("Controlled towards the source") {
+            add_regulators(ControlSide::from);
+            CHECK_THROWS_WITH_AS(pgm_tap::rank_transformers(state),
+                                 "Automatic tap changer has invalid configuration. The following transformer(s) are "
+                                 "being controlled from non-source side towards source side:\n  Transformer IDs: 12",
+                                 AutomaticTapInputError);
+        }
+    }
+
+    SUBCASE("An unregulated single_phase_transformer passes the rank on") {
+        // ========Test Grid========
+        //  [source 20] - [node 0] --[spt 11 ab->a, unregulated]-- [node 1] --[spt 12 a->a]-- [node 2]
+        auto const get_state = [](IntS from_status_11) {
+            TestState state;
+            std::vector<NodeInput> const nodes{
+                {.id = 0, .u_rated = 22e3}, {.id = 1, .u_rated = 22e3}, {.id = 2, .u_rated = 22e3}};
+            main_core::add_component<Node>(state.components, nodes, 50.0);
+
+            std::vector const transformers{get_single_phase_transformer(11, 0, 1, ab, from_status_11),
+                                           get_single_phase_transformer(12, 1, 2, a)};
+            main_core::add_component<SinglePhaseTransformer>(state.components, transformers, 50.0);
+
+            std::vector const sources{SourceInput{.id = 20, .node = 0, .status = IntS{1}, .u_ref = 1.0}};
+            main_core::add_component<Source>(state.components, sources, 50.0);
+
+            std::vector const regulators{get_regulator(31, 12, ControlSide::to)};
+            main_core::add_component<TransformerTapRegulator>(state.components, regulators, 50.0);
+            state.components.set_construction_complete();
+            return state;
+        };
+
+        SUBCASE("Closed") {
+            auto const state = get_state(IntS{1});
+            Idx2D const spt_12_idx = main_core::get_component_idx_by_id<SinglePhaseTransformer>(state.components, 12);
+            pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
+            pgm_tap::RankedTransformerGroups const ref_order{{spt_12_idx}};
+            CHECK(std::ranges::equal(order, ref_order));
+        }
+        SUBCASE("Open at one side: not reached") {
+            auto const state = get_state(IntS{0});
+            CHECK(pgm_tap::rank_transformers(state).empty());
+        }
     }
 }
 

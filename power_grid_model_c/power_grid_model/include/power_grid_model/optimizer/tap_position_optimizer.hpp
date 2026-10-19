@@ -22,6 +22,7 @@
 #include "../component/line.hpp"
 #include "../component/link.hpp"
 #include "../component/node.hpp"
+#include "../component/single_phase_transformer.hpp"
 #include "../component/source.hpp"
 #include "../component/three_winding_transformer.hpp"
 #include "../component/transformer.hpp"
@@ -209,12 +210,16 @@ constexpr void add_edge(main_core::MainModelState<ComponentContainer> const& sta
     }
 }
 
-template <std::derived_from<Transformer> Component, class ComponentContainer>
+// the two-winding transformers: a transformer and a single_phase_transformer
+template <typename T>
+concept two_winding_transformer_c = std::same_as<T, Transformer> || std::same_as<T, SinglePhaseTransformer>;
+
+template <two_winding_transformer_c Component, class ComponentContainer>
     requires main_core::model_component_state_c<main_core::MainModelState, ComponentContainer, Component>
 constexpr void add_edge(main_core::MainModelState<ComponentContainer> const& state,
                         RegulatedObjects const& regulated_objects, TrafoGraphEdges& edges,
                         TrafoGraphEdgeProperties& edge_props) {
-    for (auto const& transformer : state.components.template citer<Transformer>()) {
+    for (auto const& transformer : state.components.template citer<Component>()) {
         if (!transformer.from_status() || !transformer.to_status()) {
             continue;
         }
@@ -225,7 +230,7 @@ constexpr void add_edge(main_core::MainModelState<ComponentContainer> const& sta
             auto const control_side = trafo_regulated.second;
             auto const control_side_node = control_side == ControlSide::from ? from_node : to_node;
             auto const non_control_side_node = control_side == ControlSide::from ? to_node : from_node;
-            auto const trafo_idx = main_core::get_component_idx_by_id<Transformer>(state.components, transformer.id());
+            auto const trafo_idx = main_core::get_component_idx_by_id<Component>(state.components, transformer.id());
 
             add_to_edge(state, edges, edge_props, non_control_side_node, control_side_node,
                         {trafo_idx, 1, transformer.id()});
@@ -304,7 +309,7 @@ inline auto build_transformer_graph(State const& state) -> TransformerGraph {
 
     add_edges<Transformer, ThreeWindingTransformer, Line, Link>(state, regulated_objects, edges, edge_props);
     // all other branch types also connect nodes: a transformer reachable only through one of them must be ranked too
-    add_edges_if_present<AsymLine, GenericBranch>(state, regulated_objects, edges, edge_props);
+    add_edges_if_present<SinglePhaseTransformer, AsymLine, GenericBranch>(state, regulated_objects, edges, edge_props);
 
     // build graph
     TransformerGraph trafo_graph{boost::edges_are_unsorted_multi_pass, edges.cbegin(), edges.cend(),
@@ -746,6 +751,21 @@ template <symmetry_tag sym> struct NodeState {
     }
 };
 
+// the controlled voltage of a single_phase_transformer is that of its winding at the control side (D69): from the
+// compensated voltages U_s + Z_c I_s of the slots of that winding, not the mean over all three slots
+template <symmetry_tag sym> struct SinglePhaseNodeState {
+    ComplexValue<sym> u;
+    ComplexValue<sym> i;
+    std::reference_wrapper<SinglePhaseTransformer const> transformer;
+    BranchSide side{};
+
+    friend auto operator<=>(SinglePhaseNodeState<sym> const& state, TransformerTapRegulatorCalcParam const& param) {
+        auto const u_compensated = state.u + param.z_compensation * state.i;
+        auto const v_compensated = state.transformer.get().controlled_voltage(state.side, u_compensated);
+        return v_compensated <=> VoltageBand{.u_set = param.u_set, .u_band = param.u_band};
+    }
+};
+
 class RankIteration {
   public:
     RankIteration(std::vector<uint64_t> iterations_per_rank, Idx rank_index)
@@ -1135,15 +1155,25 @@ class TapPositionOptimizerImpl<std::tuple<TransformerTypes...>, StateCalculator,
     }
 
     template <typename TransformerType, typename Regulator, typename State, typename ResultType>
-    auto compute_node_state_and_param(Regulator const& regulator, State const& state, ResultType const& solver_output) {
+    auto compute_node_state_and_param([[maybe_unused]] TransformerType const& transformer, Regulator const& regulator,
+                                      State const& state, ResultType const& solver_output) {
         using sym = decode_symmetry_v<typename ResultType::value_type>;
 
         auto const param = regulator.regulator.get().template calc_param<sym>();
-        auto const node_state =
-            NodeState<sym>{.u = u_pu_controlled_node<TransformerType>(regulator, state, solver_output),
-                           .i = i_pu_controlled_node<TransformerType>(regulator, state, solver_output)};
+        if constexpr (std::same_as<TransformerType, SinglePhaseTransformer>) {
+            auto const node_state =
+                SinglePhaseNodeState<sym>{.u = u_pu_controlled_node<TransformerType>(regulator, state, solver_output),
+                                          .i = i_pu_controlled_node<TransformerType>(regulator, state, solver_output),
+                                          .transformer = std::cref(transformer),
+                                          .side = static_cast<BranchSide>(regulator.regulator.get().control_side())};
+            return std::make_pair(node_state, param);
+        } else {
+            auto const node_state =
+                NodeState<sym>{.u = u_pu_controlled_node<TransformerType>(regulator, state, solver_output),
+                               .i = i_pu_controlled_node<TransformerType>(regulator, state, solver_output)};
 
-        return std::make_pair(node_state, param);
+            return std::make_pair(node_state, param);
+        }
     }
 
     bool adjust_transformer_scan(RegulatedTransformer const& regulator, State const& state,
@@ -1156,7 +1186,8 @@ class TapPositionOptimizerImpl<std::tuple<TransformerTypes...>, StateCalculator,
                 return;
             }
 
-            auto [node_state, param] = compute_node_state_and_param<TransformerType>(regulator, state, solver_output);
+            auto [node_state, param] =
+                compute_node_state_and_param<TransformerType>(transformer, regulator, state, solver_output);
 
             bool control_at_tap_side = regulator.control_at_tap_side();
 
@@ -1198,7 +1229,8 @@ class TapPositionOptimizerImpl<std::tuple<TransformerTypes...>, StateCalculator,
                 return;
             }
 
-            auto [node_state, param] = compute_node_state_and_param<TransformerType>(regulator, state, solver_output);
+            auto [node_state, param] =
+                compute_node_state_and_param<TransformerType>(transformer, regulator, state, solver_output);
 
             auto const cmp = node_state <=> param;
             if (auto new_tap_pos =
