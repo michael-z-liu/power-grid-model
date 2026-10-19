@@ -302,6 +302,8 @@ A valid result of `validate_input_data` therefore does not guarantee that the ca
 | state estimation               | not supported, symmetric or asymmetric (`ReducedPhaseNotSupported`)                                           |
 
 * **Power flow.** Newton-Raphson with its default (linear) initialization is the most robust method.
+  Networks with connectors of a near-zero impedance need a different tolerance or a merge; see
+  [Networks with near-zero impedance branches](./calculations.md#networks-with-near-zero-impedance-branches).
   The iterative current method handles a phase-to-phase secondary that is not earthed (for example an `ab` → `ab`
   transformer) when a constant-impedance (`const_y`) load is connected to it, because such loads are part of its
   matrix in a network with an absent phase. With only constant-power or constant-current loads there, the

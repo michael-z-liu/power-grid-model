@@ -335,6 +335,7 @@ The `single_phase_transformer` (all decided by Michael, 2026-10-15):
   $y_0/3 \cdot \mathbf{1}_{3\times3}$ of `transformer`); the differential mode is untouched. Limitation: the two
   windings of an `a` → `a` transformer cannot share one earth electrode; each side has its own (a shared electrode
   is listed under [Later work](#later-work)).
+  * **Confirmed by Michael (2026-10-19).** The low-susceptance fallback stays. A warning for windings left floating is a scheduled follow-up (see [Later work](#later-work)).
 * **D15. `u1`/`u2` are winding voltages**, the rated voltages across the connection terminals: for example 22 kV
   for an `ab` primary, 12.7 kV for an `a` SWER secondary and 240 V for an `a` LV winding. Node `u_rated` stays
   $\sqrt3 \times$ the phase-to-earth voltage, so the nominal winding voltage implied by a node is $u_{rated}/\sqrt3$
@@ -531,6 +532,7 @@ Delta (phase-to-phase) loads (decided by recommendation under Michael's blanket 
   load P gives $p_a = p_b = P/2$, $q_a = -P/(2\sqrt3)$, $q_b = +P/(2\sqrt3)$ and 0 on c; at a split-phase node
   ($U_b = -U_a$) it gives $s_a = s_b = S/2$. Branch-level output (p_ab, ...) would need new solver output fields
   and can be added later.
+  * **Confirmed by Michael (2026-10-19).** Per-phase output of delta loads stays; branch-level output stays in [Later work](#later-work).
 * **D31. Short circuit.** Loads are ignored in short circuits (`get_null_sc_output`, and the short-circuit solver
   has no load_gen code), so delta loads need no short-circuit change. A model whose only special feature is delta
   loads may still use the **symmetric** short circuit (all faults three-phase). The experimental gate still applies.
@@ -583,6 +585,7 @@ Short-circuit phase validity (decided by recommendation under Michael's blanket 
   silently between scenarios), because the one-type-and-phase rule compares resolved phases (two default faults at
   an `a` and a `b` node would fail confusingly), and because rejecting first is forward-compatible. Users should
   use `to_connection = a` for SWER secondaries so that the default applies.
+  * **Confirmed by Michael (2026-10-19).** The default fault phases stay unadapted.
 * **D37. Batch: the cache run swallows `InvalidShortCircuitPhases`.** `JobAdapter::cache_calculate_impl` catches it,
   consistent with D3 and D4: `fault_phase`, `fault_object` and `status` can be updated, and topology changes per
   scenario move the node phases, so the update data may fix the base fault. Each scenario runs the check on its own
@@ -628,6 +631,7 @@ Python validation and documentation (decided by recommendation under Michael's b
   this, 25 of the 33 reduced-phase cases with a single-phase transformer, `phases` or a load `connection` fail
   the validation on this rule alone. It is a commit of its own, so that it can be proposed upstream separately, like M0.
   The self capacitance must still be positive.
+  * **Confirmed by Michael (2026-10-19).** The sign rule stays dropped. A physics check of the capacitance matrix is in [Later work](#later-work); the commit is listed under [To raise upstream](#to-raise-upstream).
 * **D41. `validate_single_phase_transformer`.**
   * **Required:** the branch fields plus `u1`, `u2`, `sn`, `uk`, `pk`, `i0`, `p0`, `from_connection` and
     `to_connection`. `clock`, the tap fields, `uk_half`/`pk_half` and the earthing fields are optional (D13, D18, D20,
@@ -680,6 +684,7 @@ Python validation and documentation (decided by recommendation under Michael's b
     `<core>/main_model_impl.hpp`, plus the documentation. The user manual states how to enable it today: the C API
     option `PGM_set_experimental_features`, or the private `_calculate_power_flow(...,
     experimental_features="enabled")` in Python, flagged as private and subject to change.
+  * **Confirmed by Michael (2026-10-19).** The gate stays; graduating the feature is proposed in the upstream pull request (see [To raise upstream](#to-raise-upstream)).
 * **D46. Documentation: a new user-manual page with a worked Python example that runs in a test; no notebook**
   (Michael's earlier call). `docs/user_manual/reduced-phase-networks.md` replaces the "example notebook" of the M9
   row, and `tests/unit/test_docs_reduced_phase_example.py` executes its code blocks.
@@ -696,6 +701,7 @@ reported to him, because it changes the approved plan):
   rating, the feeder peaks are 8.1 MW (SMR8) and 7.0 MW (KLO14), and the lowest node voltage is 0.845 pu (SMR8, on a SWER
   node) and 0.910 pu (KLO14, on a split-phase LV busbar; its lowest SWER node is at 0.933 pu). The generator has a
   voltage gate of 0.8 pu and stops with a message that names this decision when the loads are too high. `MAX_DEMAND` and `MIN_DEMAND` are constants in the generator.
+  * **Confirmed by Michael (2026-10-19).** Maximum demand 20 %, minimum demand 10 % stay.
 * **D48. The ISO coincidence factor applies at maximum demand only.** The SWER loads behind an isolating transformer
   (ISO) get $\min(1, S_{ISO} / (0.2 \sum S_{tx}))$, with $S_{tx}$ the rating of the SWER distribution transformers behind it. The
   factor models the diversity of the peak. Minimum demand is base load, and every ISO is within its rating without it. At 20 %
@@ -742,6 +748,7 @@ reported to him, because it changes the approved plan):
     (phasor metric, merged nodes at their representative) and at most 0.1 % in losses; the feeder power changes by at most 2.3e-5. The README of each case lists the
     change per node class.
   * Faults sit on kept nodes only, so that the fault node exists in both tools.
+  * **Confirmed by Michael (2026-10-19).** Merging below 1e-3 ohm and the zone-substation $u_k$ of 1e-4 stay; there are no "as published" cases. The stall itself is recorded under [To raise upstream](#to-raise-upstream), and the user manual describes the workarounds.
 * **D55. The references carry no three-phase `line`, short-circuit `node` or `asym_line` output.** Whole component
   types can be left out of a reference (the harnesses compare the keys of the reference), but not a subset of rows. The
   power-flow reference has `node`, `asym_line`, `single_phase_transformer` and `transformer`; the short-circuit
@@ -791,7 +798,7 @@ reported to him, because it changes the approved plan):
 #### Taken in M11
 
 The iterative current method (IC) runs on every power-flow validation case (decided by recommendation under Michael's
-blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed for one method, and Michael is asked to review it):
+blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed for one method, and Michael confirmed it on 2026-10-19):
 
 * **D60. Per-method solver options in the validation parameters.** `extra_params.<method>` may hold `error_tolerance`,
   `max_iterations`, `rtol` and `atol`. The C++ harness (`construct_case`) and `reduced_phase_compare_pgm.py` now read
@@ -826,9 +833,9 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
   * **Measured bit-identity.** A capture of 21506 result keys (144 cases, 74 batch runs) before and after: every
     Newton-Raphson, linear, symmetric and three-phase key is identical. Only the IC and `linear_current` keys of absent-phase cases with const_y
     loads differ (IC node voltages by up to 2.5e-10 relative), and `phase-to-phase` IC no longer raises.
-  * **Applying it to all networks** is listed under [Later work](#later-work), because it changes three-phase results.
-* **D62. KLO14 runs IC with an IC-only `atol` of 1e-2 on `[pq]_(from|to)`.** *Taken under blanket approval; Michael
-  is to review it, because it is a looser tolerance than Newton-Raphson has.* Newton-Raphson keeps 1e-3.
+  * **Applying it to all networks** is listed under [To raise upstream](#to-raise-upstream), because it changes three-phase results.
+* **D62. KLO14 runs IC with an IC-only `atol` of 1e-2 on `[pq]_(from|to)`.** *Taken under blanket approval and
+  confirmed by Michael (2026-10-19); it is a looser tolerance than Newton-Raphson has.* Newton-Raphson keeps 1e-3.
   * **What fails.** At the default IC the worst entry is the 795 W phase-c flow through the 200 kVA regulator PLENTY_VLY_RISE
     (ratio 0.207 with the 1e-3 `atol`). Raising `error_tolerance` to 1e-10 lowers it to 0.111, no further: the fixed
     point of IC solves the rounded matrix, and the entry is off by about 2e-4 W of round-off (Newton-Raphson 1.2e-4 W).
@@ -851,6 +858,7 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
     * A small-grid check against a long-double reference (a chain with a 1e6x branch) showed the same: the form
       without C1, with C1 and Newton-Raphson all sit at the floor of machine epsilon times the condition number,
       so no unit test could separate C1 from the form without it.
+  * **Confirmed by Michael (2026-10-19).** The IC-only `atol` of 1e-2 stays.
 * **D63. The IC cases run with an IC-only `error_tolerance` of 1e-10, and the tolerances are tightened.** The constant
   `IC_ERROR_TOLERANCE` of `reduced_phase_opendss_cases.py` is passed through `extra_params.iterative_current` in every case that lists IC, and
   `australian_swer_networks.py` imports it. At the default 1e-8 IC stops on its convergence residual (worst ratio 2.645 on
@@ -903,7 +911,7 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
 | D11 | Validation of `asym_line` input with `phases` | [Taken in M3](#taken-in-m3) |
 | D12 | `WindingConnection1P` values | [Taken in M5](#taken-in-m5) |
 | D13 | Polarity through `clock` | [Taken in M5](#taken-in-m5) |
-| D14 | Earthing and the low-susceptance fallback | [Taken in M5](#taken-in-m5) |
+| D14 | Earthing and the low-susceptance fallback (confirmed 2026-10-19) | [Taken in M5](#taken-in-m5) |
 | D15 | `u1`/`u2` are winding voltages | [Taken in M5](#taken-in-m5) |
 | D16 | General phase shift | [Taken in M5](#taken-in-m5) |
 | D17 | Loading from the complex sum per side | [Taken in M5](#taken-in-m5) |
@@ -919,31 +927,31 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
 | D27 | Meaning of the delta entries | [Taken in M7](#taken-in-m7) |
 | D28 | Absent phases for delta loads | [Taken in M7](#taken-in-m7) |
 | D29 | Voltage dependence and per unit of delta loads | [Taken in M7](#taken-in-m7) |
-| D30 | Per-phase output of delta loads | [Taken in M7](#taken-in-m7) |
+| D30 | Per-phase output of delta loads (confirmed 2026-10-19) | [Taken in M7](#taken-in-m7) |
 | D31 | Short circuit with delta loads | [Taken in M7](#taken-in-m7) |
 | D32 | Where delta is allowed | [Taken in M7](#taken-in-m7) |
 | D33 | Calculation gates for delta loads | [Taken in M7](#taken-in-m7) |
 | D34 | Model-level check of the fault phases | [Taken in M8](#taken-in-m8) |
 | D35 | `InvalidShortCircuitPhases` with a new constructor | [Taken in M8](#taken-in-m8) |
-| D36 | Default fault phases are not adapted to the node | [Taken in M8](#taken-in-m8) |
+| D36 | Default fault phases are not adapted to the node (confirmed 2026-10-19) | [Taken in M8](#taken-in-m8) |
 | D37 | The batch cache run swallows `InvalidShortCircuitPhases` | [Taken in M8](#taken-in-m8) |
 | D38 | What Python checks and what stays in C++ | [Taken in M9](#taken-in-m9) |
 | D39 | `asym_line.phases` validation | [Taken in M9](#taken-in-m9) |
-| D40 | Sign of the mutual capacitance | [Taken in M9](#taken-in-m9) |
+| D40 | Sign of the mutual capacitance (confirmed 2026-10-19) | [Taken in M9](#taken-in-m9) |
 | D41 | `validate_single_phase_transformer` | [Taken in M9](#taken-in-m9) |
 | D42 | `ValidationWarning` for the `u1`/`u2` rule | [Taken in M9](#taken-in-m9) |
 | D43 | Load `connection` | [Taken in M9](#taken-in-m9) |
 | D44 | Sensors on a `single_phase_transformer` | [Taken in M9](#taken-in-m9) |
-| D45 | The experimental gate stays | [Taken in M9](#taken-in-m9) |
+| D45 | The experimental gate stays (confirmed 2026-10-19) | [Taken in M9](#taken-in-m9) |
 | D46 | User-manual page, no notebook | [Taken in M9](#taken-in-m9) |
-| D47 | Maximum demand 20 %, minimum 10 %, power factor 0.95 | [Taken in M10](#taken-in-m10) |
+| D47 | Maximum demand 20 %, minimum 10 %, power factor 0.95 (confirmed 2026-10-19) | [Taken in M10](#taken-in-m10) |
 | D48 | ISO coincidence factor at maximum demand only | [Taken in M10](#taken-in-m10) |
 | D49 | Voltage regulators are fixed-neutral `YNyn0` banks | [Taken in M10](#taken-in-m10) |
 | D50 | ISOs are two-winding | [Taken in M10](#taken-in-m10) |
 | D51 | Split-phase transformers with an explicit Kersting split | [Taken in M10](#taken-in-m10) |
 | D52 | The 44 phase-to-earth units of KLO14 are 12.7 kV / 250 V | [Taken in M10](#taken-in-m10) |
 | D53 | $i_0 = p_0 = 0$ everywhere | [Taken in M10](#taken-in-m10) |
-| D54 | Near-zero connectors are merged, zone-substation $u_k$ 1e-4 | [Taken in M10](#taken-in-m10) |
+| D54 | Near-zero connectors are merged, zone-substation $u_k$ 1e-4 (confirmed 2026-10-19) | [Taken in M10](#taken-in-m10) |
 | D55 | References without `line`, short-circuit `node` and `asym_line` output | [Taken in M10](#taken-in-m10) |
 | D56 | Tolerances of the real-network cases | [Taken in M10](#taken-in-m10) |
 | D57 | Licence sidecars `MPL-2.0 AND BSD-3-Clause` | [Taken in M10](#taken-in-m10) |
@@ -951,7 +959,7 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
 | D59 | Runtime cost in the debug test run | [Taken in M10](#taken-in-m10) |
 | D60 | Per-method solver options in the validation parameters | [Taken in M11](#taken-in-m11) |
 | D61 | Iterative current changes gated on a bus with an absent phase | [Taken in M11](#taken-in-m11) |
-| D62 | KLO14 iterative current: IC-only `atol` of 1e-2 on the branch powers (to be reviewed by Michael) | [Taken in M11](#taken-in-m11) |
+| D62 | KLO14 iterative current: IC-only `atol` of 1e-2 on the branch powers (confirmed 2026-10-19) | [Taken in M11](#taken-in-m11) |
 | D63 | Iterative current cases run with error tolerance 1e-10 and tighter tolerances | [Taken in M11](#taken-in-m11) |
 | D64 | A NaN deviation raises `IterationDiverge` | [Taken in M11](#taken-in-m11) |
 | D65 | Iterative current ignores `calculation_initialization` | [Taken in M11](#taken-in-m11) |
@@ -1002,7 +1010,7 @@ convention. It must be stated clearly in the Node section of `docs/user_manual/c
   `(cabs(y_shunt) >= tol).all()` guard is applied to the present entries only. For `abc` this guard drops the whole
   open-end shunt when a *mutual* capacitance is 0; that pre-existing behaviour is kept and is a candidate for a
   separate fix, because changing it changes three-phase results. Michael decided on 2026-10-15 to leave it as it is
-  for now.
+  for now; it is listed under [To raise upstream](#to-raise-upstream).
 * **SWER line.** A SWER line is `phases = a` (or `b` or `c`) with a 1×1 impedance whose self term already includes
   the Carson earth-return correction:
 
@@ -1328,7 +1336,7 @@ ratio 0.069 at M10; see D56 for the values after M11). The generated `README.md`
 * **Near-zero impedances limit the Newton-Raphson solver of PGM, with or without reduced-phase components** (D54). The three-phase-only version of each network stalls at
   the same deviation. An impedance floor, as an easy fix, changes the network (voltages by up to 0.4 %, losses by 4 % to 10 %); merging the connectors
   changes it by at most 5.5e-5 in voltage and 0.1 % in losses. Whichever fix is used, it must be applied to both tools,
-  and the generator solves the unreduced network in OpenDSS to report how far the fix moved the solution. See [Later work](#later-work).
+  and the generator solves the unreduced network in OpenDSS to report how far the fix moved the solution. See [To raise upstream](#to-raise-upstream).
 * **Size and runtime are design inputs.** The reference output was trimmed to what the budget allowed (D55: no three-phase `line`, short-circuit `node` or
   `asym_line` output; compact JSON; 12 significant digits), which keeps the data at 9.0 MB. The cases still add 136 s and 46 s to the debug test run (D59).
 * **Short branches need a per-field `atol`** (D56): a power computed from the voltages at both ends of a branch of 1e-3 ohm
@@ -1470,13 +1478,79 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
   * How faithfully the OpenDSS references model the centre-tap impedance split. Resolved in M6 by the YPrim
     check of every centre-tapped transformer.
 
+## To raise upstream
+
+Items for the upstream maintainers. Nothing has been submitted: Michael wants everything consolidated and final first
+(2026-10-19). Each item has a description, the evidence and a proposal.
+
+* **a. The Newton-Raphson stall on networks with near-zero impedance branches** (D54).
+  * **Description.** On the SMR8 and KLO14 data, with connectors down to 1.4e-7 ohm, the Newton-Raphson power flow does
+    not reach the default `error_tolerance` of 1e-8 and raises `IterationDiverge`. It is pre-existing: the model with only its
+    three-phase parts stalls too (0.8e-7 to 5.3e-7).
+  * **Evidence.** The maximum deviation wanders in a band of 1.9e-7 to 1.1e-6 (SMR8) and 7.7e-8 to 4.4e-7 (KLO14) from
+    iteration 20 to 100; it does not shrink with more iterations. OpenDSS converges on the same network to 1e-11.
+    The PGM iterative current method converges at the default 1e-8 with an accuracy of about 3e-7 against OpenDSS, and
+    the difference between PGM Newton-Raphson and PGM iterative current is the same size, so the floor is the
+    round-off in the ill-conditioned admittance matrix. Workarounds: merging the branches below 1e-3 ohm gives an
+    accuracy of 4e-10, and Newton-Raphson with `error_tolerance` 1e-5 converges in 2 to 3 iterations (1e-6 is marginal
+    on SMR8, where the band reaches 1.1e-6). The user manual describes them (see
+    [Networks with near-zero impedance branches](../user_manual/calculations.md#networks-with-near-zero-impedance-branches)).
+  * **Proposal.** Merge near-zero impedance branches automatically before the solve, or use a convergence test that knows
+    the round-off floor of the admittance matrix. Both change the behaviour of three-phase networks, so they are the
+    maintainers' call.
+* **b. The Newton-Raphson flat and `average_source` starts ignore off-nominal transformer ratios.**
+  * **Description.** With `calculation_initialization` `flat` or `average_source`, Newton-Raphson diverges
+    (`IterationDiverge`) or ends in a `SparseMatrixError` on networks with a stiff transformer that has an
+    off-nominal ratio. It is pre-existing: it is reproduced on a three-phase network.
+  * **Evidence.** The reproduction has 3 nodes: a 66 kV source, a 66/22.9 kV 100 MVA transformer with $u_k$ 1e-4, one
+    line and a 1 MW load. The default (linear) start converges; `flat` and `average_source` fail, symmetric and
+    asymmetric. The same happens on all SMR8 and KLO14 cases with and without the reduced-phase components. The cause
+    is that the flat start puts every node at 1 p.u. and so is about 4 % off in voltage ratio across a branch whose
+    impedance is 1/500 of that of the source; the first step is then about 1 p.u. wrong, and the iteration never
+    reaches the quadratic region. Setting the transformer `u2` to the node voltage makes the flat start converge. The
+    minimal reproduction script is kept locally, for the issue.
+  * **Proposal.** A ratio-aware start: from the sources outward, give each branch its no-load voltage
+    $V_{to} = -Y_{tt}^{-1} Y_{tf} V_{from}$, which includes ratio, tap and phase shift. For reduced-phase nodes restrict
+    the inverse to the present phases. The default start and the iterative current method are not affected; the
+    results of `flat` and `average_source` change. Cheaper alternative: document the limitation and recommend the
+    default start.
+* **c. M0: `average_of_off_diagonal_of_matrix`** (commit 4928cfa3d). The function adds `matrix(1, 2)` twice and leaves out
+  `matrix(0, 2)`, so symmetric results for any non-transposed `asym_line` are slightly wrong (see
+  [Pre-existing defects](#pre-existing-defects-found-during-this-investigation)). The commit has the fix and a new unit
+  test, and can be proposed on its own; it also touches this design document, which stays in the fork.
+* **d. D40: drop the sign rule on the mutual capacitance** (commit cd8a9975b). The Python validation requires
+  `c_ba`, `c_ca`, `c_cb` $\geq 0$, but the core uses the c matrix as the nodal (Maxwell) matrix, so any sign is valid,
+  and the `c0`/`c1` form gives negative mutual capacitances. The commit can be proposed on its own; its test uses
+  `phases`, so it needs a two-line edit to apply on the upstream branch.
+* **e. The open-end shunt guard of `asym_line`.** The open-end shunt is dropped as a whole when a mutual capacitance
+  is 0 (see [`asym_line` with `phases`](#asym_line-with-phases)). It is pre-existing, and fixing it changes
+  three-phase results.
+* **f. The M11 change for all networks, and the record of C1.**
+  * **const_y loads in the IC matrix** (D61). Since M11 the constant-impedance loads are part of the prefactorised matrix of
+    the iterative current method, but only when a bus has an absent phase, so that three-phase results stay bit
+    for bit. Applying it to every network makes the method converge in fewer iterations wherever const_y loads exist, but it
+    changes three-phase results; that is for the maintainers to decide.
+  * **C1 was tried and rejected** (D62). The residual (defect-correction) form of the iterative current method gave no gain
+    in accuracy against OpenDSS or Newton-Raphson and a stall floor of 2e-11 to 5e-11 in the deviation. It is a record
+    only, so that the maintainers need not repeat it.
+* **g. Graduating the feature** (D45). Remove the experimental gate once the maintainers accept the feature. The limitations to
+  state: state estimation, symmetric calculations, and sources and voltage regulators on reduced-phase buses are not
+  supported; the start-value limitation of D25; the iterative current divergence on a floating common mode with only
+  const_pq or const_i loads (D61); and the topology rules that only C++ checks (D38).
+* **h. Two documentation bugs in `docs/user_manual/calculations.md`**, fixed in this fork: an unclosed `{note}` block in
+  the short-circuit section, and the link `calulations.md#floating-grid-handling` (twice), which has a typo and should
+  point to `#floating-grid-handling` on the same page.
+* **i. The main pull request:** everything in this branch, to be proposed when the items above are settled.
+
 ## Later work
 
 Everything below is outside the implemented milestones. Items that are also open questions were confirmed as out of
-scope by Michael (2026-10-15).
+scope by Michael (2026-10-15). Items marked *scheduled* are follow-ups planned in this fork; items for the upstream
+maintainers are under [To raise upstream](#to-raise-upstream).
 
 * **State estimation with masks** (open question 5), with per-phase observability rules.
-* **A tap regulator on a `single_phase_transformer`** (D18, D44).
+* **A tap regulator on a `single_phase_transformer`** (D18, D44). *Scheduled (2026-10-19).*
+* **A warning for windings left floating,** that is a winding with no earth path (D14-B). *Scheduled (2026-10-19).*
 * **Sources and voltage regulators on reduced-phase nodes** (open question 3).
 * **A delta `sym_load` and symmetric delta calculations** (open question 2, D26, D33).
 * **The voltage factor *c* per fault location** (open question 4).
@@ -1487,28 +1561,18 @@ scope by Michael (2026-10-15).
   neutral** (D22).
 * **`ac` and `bc` centre-tapped windings** (D19) and **`uk_half_min/max`** (D24).
 * **Start values behind a split-phase bus**, for a transformer fed from a split-phase node (D25).
-* **The open-end shunt guard of `asym_line`**, which drops the whole open-end shunt when a mutual capacitance is 0
-  (see [`asym_line` with `phases`](#asym_line-with-phases)); changing it changes three-phase results.
+* **A physics check of the `asym_line` capacitance matrix** (D40-B), for example that the matrix is diagonally dominant,
+  now that the sign rule is gone.
 * **A best-effort Python check of the node phases** (D38).
-* **A public Python experimental switch, or graduating the feature** (D45).
-* **The M11 solver changes for all networks, upstream** (D61). The const_y loads in the IC matrix ("C2") are gated on a
-  bus with an absent phase, so that three-phase results stay bit-identical. Applying them to every network makes IC converge
-  in fewer iterations wherever const_y loads exist, but it changes three-phase results bit for bit, so it is a decision for the upstream maintainers.
-* **The residual (defect-correction) form of IC, "C1"** (D62). Evaluated in M11 and not adopted: no gain in accuracy against
-  OpenDSS or Newton-Raphson, and a stall floor of 2e-11 to 5e-11 in the deviation on SMR8 and KLO14 (see D62 for the numbers). It could be reconsidered
-  only if a case shows a systematic IC offset that the form without C1 cannot remove. The patch is not in the repository.
 * **An all-load preconditioner for IC at a floating common mode with only const_pq or const_i loads.** Since M11
   a floating common mode converges when some const_y load is at it. With only const_pq or const_i loads, IC stays
   finite but does not converge and raises `IterationDiverge` at `max_iterations`; the matrix could also hold the linearised
   admittance $-\overline{S}$ of those loads at the floating buses. OpenDSS cannot solve such a network either (M5).
-* **The Newton-Raphson `SparseMatrixError` on KLO14 from the flat and average-source starts.** Both starts give a singular matrix on KLO14; the default (linear) start
-  works, and IC (which always starts at the average source) converges. Not investigated.
 * **IC honouring `calculation_initialization`** (D65). IC always starts from the average-source voltage.
-* **The Newton-Raphson stall on networks with near-zero impedance branches** (D54). On the SMR8 and KLO14 data, with
-  connectors down to 1.4e-7 ohm, the Newton-Raphson power flow stalls at a maximum deviation of about 3e-7, above the
-  error tolerance of 1e-8. This is pre-existing: it also happens with only the three-phase parts. Possible remedies are
-  merging zero-impedance branches automatically before the solve, or a convergence criterion relative to the conditioning of the admittance matrix. It
-  changes the behaviour of three-phase networks too, so it needs a discussion with the upstream maintainers.
+
+The Newton-Raphson stall on near-zero impedance branches (D54), the `SparseMatrixError` from the flat and average-source
+starts on KLO14 (a pre-existing start-value problem, item b), the open-end shunt guard, the M11 changes for all networks,
+the C1 record and graduating the feature (D45) are under [To raise upstream](#to-raise-upstream).
 
 ## Open questions
 

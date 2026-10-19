@@ -356,6 +356,25 @@ This signal can be ignored when using linear methods.
 Similarly, having atleast some results from linear methods can aid in finding data errors or the reason
 for non convergence of newton raphson method.
 
+#### Networks with near-zero impedance branches
+
+Real utility data often contains dummy connectors with an impedance far below 1 mΩ.
+They make the admittance matrix ill-conditioned, so the accuracy of the solution is limited by round-off.
+[Newton-Raphson](../algorithms/pf-algorithms.md#newton-raphson-power-flow) can then stall at a maximum deviation of
+about 1e-7 to 1e-6 and raise `IterationDiverge` at the default `error_tolerance` of 1e-8, although the solution is
+already accurate to a few 1e-7.
+You have the following options:
+
+- Merge such branches into one node before the calculation. This gives the best accuracy (about 4e-10 in the voltages on
+  the two real networks we measured).
+- Use `error_tolerance=1e-5` with `newton_raphson`. On the same two networks it converged in 2 to 3 iterations and agreed
+  with OpenDSS to about 3e-7 to 7e-7 in the node voltages. A tolerance of 1e-6 is marginal: it can still be below the
+  level at which the iteration stalls.
+- Use [Iterative current](../algorithms/pf-algorithms.md#iterative-current-power-flow) at the default tolerance. It
+  converges and has a similar accuracy.
+
+Do not loosen the tolerance of the iterative current method to 1e-5 on such networks: its accuracy then drops.
+
 ### Regulated power flow calculations
 
 Regulated power flow calculations are disabled by default.
