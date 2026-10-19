@@ -22,10 +22,12 @@
 #include <power_grid_model/common/three_phase_tensor.hpp>
 #include <power_grid_model/common/typing.hpp>
 #include <power_grid_model/component/appliance.hpp>
+#include <power_grid_model/component/asym_line.hpp>
 #include <power_grid_model/component/base.hpp>
 #include <power_grid_model/component/branch.hpp>
 #include <power_grid_model/component/branch3.hpp>
 #include <power_grid_model/component/component.hpp>
+#include <power_grid_model/component/generic_branch.hpp>
 #include <power_grid_model/component/line.hpp>
 #include <power_grid_model/component/link.hpp>
 #include <power_grid_model/component/node.hpp>
@@ -72,7 +74,7 @@ namespace optimizer::tap_position_optimizer::test {
 namespace {
 using TestComponentContainer =
     Container<ExtraRetrievableTypes<Base, Node, Branch, Branch3, Appliance, Regulator>, Line, Link, Node, Transformer,
-              ThreeWindingTransformer, TransformerTapRegulator, Source>;
+              ThreeWindingTransformer, TransformerTapRegulator, Source, AsymLine, GenericBranch>;
 using TestState = main_core::MainModelState<TestComponentContainer>;
 
 TransformerInput get_transformer(ID id, ID from, ID to, BranchSide tap_side, IntS tap_pos = na_IntS,
@@ -180,6 +182,43 @@ LineInput get_line_input(ID id, ID from, ID to) {
                      .tan0 = nan,
                      .i_n = nan};
 }
+AsymLineInput get_asym_line_input(ID id, ID from, ID to, IntS from_status = 1) {
+    return AsymLineInput{.id = id,
+                         .from_node = from,
+                         .to_node = to,
+                         .from_status = from_status,
+                         .to_status = 1,
+                         .r_aa = 0.2,
+                         .r_ba = 0.05,
+                         .r_bb = 0.2,
+                         .r_ca = 0.05,
+                         .r_cb = 0.05,
+                         .r_cc = 0.2,
+                         .x_aa = 0.4,
+                         .x_ba = 0.1,
+                         .x_bb = 0.4,
+                         .x_ca = 0.1,
+                         .x_cb = 0.1,
+                         .x_cc = 0.4,
+                         .c0 = 1e-9,
+                         .c1 = 1e-9};
+}
+
+GenericBranchInput get_generic_branch_input(ID id, ID from, ID to) {
+    return GenericBranchInput{.id = id,
+                              .from_node = from,
+                              .to_node = to,
+                              .from_status = 1,
+                              .to_status = 1,
+                              .r1 = 0.1,
+                              .x1 = 0.2,
+                              .g1 = 0.0,
+                              .b1 = 0.0,
+                              .k = 1.0,
+                              .theta = 0.0,
+                              .sn = nan};
+}
+
 TransformerTapRegulatorInput get_regulator(ID id, ID regulated_object, ControlSide control_side) {
     return TransformerTapRegulatorInput{.id = id,
                                         .regulated_object = regulated_object,
@@ -781,6 +820,114 @@ TEST_CASE("Test Transformer ranking") {
         pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
         pgm_tap::RankedTransformerGroups const ref_order{
             {Idx2D{.group = 3, .pos = 0}}, {Idx2D{.group = 3, .pos = 2}}, {{Idx2D{.group = 3, .pos = 1}}}};
+        CHECK(std::ranges::equal(order, ref_order));
+    }
+
+    SUBCASE("Transformer reached through an asym_line or a generic_branch") {
+        // ========Test Grid========
+        //  [source 20]
+        //      |
+        //   [node 0] --(asym_line 10 / generic_branch 10)-- [node 1] --[trafo 11]-- [node 2]
+        //
+        // Without the asym_line and generic_branch edges in the graph, trafo 11 is unreachable and silently skipped.
+        enum class Via : std::uint8_t { asym_line, asym_line_open, generic_branch };
+
+        auto const get_state = [](Via via, ControlSide control_side) {
+            TestState state;
+            std::vector<NodeInput> const nodes{
+                {.id = 0, .u_rated = 10e3}, {.id = 1, .u_rated = 10e3}, {.id = 2, .u_rated = 400}};
+            main_core::add_component<Node>(state.components, nodes, 50.0);
+
+            if (via == Via::generic_branch) {
+                std::vector const generic_branches{test::get_generic_branch_input(10, 0, 1)};
+                main_core::add_component<GenericBranch>(state.components, generic_branches, 50.0);
+            } else {
+                IntS const from_status = via == Via::asym_line ? IntS{1} : IntS{0};
+                std::vector const asym_lines{test::get_asym_line_input(10, 0, 1, from_status)};
+                main_core::add_component<AsymLine>(state.components, asym_lines, 50.0);
+            }
+
+            std::vector const transformers{get_transformer(11, 1, 2, BranchSide::from)};
+            main_core::add_component<Transformer>(state.components, transformers, 50.0);
+
+            std::vector const sources{SourceInput{.id = 20, .node = 0, .status = IntS{1}, .u_ref = 1.0}};
+            main_core::add_component<Source>(state.components, sources, 50.0);
+
+            std::vector const regulators{get_regulator(30, 11, control_side)};
+            main_core::add_component<TransformerTapRegulator>(state.components, regulators, 50.0);
+
+            state.components.set_construction_complete();
+            return state;
+        };
+
+        SUBCASE("Ranked through an asym_line") {
+            auto const state = get_state(Via::asym_line, ControlSide::to);
+            Idx2D const trafo_idx = main_core::get_component_idx_by_id<Transformer>(state.components, 11);
+
+            pgm_tap::TrafoGraphEdgeProperties const regulated_edge_weights =
+                pgm_tap::get_edge_weights(pgm_tap::build_transformer_graph(state));
+            pgm_tap::TrafoGraphEdgeProperties const ref_regulated_edge_weights{{trafo_idx, 1, 11}};
+            CHECK(regulated_edge_weights == ref_regulated_edge_weights);
+
+            pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
+            pgm_tap::RankedTransformerGroups const ref_order{{trafo_idx}};
+            CHECK(std::ranges::equal(order, ref_order));
+        }
+
+        SUBCASE("Ranked through a generic_branch") {
+            auto const state = get_state(Via::generic_branch, ControlSide::to);
+            Idx2D const trafo_idx = main_core::get_component_idx_by_id<Transformer>(state.components, 11);
+
+            pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
+            pgm_tap::RankedTransformerGroups const ref_order{{trafo_idx}};
+            CHECK(std::ranges::equal(order, ref_order));
+        }
+
+        SUBCASE("Not reached through an open asym_line") {
+            auto const state = get_state(Via::asym_line_open, ControlSide::to);
+            CHECK(pgm_tap::rank_transformers(state).empty());
+        }
+
+        SUBCASE("Controlled towards the source through an asym_line") {
+            auto const state = get_state(Via::asym_line, ControlSide::from);
+            CHECK_THROWS_AS(pgm_tap::rank_transformers(state), AutomaticTapInputError);
+        }
+
+        SUBCASE("Controlled towards the source through a generic_branch") {
+            auto const state = get_state(Via::generic_branch, ControlSide::from);
+            CHECK_THROWS_AS(pgm_tap::rank_transformers(state), AutomaticTapInputError);
+        }
+    }
+
+    SUBCASE("Two ranks coupled through an asym_line") {
+        // ========Test Grid========
+        //  [source 20] - [node 0] --[trafo 11]-- [node 1] --(asym_line 10)-- [node 2] --[trafo 12]-- [node 3]
+        TestState state;
+        std::vector<NodeInput> const nodes{{.id = 0, .u_rated = 150e3},
+                                           {.id = 1, .u_rated = 10e3},
+                                           {.id = 2, .u_rated = 10e3},
+                                           {.id = 3, .u_rated = 400}};
+        main_core::add_component<Node>(state.components, nodes, 50.0);
+
+        std::vector const asym_lines{test::get_asym_line_input(10, 1, 2)};
+        main_core::add_component<AsymLine>(state.components, asym_lines, 50.0);
+
+        std::vector const transformers{get_transformer(11, 0, 1, BranchSide::from),
+                                       get_transformer(12, 2, 3, BranchSide::from)};
+        main_core::add_component<Transformer>(state.components, transformers, 50.0);
+
+        std::vector const sources{SourceInput{.id = 20, .node = 0, .status = IntS{1}, .u_ref = 1.0}};
+        main_core::add_component<Source>(state.components, sources, 50.0);
+
+        std::vector const regulators{get_regulator(30, 11, ControlSide::to), get_regulator(31, 12, ControlSide::to)};
+        main_core::add_component<TransformerTapRegulator>(state.components, regulators, 50.0);
+
+        state.components.set_construction_complete();
+
+        Idx2D const trafo_11_idx = main_core::get_component_idx_by_id<Transformer>(state.components, 11);
+        Idx2D const trafo_12_idx = main_core::get_component_idx_by_id<Transformer>(state.components, 12);
+        pgm_tap::RankedTransformerGroups const order = pgm_tap::rank_transformers(state);
+        pgm_tap::RankedTransformerGroups const ref_order{{trafo_11_idx}, {trafo_12_idx}};
         CHECK(std::ranges::equal(order, ref_order));
     }
 }

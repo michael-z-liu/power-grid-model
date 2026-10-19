@@ -13,10 +13,12 @@
 #include "../common/enum.hpp"
 #include "../common/exception.hpp"
 #include "../common/three_phase_tensor.hpp"
+#include "../component/asym_line.hpp"
 #include "../component/branch.hpp"
 #include "../component/branch3.hpp"
 #include "../component/component.hpp"
 #include "../component/edge.hpp"
+#include "../component/generic_branch.hpp"
 #include "../component/line.hpp"
 #include "../component/link.hpp"
 #include "../component/node.hpp"
@@ -258,6 +260,19 @@ inline auto add_edges(State const& state, RegulatedObjects const& regulated_obje
     (add_edge<ComponentTypes>(state, regulated_objects, edges, edge_props), ...);
 }
 
+// Same as add_edges, but skips the component types that the model's component container does not hold.
+template <typename... ComponentTypes, main_core::main_model_state_c State>
+inline auto add_edges_if_present(State const& state, RegulatedObjects const& regulated_objects, TrafoGraphEdges& edges,
+                                 TrafoGraphEdgeProperties& edge_props) {
+    (
+        [&] {
+            if constexpr (common::component_container_c<typename State::ComponentContainer, ComponentTypes>) {
+                add_edge<ComponentTypes>(state, regulated_objects, edges, edge_props);
+            }
+        }(),
+        ...);
+}
+
 template <main_core::main_model_state_c State>
 inline auto retrieve_regulator_info(State const& state) -> RegulatedObjects {
     RegulatedObjects regulated_objects;
@@ -288,6 +303,8 @@ inline auto build_transformer_graph(State const& state) -> TransformerGraph {
     const RegulatedObjects regulated_objects = retrieve_regulator_info(state);
 
     add_edges<Transformer, ThreeWindingTransformer, Line, Link>(state, regulated_objects, edges, edge_props);
+    // all other branch types also connect nodes: a transformer reachable only through one of them must be ranked too
+    add_edges_if_present<AsymLine, GenericBranch>(state, regulated_objects, edges, edge_props);
 
     // build graph
     TransformerGraph trafo_graph{boost::edges_are_unsorted_multi_pass, edges.cbegin(), edges.cend(),

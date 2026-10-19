@@ -413,6 +413,117 @@ def test_automatic_tap_changing():
     model.calculate_power_flow(tap_changing_strategy=TapChangingStrategy.min_voltage_tap)
 
 
+def _regulated_transformer_behind_branch(branch_type: CT):
+    """source -> branch_type -> regulated 10/0.4 kV transformer (u_set 420 V, u_band 8 V) -> 28 kW load"""
+    node_input = initialize_array(DatasetType.input, CT.node, 3)
+    node_input[AT.id] = [1, 2, 3]
+    node_input[AT.u_rated] = [10e3, 10e3, 400.0]
+
+    source_input = initialize_array(DatasetType.input, CT.source, 1)
+    source_input[AT.id] = [4]
+    source_input[AT.node] = [1]
+    source_input[AT.status] = [1]
+    source_input[AT.u_ref] = [1.0]
+
+    branch_input = initialize_array(DatasetType.input, branch_type, 1)
+    branch_input[AT.id] = [5]
+    branch_input[AT.from_node] = [1]
+    branch_input[AT.to_node] = [2]
+    branch_input[AT.from_status] = [1]
+    branch_input[AT.to_status] = [1]
+    if branch_type == CT.line:
+        branch_input[AT.r1] = branch_input[AT.r0] = [0.1]
+        branch_input[AT.x1] = branch_input[AT.x0] = [0.1]
+        branch_input[AT.c1] = branch_input[AT.c0] = [0.0]
+        branch_input[AT.tan1] = branch_input[AT.tan0] = [0.0]
+    elif branch_type == CT.asym_line:
+        for attribute in (AT.r_aa, AT.r_bb, AT.r_cc, AT.x_aa, AT.x_bb, AT.x_cc):
+            branch_input[attribute] = [0.1]
+        for attribute in (AT.r_ba, AT.r_ca, AT.r_cb, AT.x_ba, AT.x_ca, AT.x_cb, AT.c0, AT.c1):
+            branch_input[attribute] = [0.0]
+    else:
+        branch_input[AT.r1] = [0.1]
+        branch_input[AT.x1] = [0.1]
+        branch_input[AT.g1] = [0.0]
+        branch_input[AT.b1] = [0.0]
+
+    transformer_input = initialize_array(DatasetType.input, CT.transformer, 1)
+    transformer_input[AT.id] = [6]
+    transformer_input[AT.from_node] = [2]
+    transformer_input[AT.to_node] = [3]
+    transformer_input[AT.from_status] = [1]
+    transformer_input[AT.to_status] = [1]
+    transformer_input[AT.u1] = [10e3]
+    transformer_input[AT.u2] = [400.0]
+    transformer_input[AT.sn] = [100e3]
+    transformer_input[AT.uk] = [0.1]
+    transformer_input[AT.pk] = [1e3]
+    transformer_input[AT.i0] = [1.0e-6]
+    transformer_input[AT.p0] = [0.1]
+    transformer_input[AT.winding_from] = [WindingType.wye_n]
+    transformer_input[AT.winding_to] = [WindingType.wye_n]
+    transformer_input[AT.clock] = [0]
+    transformer_input[AT.tap_side] = [BranchSide.from_side]
+    transformer_input[AT.tap_pos] = [0]
+    transformer_input[AT.tap_nom] = [0]
+    transformer_input[AT.tap_min] = [-10]
+    transformer_input[AT.tap_max] = [10]
+    transformer_input[AT.tap_size] = [100.0]
+
+    load_input = initialize_array(DatasetType.input, CT.sym_load, 1)
+    load_input[AT.id] = [7]
+    load_input[AT.node] = [3]
+    load_input[AT.status] = [1]
+    load_input[AT.type] = [LoadGenType.const_power]
+    load_input[AT.p_specified] = [28e3]
+    load_input[AT.q_specified] = [5.6e3]
+
+    regulator_input = initialize_array(DatasetType.input, CT.transformer_tap_regulator, 1)
+    regulator_input[AT.id] = [8]
+    regulator_input[AT.regulated_object] = [6]
+    regulator_input[AT.status] = [1]
+    regulator_input[AT.control_side] = [BranchSide.to_side]
+    regulator_input[AT.u_set] = [420.0]
+    regulator_input[AT.u_band] = [8.0]
+    regulator_input[AT.line_drop_compensation_r] = [0.0]
+    regulator_input[AT.line_drop_compensation_x] = [0.0]
+
+    return {
+        CT.node: node_input,
+        CT.source: source_input,
+        branch_type: branch_input,
+        CT.transformer: transformer_input,
+        CT.sym_load: load_input,
+        CT.transformer_tap_regulator: regulator_input,
+    }
+
+
+@pytest.mark.parametrize(
+    ("branch_type", "symmetric"),
+    [
+        (CT.line, True),
+        (CT.line, False),
+        (CT.asym_line, True),
+        (CT.asym_line, False),
+        (CT.generic_branch, True),
+    ],
+)
+def test_automatic_tap_changing_behind_any_branch(branch_type: CT, symmetric: bool):
+    # A regulated transformer reached from the source only through an asym_line or a generic_branch used to be left
+    # out of the transformer ranking and silently not regulated (tap_pos na, u 396.5 V outside the band).
+    model = PowerGridModel(_regulated_transformer_behind_branch(branch_type))
+    result = model.calculate_power_flow(symmetric=symmetric, tap_changing_strategy=TapChangingStrategy.any_valid_tap)
+
+    expected_tap_pos = -5
+    u_set = 420.0
+    u_band = 8.0
+    assert result[CT.transformer_tap_regulator][AT.tap_pos][0] == expected_tap_pos
+    u_low_voltage_node = result[CT.node][AT.u][2]
+    u_controlled = u_low_voltage_node if symmetric else np.mean(u_low_voltage_node) * np.sqrt(3)
+    assert u_controlled == pytest.approx(417.7, abs=0.05)
+    assert u_set - u_band / 2 <= u_controlled <= u_set + u_band / 2
+
+
 def test_conflicting_angle_measurement_type() -> None:
     node_input = initialize_array(DatasetType.input, CT.node, 2)
     node_input[AT.id] = [0, 1]
