@@ -273,6 +273,21 @@ centre-tapped winding.
 A typical mistake it catches is `u1` = 22 kV on an `a` winding at a 22 kV node, where 12.7 kV is meant.
 The warning does not make the data invalid (see [Validation warnings](data-validator.md#validation-warnings)).
 
+The validation also emits a `ValidationWarning` when a phase-to-phase winding (`ab`, `ac` or `bc`) of a
+`single_phase_transformer` has no earth reference.
+Such a winding has an undefined common-mode voltage; only a very small fallback admittance holds it, so the result
+depends on the loads alone (see [Supported calculations](#supported-calculations)).
+The network of the winding, up to the next transformer (the nodes reached through lines, `asym_line`s and links), has an
+earth reference if it holds a source, a phase-to-earth or centre-tapped `single_phase_transformer` winding, a `wye_n` or
+`zigzag_n` winding of a `transformer` or `three_winding_transformer`, a `shunt` with non-zero `g0` or `b0`, or a wye
+`const_impedance` load or generator with power.
+Constant-power and constant-current loads, delta loads, the capacitance of lines, and loads in a short circuit do not
+count.
+Only windings that are connected, switched on and energised from a source are checked.
+For batch data every scenario is checked after its update, and the warning is emitted once per call and names the
+scenarios.
+The check is best-effort: it does not see the phases of the nodes.
+
 ### What only the calculation checks
 
 The rules that need the phases of the nodes are only checked by the calculation, because these phases are derived from
@@ -309,6 +324,9 @@ A valid result of `validate_input_data` therefore does not guarantee that the ca
   matrix in a network with an absent phase. With only constant-power or constant-current loads there, the
   common-mode voltage of the winding is held only by a very small admittance to earth: the method stays finite but
   does not converge and raises `IterationDiverge` at `max_iterations`. Use Newton-Raphson there.
+  Newton-Raphson then gives a common-mode voltage that the loads alone set; with constant-current loads that value may
+  be meaningless, because the two loads in series would have to carry different currents.
+  The validation warns about such a winding (see [Validation](#validation)).
   The iterative current method always starts from the average-source voltage and ignores `calculation_initialization`.
   The start values of the flat and average-source initializations put leg b of a split-phase node opposite to leg a;
   a transformer that is fed *from* a split-phase node still gets a start that assumes 120° between the phases.

@@ -335,7 +335,7 @@ The `single_phase_transformer` (all decided by Michael, 2026-10-15):
   $y_0/3 \cdot \mathbf{1}_{3\times3}$ of `transformer`); the differential mode is untouched. Limitation: the two
   windings of an `a` → `a` transformer cannot share one earth electrode; each side has its own (a shared electrode
   is listed under [Later work](#later-work)).
-  * **Confirmed by Michael (2026-10-19).** The low-susceptance fallback stays. A warning for windings left floating is a scheduled follow-up (see [Later work](#later-work)).
+  * **Confirmed by Michael (2026-10-19).** The low-susceptance fallback stays. The validation warns about a phase-to-phase winding left floating (D67, FU4).
 * **D15. `u1`/`u2` are winding voltages**, the rated voltages across the connection terminals: for example 22 kV
   for an `ab` primary, 12.7 kV for an `a` SWER secondary and 240 V for an `a` LV winding. Node `u_rated` stays
   $\sqrt3 \times$ the phase-to-earth voltage, so the nominal winding voltage implied by a node is $u_{rated}/\sqrt3$
@@ -675,8 +675,8 @@ Python validation and documentation (decided by recommendation under Michael's b
   * Graduating a feature is the decision of the maintainers (`terminology.md`: undefined behaviour, no guarantees).
   * Real limitations remain: state estimation, symmetric calculations, sources and voltage regulators on
     reduced-phase buses; the start-value limitation of D25; the iterative-current divergence on a floating common
-    mode with only const_pq or const_i loads (const_y loads anchor it since M11, D61); and the topology rules that
-    only C++ checks (D38).
+    mode with only const_pq or const_i loads (const_y loads anchor it since M11, D61; the validation warns, D67); and the
+    topology rules that only C++ checks (D38).
   * **The public Python API has no experimental switch:** `calculate_*` does not accept `experimental_features`, only
     the private `_calculate_*` methods do (the tests use them). Removing the gate is the only way to make the
     feature publicly usable from Python, which is an API decision for upstream.
@@ -894,6 +894,76 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
   Newton-Raphson). The `-linear` cases do not, because with all loads const_y PGM runs the `linear` method for every method name.
   The `*-linear` cases list `linear_current`, whose const_y treatment in absent-phase networks changed (D61).
 
+#### Taken in FU4
+
+* **D67. A `ValidationWarning` for a phase-to-phase winding without an earth reference.** Requested by Michael as D14-B
+  (2026-10-19), decided by recommendation. A phase-to-phase winding of a `single_phase_transformer` whose network has
+  no earth reference only gets the low-susceptance fallback of D14, which holds the common-mode voltage of the winding
+  very weakly. The validation now warns about it. The warning does not change the result of the validation, and no
+  exception is raised.
+  * **Which windings are checked.** Every side of a `single_phase_transformer` that is `ab`, `ac` or `bc`, has status
+    on, and whose node is energised: connected through branches with both sides on (any type, windings included) to a
+    node with a source with status on. The energised condition avoids false alarms on switched-off sections and on unit
+    tests without a source. `ab_center_tapped` is never checked: its centre tap is earthed, solidly or through the
+    electrode, and has no low susceptance (D22, D24), so the legs are anchored.
+  * **The network of a side** is the set of nodes reached from its node through `line`, `asym_line` and `link` with both
+    sides on. The walk does not pass through `transformer`, `three_winding_transformer`, `single_phase_transformer` or
+    `generic_branch`. The network is anchored if it holds one of these:
+
+    | Anchor | Condition |
+    |---|---|
+    | `source` | status on |
+    | `single_phase_transformer` side | connection `a`, `b`, `c` or `ab_center_tapped`, and the status of that side on (either side of any such transformer, including the other side of the transformer itself) |
+    | `transformer` side | winding `wye_n` or `zigzag_n`, and the status of that side on |
+    | `three_winding_transformer` side | `winding_k` is `wye_n` or `zigzag_n`, and `status_k` on |
+    | `shunt` | status on, and `g0` or `b0` non-zero (NaN counts as 0) |
+    | `sym_load`, `sym_gen`, `asym_load`, `asym_gen` | status on, type `const_impedance`, connection not `delta` (not applicable means wye), and some non-zero `p_specified` or `q_specified` (NaN counts as 0). Not counted when `calculation_type` is `short_circuit`, because a short circuit ignores loads |
+
+  * **What does not count.** A `const_power` or `const_current` wye load: the iterative current method diverges with it
+    and Newton-Raphson gives a common mode that is set by the series loads (see the evidence below). The validation does
+    not know the method, so only `const_impedance` counts. A delta load has no earth reference. Line capacitance is
+    physical but too weak. The fallback of D14 itself does not count either.
+  * **Evidence** (read-only runs against the installed package). (1) A source at an 11 kV node, an `ab` → `ab`
+    `single_phase_transformer` (50 kVA, $u_k$ 0.04, $p_k$ 600 W, 11 kV / 415 V) and one `asym_load` of
+    [20, 12, 0] kW and [5, 3, 0] kvar at the 415 V node. With `const_power` loads Newton-Raphson converges (legs 255.6 V
+    and 153.4 V to earth: the loads act in series) and iterative current raises `IterationDiverge`. With `const_current`
+    loads Newton-Raphson "converges" to leg a = 0 V and leg b = 411.2 V, which is meaningless because the two series
+    loads carry one current and cannot both hold their different specified currents; iterative current raises
+    `IterationDiverge`. With `const_impedance` loads Newton-Raphson and iterative current agree (154.1 V and 256.8 V).
+    (2) On the `phase-to-phase` validation case with all loads `const_power` and an `ab` `asym_line` at node 3 with
+    $c_{aa} = c_{bb}$ from 0.3 µF up to 30 µF (an unrealistic 100 km of cable), iterative current still diverges
+    (the deviation after 50 iterations falls from 7.7e5 to 24 but it never converges) and the Newton-Raphson common mode
+    hardly moves (51.1 V to 51.0 V). (3) The rule gives no warning for any of the 20 cases in `tests/data` with a
+    `single_phase_transformer` (power flow and short circuit, including SMR8, KLO14, `phase-to-phase` and
+    `phase-to-phase-linear`): `phase-to-phase` is anchored by its const_y load 301 at node 3, and every phase-to-phase
+    primary sits on a network with a source. `test_reduced_phase_cases.py` turns any warning on these cases into an
+    error. (4) One existing unit test starts to warn: `test_all_default_values` has a `single_phase_transformer` with an
+    `ab` from side at node 0, which is reached only through delta windings. The warning is correct there, and the test
+    now expects it. A full run of `tests/unit` with `ValidationWarning` as an error finds no other test that warns.
+  * **Why Python and not C++.** The C++ core has an opt-in logger (`common/logging.hpp`, `PGM_create_logger`, and
+    `power_grid_model.Logger` in Python) with `LogEvent::warning`, which is defined but never used. The logger is
+    documented as giving "non-conclusive debugging hints", so most users would never see the message. The topology is
+    built without a logger (`construct_topology` in `set_construction_complete`), and it lacks the data the rule needs:
+    the winding types and earthing per side, the load type with its power, and the shunt g0/b0. A C++ diagnostic would
+    be M to L effort for a less visible result. It is listed under [Later work](#later-work).
+  * **Batches.** `validate_input_data` checks once. `validate_batch_data` checks the merged data of each scenario, because
+    the status, `p_specified`/`q_specified`, the source status and the shunt g0/b0 can all be updated. The input data
+    alone is not checked, which fits the remark that the input data by itself is not required to be valid. It emits one
+    warning per call: the union of the (id, side) pairs, with "in k of n batch scenarios (the first is scenario i)". The
+    rule returns at once when no connected phase-to-phase side exists, so other models pay nothing. Timing on KLO14
+    (`tests/data/power_flow/australian-swer/klo14`, input plus `update_batch.json`, median of 30 runs): `validate_batch_data`
+    took 45.1 ms before and 50.0 ms after, about 5 ms more.
+  * **The experimental gate** has no interaction: the validation does not know whether the gate is on, and
+    `single_phase_transformer` already needs it (D45). `symmetric` is ignored, because the C++ calculation already
+    rejects symmetric calculations here. `calculation_type` `None` is treated like power flow, the lenient choice.
+  * **Approximations.** The `transformer` rule counts a `wye_n` or `zigzag_n` side even when the network on the other side
+    has no earth of its own (PGM's own `zero_seq_available` is stricter). This gives a missed warning, never a false
+    alarm. An earth electrode with a huge `r_grounding` still counts. The walk does not see the node phases, so it is
+    the first topology walk in the Python validation; D38 keeps the rules that need the derived node phases in C++, and
+    this is acceptable because it is a warning and best-effort.
+  * **The M11 C++ test** (`make_floating_common_mode_grid` in `test_math_solver_pf_reduced_phase.cpp`) works at the math
+    model level, so Python validation never sees it. Its const_y loads would anchor it anyway.
+
 ### Decision index
 
 | Decision | Subject | Section |
@@ -964,6 +1034,7 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
 | D64 | A NaN deviation raises `IterationDiverge` | [Taken in M11](#taken-in-m11) |
 | D65 | Iterative current ignores `calculation_initialization` | [Taken in M11](#taken-in-m11) |
 | D66 | Scope of iterative current in the validation cases | [Taken in M11](#taken-in-m11) |
+| D67 | A `ValidationWarning` for a phase-to-phase winding without an earth reference | [Taken in FU4](#taken-in-fu4) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
@@ -1070,7 +1141,7 @@ $$
   then eliminate the terminal with `kron_eliminate` (`<core>/component/line_utils.hpp`), a single-node Kron
   reduction on an Eigen matrix; eliminating the terminals one after the other equals eliminating them together.
 * **Ungrounded windings:** a phase-to-phase winding with no earthed terminal has an undefined common-mode voltage.
-  It gets the low-susceptance fallback of decision D14.
+  It gets the low-susceptance fallback of decision D14; the Python validation warns when nothing else earths that side (D67).
 
 **Phase shift** (decision D16). `phase_shift()` ($\theta_{from} - \theta_{to}$) is
 
@@ -1120,7 +1191,7 @@ M5:
   Since M11 the iterative current method puts the const_y loads into its matrix in a network with an absent phase
   (D61), which anchors the common mode, and `phase-to-phase` runs it too (11 iterations at error tolerance 1e-10).
   The limitation that remains is a floating common mode with only const_pq or const_i loads and no const_y load
-  (see [Later work](#later-work)).
+  (see [Later work](#later-work)); the validation warns about it (D67).
 * OpenDSS replaces a fault resistance of 0 by 1e-4 Ω, so the reference models a bolted fault with 1e-13 Ω.
 * The earth electrode carries the winding current of the isolating transformer, which the generator checks in
   OpenDSS and the short-circuit case compares with PGM. In a SWER fault it is the phasor sum of the fault current and
@@ -1444,6 +1515,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
 | M9 (implemented) | Python validation and documentation (decisions D38-D46) | `src/power_grid_model/validation/_validation.py` (required values and ranges of `asym_line` with `phases`, new `validate_single_phase_transformer`, load `connection`: valid enum value, `delta` only on `asym_load` and `asym_gen`, no voltage regulator on a delta load_gen, sensor branch lists, the `ValidationWarning` hooks), `_rules.py`, `errors.py` (`NotApplicableValueError`, `SinglePhaseTransformerClockError`, `ValidationWarning`), `__init__.py`; the new user manual page `docs/user_manual/reduced-phase-networks.md` (a worked example instead of a notebook, D46); `docs/user_manual/{components,calculations,data-validator,model-validation}.md`, `docs/advanced_documentation/c-api.md` and `docs/algorithms/sc-algorithms.md`; the comment of the experimental gate in `<core>/main_model_impl.hpp` | `tests/unit/validation/test_reduced_phase_validation.py` (every rule, with the mirror tests against C++), `test_reduced_phase_cases.py` (all reduced-phase, split-phase and delta validation cases validate cleanly without a warning), `test_rules.py`, `test_errors.py`, `test_input_validation.py`, `test_validation_functions.py`; `tests/unit/test_docs_reduced_phase_example.py` (runs the code of the user manual page) | M / low |
 | M10 (implemented) | Validation against two real Australian rural networks with SWER: `Network_1_Rural_SMR8` and `Network_2_Rural_KLO14` from [Team-Nando/MV-LV-Networks](https://github.com/Team-Nando/MV-LV-Networks) (commit `8429f8a19f7b95acca2965cc48f2736880e5b31c`, BSD-3-Clause, AusNet Services data). Only the 22 kV and SWER (12.7 kV) parts are modelled; the LV side is lumped into one constant-power load per distribution transformer (three-phase, centre-tapped 250-0-250 V, SWER 12.7 kV / 240 V, and the 44 phase-to-earth units of KLO14) on its secondary busbar. Minimum demand is 10 % and maximum demand 20 % of the transformer kVA, at power factor 0.95. The generator writes the OpenDSS script and the PGM input from the same parsed data, following the conventions of the source repository's `backend.py`; decisions D47-D59 | `tests/data/generators/australian_swer_networks.py` (new: downloads the workbooks at the pinned commit and checks their sha256, maps them to OpenDSS and PGM, runs the self-checks, runs OpenDSS and writes the cases); `tests/data/generators/reduced_phase_compare_pgm.py` (extended: compact JSON rows, power-flow batches, a wider tolerance grid when no standard candidate passes); `LICENSES/BSD-3-Clause.txt`; `tests/unit/validation/test_reduced_phase_cases.py` (`MIN_CASE_COUNT` 37); no library changes | Four case folders, each with a generated `README.md` that lists every deviation from `backend.py`: power flow `tests/data/power_flow/australian-swer/{smr8,klo14}` (asymmetric batch of two scenarios, minimum and maximum demand; `newton_raphson` on both, `iterative_current` on SMR8 only until M11) and short circuit `tests/data/short_circuit/australian-swer/{smr8,klo14}` (IEC 60909, maximum voltage scaling, a batch of 8 (SMR8) and 9 (KLO14) faults on 22 kV, SWER and LV busbars). Measured agreement with OpenDSS: power flow rtol 1e-6, atol 1e-8 (1e-3 on `[pq]_(from|to)`), worst ratio 0.066 (SMR8) and 0.069 (KLO14), node voltages to 1.1e-10 and 9.8e-11 relative; short circuit rtol 1e-8, atol 1e-8 (1e-6 on `i_(from|to)` and its angle), worst ratio 0.033 and 0.030, fault currents to 6.7e-11 and 9.2e-11 relative. The data is 4.9 MB for power flow and 4.1 MB for short circuit | M / medium (data size, convergence, conditioning) |
 | M11 (implemented) | The iterative current method works for every reduced-phase, split-phase, delta and real-network power-flow case (decisions D60-D66). Solver: const_y loads in the iterative current matrix at networks with an absent phase, refactorised when they change; a NaN deviation raises `IterationDiverge`; NaN folding of the maximum deviation over buses and phases. Validation: `iterative_current` with `error_tolerance` 1e-10 on every case that lists `newton_raphson` (including `australian-swer/klo14`, `single-phase-transformer/phase-to-phase`, both `split-phase-flat-start` cases and the expected-error cases) and tighter tolerances. The residual (defect-correction) form C1 was tried and reverted (D62) | `<core>/math_solver/iterative_current_pf_solver.hpp` (`absent_phase_` gate, cached const_y admittance, refactorisation), `<core>/math_solver/iterative_pf_solver.hpp` (NaN check), `<core>/math_solver/common_solver_functions.hpp` (`add_linear_load`, `add_const_y_loads`, `fold_max_deviation`), `<core>/math_solver/newton_raphson_pf_solver.hpp`; `tests/cpp_validation_tests/test_validation.cpp` (per-method `extra_params`); `tests/data/generators/{reduced_phase_opendss_cases,australian_swer_networks,reduced_phase_compare_pgm}.py`; `params.json` and READMEs of the power-flow cases | `tests/cpp_unit_tests/math_solver/test_math_solver_pf_reduced_phase.cpp` (NaN deviation raises, NaN folding of any bus and phase, IC with const_y loads on a floating common mode, refactorisation when the const_y loads change, delta const_y loads at buses with an absent phase, linear current with exact const_y loads and a NaN load); validation cases with IC on all power-flow cases; a capture of 21506 result keys before and after each solver commit: NR, linear, symmetric and three-phase results bit-identical. Results: `phase-to-phase` IC 11 iterations (worst ratio 0.034, equal to Newton-Raphson); worst ratio against OpenDSS 0.033 to 0.080 on the M3 to M9 cases (D63), 0.044 on SMR8 and 0.018 on KLO14 for IC; the PF batch takes 256.6 s (was 238.6 s before KLO14 IC); ctest 323/323, pytest 2465 passed | M / medium-high (core numerics, gated) |
+| FU4 (implemented) | A `ValidationWarning` for a phase-to-phase `single_phase_transformer` winding without an earth reference (decision D67). Python only | `src/power_grid_model/validation/_validation.py` (`_floating_phase_to_phase_windings`, `_connected_components`, the hooks in `validate_input_data` and `validate_batch_data`), `src/power_grid_model/validation/errors.py` (docstring) | `tests/unit/validation/test_reduced_phase_validation.py` (warns, not anchored by, anchored by, not energised, batch, mirror against the C++ behaviour, connected components), `test_validation_functions.py::test_all_default_values`; every reduced-phase validation case stays free of warnings | S / low |
 | Later | See [Later work](#later-work) | — | — | — |
 
 ### Cross-cutting concerns
@@ -1460,6 +1532,7 @@ Implemented in M4 (`<core>/main_model_impl.hpp`):
       on a delta load_gen (D43).
     * Sensors on a `single_phase_transformer` are valid, a tap regulator on it is not (D44).
   * The warning-level rule of D15 and D21 is a `ValidationWarning` (D42).
+  * A phase-to-phase winding without an earth reference is a `ValidationWarning` (D67).
   * Only C++ checks the rules that need the derived node phases: winding terminals, dangling conductors, load and
     shunt on absent phases, fault phases against node phases, and the calculation gates (D38). A valid result of the
     Python validation therefore does not guarantee that the calculation succeeds. A best-effort Python check is
@@ -1536,7 +1609,7 @@ Items for the upstream maintainers. Nothing has been submitted: Michael wants ev
 * **g. Graduating the feature** (D45). Remove the experimental gate once the maintainers accept the feature. The limitations to
   state: state estimation, symmetric calculations, and sources and voltage regulators on reduced-phase buses are not
   supported; the start-value limitation of D25; the iterative current divergence on a floating common mode with only
-  const_pq or const_i loads (D61); and the topology rules that only C++ checks (D38).
+  const_pq or const_i loads (D61; the validation warns, D67); and the topology rules that only C++ checks (D38).
 * **h. Two documentation bugs in `docs/user_manual/calculations.md`**, fixed in this fork: an unclosed `{note}` block in
   the short-circuit section, and the link `calulations.md#floating-grid-handling` (twice), which has a typo and should
   point to `#floating-grid-handling` on the same page.
@@ -1550,7 +1623,9 @@ maintainers are under [To raise upstream](#to-raise-upstream).
 
 * **State estimation with masks** (open question 5), with per-phase observability rules.
 * **A tap regulator on a `single_phase_transformer`** (D18, D44). *Scheduled (2026-10-19).*
-* **A warning for windings left floating,** that is a winding with no earth path (D14-B). *Scheduled (2026-10-19).*
+* **A warning for windings left floating,** that is a winding with no earth path (D14-B). *Implemented in FU4 (D67).*
+* **A C++ diagnostic for windings without an earth reference** in the opt-in logger (`LogEvent::warning`), using the per-scenario
+  topology (D67).
 * **Sources and voltage regulators on reduced-phase nodes** (open question 3).
 * **A delta `sym_load` and symmetric delta calculations** (open question 2, D26, D33).
 * **The voltage factor *c* per fault location** (open question 4).
