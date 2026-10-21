@@ -37,6 +37,7 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <utility>
 #include <vector>
 
 namespace power_grid_model::math_solver {
@@ -1005,6 +1006,35 @@ TEST_CASE("Test math solver - IC with a NaN deviation raises IterationDiverge") 
     constexpr Idx max_iter_nan = 100;
     CHECK_THROWS_WITH_AS(run_case<IterativeCurrent>(grid.topo, grid.param, grid.input, err_tol, max_iter_nan),
                          doctest::Contains("nan"), IterationDiverge);
+}
+
+TEST_CASE("Test math solver - the batch cache run does not raise on a NaN deviation") {
+    // The cache run of a batch runs one iteration on the input data, with the error tolerance at its maximum, and
+    // discards the results. The input data may leave the load powers to the update data, so a NaN deviation must not
+    // raise there; otherwise the whole batch fails, also for a three-phase network. Outside the cache run it raises.
+    // A NaN const_pq power gives a finite matrix and a NaN right-hand side in iterative current, in linear current and
+    // in Newton-Raphson from a flat start; with the linear start of Newton-Raphson the NaN is in the matrix instead,
+    // and the sparse LU solver raises SparseMatrixError, which the cache run already swallowed.
+    constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+    ReducedPhaseGrid grid = make_floating_zero_sequence_grid();
+    grid.topo.load_gen_type = {LoadGenType::const_pq};
+    grid.input.s_injection = {Value{DoubleComplex{nan, nan}, DoubleComplex{nan, nan}, DoubleComplex{nan, nan}}};
+    grid.input.initialization = CalculationInitialization::flat;
+    auto const topo_ptr = std::make_shared<MathModelTopology const>(grid.topo);
+    YBus<asymmetric_t> const y_bus{*topo_ptr, grid.param};
+    NoLogger log;
+    constexpr double cache_run_err_tol = std::numeric_limits<double>::max();
+
+    for (auto const method :
+         {CalculationMethod::iterative_current, CalculationMethod::linear_current, CalculationMethod::newton_raphson}) {
+        CAPTURE(std::to_underlying(method));
+        MathSolver<asymmetric_t> solver{topo_ptr};
+        SolverOutput<asymmetric_t> output;
+        REQUIRE_NOTHROW(output = solver.run_power_flow(grid.input, cache_run_err_tol, 1, true, log, method, y_bus));
+        CHECK(std::isnan(output.u[1](0).real()));
+        CHECK_THROWS_WITH_AS(solver.run_power_flow(grid.input, err_tol, max_iter, false, log, method, y_bus),
+                             doctest::Contains("nan"), IterationDiverge);
+    }
 }
 
 TEST_CASE("Test math solver - the maximum deviation keeps a NaN of any bus and phase") {
