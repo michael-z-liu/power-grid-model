@@ -373,6 +373,12 @@ They raise an error from `power_grid_model.errors`; the errors about a single co
 
 A valid result of `validate_input_data` therefore does not guarantee that the calculation succeeds.
 
+In a batch calculation, the rules about the phases of the nodes, loads, shunts and faults are checked for each
+scenario after its update, so the update data may fix the input data: for example, a scenario that switches off a
+dangling line succeeds, and a scenario that leaves it on fails on its own.
+The symmetric calculation, state estimation and experimental-feature rules do not depend on the scenario and fail the
+whole batch, and so does a voltage regulator with status on at a node without all phases in the input data.
+
 ## Supported calculations
 
 | Calculation                    | Reduced-phase network                                                                                         |

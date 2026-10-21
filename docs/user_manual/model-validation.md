@@ -330,9 +330,11 @@ For the tap regulator cases the expected tap positions come from solving OpenDSS
 taps: the generator chooses `u_set` and `u_band` so that exactly one combination is inside every band, with a margin, and
 checks that OpenDSS `RegControl` elements end at the same taps.
 power-grid-model and OpenDSS agree to about 3.4e-10 relative.
-Most cases are compared with a relative and absolute tolerance of 1e-8; a few cases use a relative tolerance of 1e-6
-or 1e-7, limited by the convergence criterion of the iterative current method or by cancellation in the reactive
-power of the lines.
+Most cases are compared with a relative and absolute tolerance of 1e-8, and the iterative current method runs with an
+error tolerance of 1e-10.
+A few cases use a larger absolute tolerance (up to 1e-6, and 1e-5 for the batch of the tap regulator) or, for the
+two-phase delta loads, a relative tolerance of 1e-7.
+The tolerances of every case follow the same rule: the smallest round values with at least a 10x margin.
 See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for the details
 of each family.
 

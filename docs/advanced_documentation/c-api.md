@@ -208,6 +208,9 @@ Code that fills a buffer made with `PGM_create_buffer` without calling `PGM_buff
 A garbage `connection` of exactly 1 (`delta`) makes an `asym_load` raise `ExperimentalFeature` in a calculation, unless
 the experimental features are enabled, and makes a `sym_load` fail the construction with `InvalidPhaseConnection`.
 A garbage `connection` of 0 is harmless (`wye`), and any other value makes the construction of the model fail.
+A garbage `phases` of 0 is harmless (`abc`); 1 to 6 make the construction of a three-phase `asym_line` fail with
+`InvalidPhaseConnection`, because the values of the absent phases are provided, and any other value makes it fail with
+`MissingCaseForEnumError`.
 With `PGM_buffer_set_nan`, they are not provided, which means `abc` and `wye`, and the behaviour is unchanged.
 See [C API compatibility](../user_manual/reduced-phase-networks.md#c-api-compatibility).
 

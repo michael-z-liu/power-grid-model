@@ -893,9 +893,9 @@ blanket approval, 2026-10-18; D62 is the one place where a tolerance is relaxed 
   generation is byte-identical.
 * **D64. A NaN deviation raises `IterationDiverge`.** The loop of Newton-Raphson and IC runs while `max_dev > err_tol`; a
   NaN fails that comparison, so the loop ended as if it had converged and returned NaN results without an error.
-  `IterativePFSolver::run_power_flow` now throws `IterationDiverge` as soon as the deviation is NaN. Finite results are
-  unchanged (the 21506-key capture is identical). The unit test uses a three-phase bus whose zero sequence is held to
-  earth by 1e-8 only, with an explicit const_y load: the voltages overflow and turn NaN within 100 iterations. A floating
+  `IterativePFSolver::run_power_flow` now throws `IterationDiverge` as soon as the deviation is NaN, except in the batch
+  cache run (D76). Finite results are unchanged (the 21506-key capture is identical). The unit test uses a three-phase
+  bus whose zero sequence is held to earth by 1e-8 only, with an explicit const_y load: the voltages overflow and turn NaN within 100 iterations. A floating
   mode with only const_pq loads never gives NaN: IC stays finite (deviation about 5e5) and raises at `max_iterations`.
 * **D65. IC keeps ignoring `calculation_initialization`.** IC always starts from the average-source voltage (with the slot patterns
   of D25); the option applies to Newton-Raphson only. The two `split-phase-flat-start` cases run IC from the
@@ -1156,6 +1156,26 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
     8.5 s (single cases) and 254.3 s (batch cases; 256.6 s at the end
     of M11). Pre-commit passes.
 
+#### Taken in the final review
+
+Two defects in the batch cache run, found by the review of the whole branch (2026-10-21). The cache run of a batch
+calculates the input data once, with one iteration and the error tolerance at its maximum, to set up the topology and
+the solvers; its results are discarded, and the input data need not be valid on its own.
+
+* **D76. The cache run does not raise on a NaN deviation.** The guard of D64 also fired in the cache run, which does not
+  catch `IterationDiverge`. A batch whose input data leaves a load power to the update data (NaN in the input) then
+  failed as a whole with iterative current or linear current, and with Newton-Raphson from a flat or average-source
+  start, also on a three-phase network; before D64 the loop ended after its one iteration. `run_power_flow` now skips
+  the guard when `cache_run` is set; every scenario keeps it. Tests: the unit test `the batch cache run does not raise
+  on a NaN deviation` and `test_batch_power_flow_with_power_left_to_the_update_data`.
+* **D77. The cache run swallows `DanglingConductor` and `MissingPhaseForWinding`.** Both depend on the status of the
+  branches and sources, so the update data may fix them, as for `LoadGenOnAbsentPhase` (D3), `ShuntAtReducedPhaseNode`
+  (D4) and `InvalidShortCircuitPhases` (D37). Before, a batch whose input data has a dangling line that every scenario
+  switches off failed as a whole. `rebuild_topology` clears the topology before it builds it, so the scenarios rebuild
+  their own topology; a scenario that leaves the line on fails on its own, with the branch ID.
+  `ReducedPhaseNotSupported` stays unswallowed (D4), including its flavour for a voltage regulator at a node without
+  all phases, which also depends on a status. Test: `test_reduced_phase_topology_error_fixed_in_the_update_data`.
+
 ### Decision index
 
 | Decision | Subject | Section |
@@ -1235,6 +1255,8 @@ Python validation (635f5bc65), a fix of a latent defect in the Python validation
 | D73 | Python validation: required tap values, `u_set` warning, and the `_get_indexer` fix | [Taken in FU5](#taken-in-fu5) |
 | D74 | Validation against OpenDSS: a scan of fixed taps with a `RegControl` cross-check | [Taken in FU5](#taken-in-fu5) |
 | D75 | Bit-identity of the existing results and the measured test results | [Taken in FU5](#taken-in-fu5) |
+| D76 | The batch cache run does not raise on a NaN deviation | [Taken in the final review](#taken-in-the-final-review) |
+| D77 | The batch cache run swallows `DanglingConductor` and `MissingPhaseForWinding` | [Taken in the final review](#taken-in-the-final-review) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
