@@ -809,7 +809,8 @@ def test_reduced_phase_dangling_conductor():
         model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
 
 
-def test_reduced_phase_missing_phase_for_winding():
+def _missing_phase_for_winding_input():
+    """a three-phase transformer 400 at the a node 1 behind the a line 200"""
     input_data = _reduced_phase_input([PhaseConnection.a], [(0, 1)], 3)
     input_data[CT.node][AT.u_rated][2] = 400.0
 
@@ -835,10 +836,57 @@ def test_reduced_phase_missing_phase_for_winding():
     transformer_input[AT.tap_max] = [0]
     transformer_input[AT.tap_size] = [100.0]
     input_data[CT.transformer] = transformer_input
+    return input_data
 
-    model = PowerGridModelWithExt(input_data)
+
+def test_reduced_phase_missing_phase_for_winding():
+    model = PowerGridModelWithExt(_missing_phase_for_winding_input())
     with pytest.raises(MissingPhaseForWinding, match="branch with ID 400"):
         model.calculate_power_flow_with_ext(symmetric=False, experimental_features=_ExperimentalFeatures.enabled)
+
+
+@pytest.mark.parametrize(
+    ("input_data", "branch", "branch_id", "error_type"),
+    [
+        pytest.param(
+            _reduced_phase_input([PhaseConnection.a, PhaseConnection.b], [(0, 1), (1, 2)], 3),
+            CT.asym_line,
+            201,
+            DanglingConductor,
+            id="dangling_conductor",
+        ),
+        pytest.param(_missing_phase_for_winding_input(), CT.transformer, 400, MissingPhaseForWinding, id="winding"),
+    ],
+)
+def test_reduced_phase_topology_error_fixed_in_the_update_data(input_data, branch, branch_id, error_type):
+    # the cache run with the base input sees the invalid branch; a scenario that switches it off is valid (as for a
+    # shunt, D4) and a scenario that leaves it on fails on its own, with the branch ID
+    model = PowerGridModelWithExt(input_data)
+    enabled = _ExperimentalFeatures.enabled
+
+    update = initialize_array(DatasetType.update, branch, (2, 1))
+    update[AT.id] = branch_id
+    update[AT.from_status] = 0
+    update[AT.to_status] = 0
+    result = model.calculate_power_flow_with_ext(
+        symmetric=False, update_data={branch: update}, experimental_features=enabled
+    )
+    assert (result[CT.node][AT.u][:, 1, 0] > 0.0).all()
+    assert (result[CT.node][AT.u][:, 1, 1:] == 0.0).all()
+
+    update[AT.from_status] = [[0], [1]]
+    update[AT.to_status] = [[0], [1]]
+    with pytest.raises(PowerGridBatchError) as error:
+        model.calculate_power_flow_with_ext(
+            symmetric=False, update_data={branch: update}, experimental_features=enabled
+        )
+    assert error.value.failed_scenarios.tolist() == [1]
+    assert error.value.errors[0].__class__ is error_type
+    assert f"branch with ID {branch_id}" in error.value.error_messages[0]
+
+    # a single, non-batch calculation on the same model still raises
+    with pytest.raises(error_type, match=f"branch with ID {branch_id}"):
+        model.calculate_power_flow_with_ext(symmetric=False, experimental_features=enabled)
 
 
 def test_reduced_phase_missing_phase_for_three_winding_transformer():
