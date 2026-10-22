@@ -49,14 +49,13 @@ constexpr void apply_registration(ComponentContainer const& components, std::vec
 // the incidence vector is only filled if at least one branch is not abc -> abc, per phase
 // empty means that all branches are abc -> abc, per phase
 // the branch IDs are registered together with the incidence, for the error messages of the phase validation
+// comp_conn is freshly constructed (construct_components_connections), so both vectors are empty on entry
 template <std::derived_from<Edge> Component, class ComponentContainer>
     requires common::component_container_c<ComponentContainer, Component>
 constexpr void register_branch_phase_incidence(ComponentContainer const& components, ComponentConnections& comp_conn) {
     if (std::ranges::all_of(components.template citer<Component>(),
                             [](Edge const& edge) { return edge.phase_incidence().all_phases(); })) {
         // fast path: nothing allocated
-        comp_conn.branch_phase_incidence.clear();
-        comp_conn.branch_id.clear();
         return;
     }
     apply_registration<Component>(components, comp_conn.branch_phase_incidence,
@@ -128,15 +127,13 @@ constexpr void register_topology_components(ComponentContainer const& components
     apply_registration<Component>(components, comp_topo.load_gen_type,
                                   [](GenericLoadGen const& load_gen) { return load_gen.type(); });
 
-    // the connection vector is only filled if at least one load_gen is delta; empty means that all are wye
+    // the connection vector is only filled if at least one load_gen is delta; empty means that all are wye (fast path:
+    // nothing allocated; comp_topo is freshly constructed by construct_topology, so the vector is empty on entry)
     if (std::ranges::any_of(components.template citer<Component>(), [](GenericLoadGen const& load_gen) {
             return load_gen.connection() == LoadGenConnection::delta;
         })) {
         apply_registration<Component>(components, comp_topo.load_gen_connection,
                                       [](GenericLoadGen const& load_gen) { return load_gen.connection(); });
-    } else {
-        // fast path: nothing allocated
-        comp_topo.load_gen_connection.clear();
     }
 }
 

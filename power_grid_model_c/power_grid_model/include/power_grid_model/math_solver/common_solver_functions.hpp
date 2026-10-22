@@ -493,14 +493,14 @@ inline void calculate_load_gen_result(IdxRange const& load_gens, Idx bus_number,
     for (Idx const load_gen : load_gens) {
         if constexpr (!is_symmetric_v<sym>) {
             if (topo.is_delta_load_gen(load_gen)) {
-                // the phase current I = D^T I_delta and the phase power s = U o conj(I) at the terminals; phase_power
-                // keeps the slots that no active entry touches at exactly +0 (u o conj(0) would give -0 there)
+                // the phase current I = D^T I_delta and the phase power s = U o conj(I) at the terminals; the phase
+                // power keeps the slots that no active entry touches at exactly +0 (u o conj(0) would give -0 there)
                 auto& result = output.load_gen[load_gen];
                 double const u_nom = delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number));
                 result.i = delta_load_gen::phase_current(input.s_injection[load_gen], load_gen_func(load_gen),
                                                          output.u[bus_number], topo.bus_phase(bus_number), u_nom);
-                result.s = delta_load_gen::phase_power(input.s_injection[load_gen], load_gen_func(load_gen),
-                                                       output.u[bus_number], topo.bus_phase(bus_number), u_nom);
+                result.s = delta_load_gen::phase_power_from_current(input.s_injection[load_gen], output.u[bus_number],
+                                                                    topo.bus_phase(bus_number), result.i);
                 continue;
             }
         }

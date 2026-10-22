@@ -84,7 +84,9 @@ Nomenclature:
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace power_grid_model::math_solver {
@@ -206,6 +208,9 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     bool absent_phase_;
     // per bus, the admittance of the const_y load_gens in the current matrix; empty unless absent_phase_
     ComplexTensorVector<sym> const_y_admittance_;
+    // per bus, the admittance of the const_y load_gens of this input (scratch of update_const_y_admittance, swapped
+    // with const_y_admittance_ when they differ, so that its memory is reused); each thread has its own solver
+    ComplexTensorVector<sym> y_load_;
 
     // the gate of the const_y handling: not has_reduced_phase alone, which a math model with all buses abc may have
     static bool has_absent_phase(MathModelTopology const& topo) {
@@ -223,9 +228,9 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     void update_const_y_admittance(MathModelTopology const& topo, PowerFlowInput<sym> const& input) {
         std::vector<LoadGenType> const& load_gen_type = this->load_gen_type_.get();
         auto const& load_gens_per_bus = this->load_gens_per_bus_.get();
-        ComplexTensorVector<sym> y_load(static_cast<std::size_t>(this->n_bus_), ComplexTensor<sym>{});
+        y_load_.assign(static_cast<std::size_t>(this->n_bus_), ComplexTensor<sym>{});
         for (auto const& [bus_number, load_gens] : enumerated_zip_sequence(load_gens_per_bus)) {
-            detail::add_const_y_loads(load_gens, bus_number, input, load_gen_type, y_load[bus_number], topo);
+            detail::add_const_y_loads(load_gens, bus_number, input, load_gen_type, y_load_[bus_number], topo);
         }
         auto const exactly_equal = [](ComplexTensor<sym> const& x, ComplexTensor<sym> const& y) {
             if constexpr (is_symmetric_v<sym>) {
@@ -234,8 +239,8 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
                 return (x == y).all();
             }
         };
-        if (!std::ranges::equal(y_load, const_y_admittance_, exactly_equal)) {
-            const_y_admittance_ = std::move(y_load);
+        if (!std::ranges::equal(y_load_, const_y_admittance_, exactly_equal)) {
+            std::swap(y_load_, const_y_admittance_);
             parameters_changed_ = true;
         }
     }

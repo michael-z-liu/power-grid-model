@@ -103,10 +103,11 @@ inline ComplexValue<asymmetric_t> phase_current(ComplexValue<asymmetric_t> const
     return i;
 }
 
-// phase power injection s = U o conj(I) of a delta load_gen; the slots without an active entry are exactly zero
-inline ComplexValue<asymmetric_t> phase_power(ComplexValue<asymmetric_t> const& s_delta, LoadGenType type,
-                                              ComplexValue<asymmetric_t> const& u, PhaseMask bus_phases, double u_nom) {
-    ComplexValue<asymmetric_t> const i = phase_current(s_delta, type, u, bus_phases, u_nom);
+// phase power injection s = U o conj(I) of a delta load_gen, from its phase current i = phase_current(s_delta, ...);
+// the slots without an active entry are exactly zero
+inline ComplexValue<asymmetric_t> phase_power_from_current(ComplexValue<asymmetric_t> const& s_delta,
+                                                           ComplexValue<asymmetric_t> const& u, PhaseMask bus_phases,
+                                                           ComplexValue<asymmetric_t> const& i) {
     PhaseMask loaded{};
     for (std::size_t k = 0; k != delta_branches.size(); ++k) {
         if (is_active(s_delta(static_cast<Idx>(k)), bus_phases, delta_branches[k])) {
@@ -120,6 +121,12 @@ inline ComplexValue<asymmetric_t> phase_power(ComplexValue<asymmetric_t> const& 
         }
     }
     return s;
+}
+
+// phase power injection s = U o conj(I) of a delta load_gen; the slots without an active entry are exactly zero
+inline ComplexValue<asymmetric_t> phase_power(ComplexValue<asymmetric_t> const& s_delta, LoadGenType type,
+                                              ComplexValue<asymmetric_t> const& u, PhaseMask bus_phases, double u_nom) {
+    return phase_power_from_current(s_delta, u, bus_phases, phase_current(s_delta, type, u, bus_phases, u_nom));
 }
 
 // phase power injection and its derivatives with respect to the voltage angles (d/dtheta) and the scaled voltage

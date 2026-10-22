@@ -993,6 +993,29 @@ _PHASE_TO_EARTH_WINDINGS = [WindingConnection1P.a, WindingConnection1P.b, Windin
 _PHASE_TO_PHASE_WINDINGS = [WindingConnection1P.ab, WindingConnection1P.ac, WindingConnection1P.bc]
 
 
+def _winding_voltage_factor(connection: np.ndarray, center_tapped: float) -> np.ndarray:
+    """
+    The nominal voltage of a single_phase_transformer winding as a factor of u_rated of its node.
+
+    Args:
+        connection: The winding connections
+        center_tapped: The factor for a centre-tapped winding
+
+    Returns:
+        1/sqrt(3) for a phase-to-earth, 1 for a phase-to-phase and center_tapped for a centre-tapped winding; NaN for
+        an unknown connection.
+    """
+    return np.select(
+        [
+            np.isin(connection, _PHASE_TO_EARTH_WINDINGS),
+            np.isin(connection, _PHASE_TO_PHASE_WINDINGS),
+            connection == WindingConnection1P.ab_center_tapped,
+        ],
+        [1.0 / np.sqrt(3.0), 1.0, center_tapped],
+        default=np.nan,
+    )
+
+
 def validate_single_phase_transformer(data: SingleDataset) -> list[ValidationError]:
     """
     Checks the values of the single_phase_transformer: the ranges as for transformer, the connections, the clock, the
@@ -1180,16 +1203,7 @@ def _warn_single_phase_transformer_winding_voltages(data: SingleDataset) -> None
     ):
         idx = _get_indexer(node_data[AT.id], spt_data[node_field], default_value=-1)
         u_rated = np.where(idx >= 0, node_data[AT.u_rated][idx], np.nan)
-        factor = np.select(
-            [
-                np.isin(spt_data[connection], _PHASE_TO_EARTH_WINDINGS),
-                np.isin(spt_data[connection], _PHASE_TO_PHASE_WINDINGS),
-                spt_data[connection] == WindingConnection1P.ab_center_tapped,
-            ],
-            [1.0 / np.sqrt(3.0), 1.0, 2.0 / np.sqrt(3.0)],
-            default=np.nan,
-        )
-        u_nominal = factor * u_rated
+        u_nominal = _winding_voltage_factor(spt_data[connection], center_tapped=2.0 / np.sqrt(3.0)) * u_rated
         voltage_values = spt_data[voltage]
         # a non-positive voltage is an error, reported by the validation itself
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -2220,14 +2234,7 @@ def _regulated_single_phase_transformer_taps(data: SingleDataset) -> list[Missin
         return []
     spt_data = data[spt]
     regulated = np.isin(spt_data[AT.id], data[CT.transformer_tap_regulator][AT.regulated_object])
-    errors = []
-    for field in (AT.tap_min, AT.tap_max, AT.tap_size):
-        nan = _nan_type(spt, field)
-        missing = np.isnan(spt_data[field]) if np.isnan(nan) else spt_data[field] == nan
-        missing &= regulated
-        if missing.any():
-            errors.append(MissingValueError(spt, field, spt_data[AT.id][missing].flatten().tolist()))
-    return errors
+    return _none_missing({spt: spt_data[regulated]}, spt, [AT.tap_min, AT.tap_max, AT.tap_size])
 
 
 def _off_nominal_tap_regulator_u_set(data: SingleDataset, calculation_type: CalculationType | None = None) -> list[int]:
@@ -2265,15 +2272,7 @@ def _off_nominal_tap_regulator_u_set(data: SingleDataset, calculation_type: Calc
     connection = np.where(at_to_side, spt_data[AT.to_connection][safe_idx], spt_data[AT.from_connection][safe_idx])
     node_idx = _get_indexer(node_data[AT.id], node_id, default_value=-1)
     u_rated = np.where(node_idx >= 0, node_data[AT.u_rated][np.where(node_idx >= 0, node_idx, 0)], np.nan)
-    factor = np.select(
-        [
-            np.isin(connection, [*_PHASE_TO_EARTH_WINDINGS, WindingConnection1P.ab_center_tapped]),
-            np.isin(connection, _PHASE_TO_PHASE_WINDINGS),
-        ],
-        [1.0 / np.sqrt(3.0), 1.0],
-        default=np.nan,
-    )
-    u_nominal = factor * u_rated
+    u_nominal = _winding_voltage_factor(connection, center_tapped=1.0 / np.sqrt(3.0)) * u_rated
     u_set = regulator_data[AT.u_set]
     with np.errstate(divide="ignore", invalid="ignore"):
         off_nominal = (

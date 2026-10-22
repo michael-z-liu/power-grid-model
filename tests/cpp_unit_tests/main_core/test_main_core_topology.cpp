@@ -109,19 +109,6 @@ TEST_CASE("Test main core topology - branch phase incidence registration") {
         CHECK(conn.branch_id.empty());
     }
 
-    SUBCASE("Previously filled incidence is cleared when all branches are abc") {
-        FullPhaseContainer components;
-        add_nodes_and_line(components);
-        components.set_construction_complete();
-
-        ComponentConnections conn;
-        conn.branch_phase_incidence.assign(3, three_phase_winding);
-        conn.branch_id.assign(3, ID{1});
-        detail::register_connections_components<Branch>(components, conn);
-        CHECK(conn.branch_phase_incidence.empty());
-        CHECK(conn.branch_id.empty());
-    }
-
     SUBCASE("A reduced-phase branch fills the incidence vector") {
         MixedPhaseContainer components;
         add_nodes_and_line(components);
@@ -190,13 +177,6 @@ TEST_CASE("Test main core topology - load_gen connection registration") {
         auto const components = make_load_gens(LoadGenConnection::wye);
         detail::register_topology_components<GenericLoadGen>(components, comp_topo, false);
         CHECK(comp_topo.load_gen_type.size() == 3);
-        CHECK(comp_topo.load_gen_connection.empty());
-    }
-
-    SUBCASE("Previously filled connection vector is cleared when all load_gens are wye") {
-        auto const components = make_load_gens(LoadGenConnection::wye);
-        comp_topo.load_gen_connection.assign(5, LoadGenConnection::delta);
-        detail::register_topology_components<GenericLoadGen>(components, comp_topo, false);
         CHECK(comp_topo.load_gen_connection.empty());
     }
 
