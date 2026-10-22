@@ -17,18 +17,22 @@ from power_grid_model._core.errors import (
     ConflictID,
     ConflictingAngleMeasurementType,
     ConflictVoltage,
+    DanglingConductor,
     ExperimentalFeature,
     IDNotFound,
     IDWrongType,
     InvalidArguments,
     InvalidCalculationMethod,
     InvalidMeasuredObject,
+    InvalidPhaseConnection,
     InvalidRegulatedObject,
     InvalidShortCircuitPhaseOrType,
     InvalidTransformerClock,
     IterationDiverge,
+    LoadGenOnAbsentPhase,
     MaxIterationReached,
     MissingCaseForEnumError,
+    MissingPhaseForWinding,
     NotObservableError,
     PowerGridBatchError,
     PowerGridDatasetError,
@@ -37,6 +41,8 @@ from power_grid_model._core.errors import (
     PowerGridNotImplementedError,
     PowerGridSerializationError,
     PowerGridUnreachableHitError,
+    ReducedPhaseNotSupported,
+    ShuntAtReducedPhaseNode,
     SparseMatrixError,
     TapSearchStrategyIncompatibleError,
     UnsupportedLoadGenTypeForVoltageRegulator,
@@ -99,6 +105,16 @@ _UNSUPPORTED_VOLTAGE_REGULATOR_SOURCE_COMBINATION_ERROR_RE = re.compile(
     r"Found at node with id (-?\d+)"
 )
 _EXPERIMENTAL_FEATURE_RE = re.compile(r" is an experimental feature")  # multiple different flavors
+_REDUCED_PHASE_NOT_SUPPORTED_RE = re.compile(
+    r" is not supported in a network with (one- or two-phase nodes|delta-connected loads or generators)"
+)  # multiple different flavors
+_DANGLING_CONDUCTOR_RE = re.compile(
+    r"Conductors of .+ on phases \([^)]*\) are not present at any of its connected nodes"
+)
+_LOAD_GEN_ON_ABSENT_PHASE_RE = re.compile(r"Load or generator (-?\d+) has a non-zero specified power on phases")
+_INVALID_PHASE_CONNECTION_RE = re.compile(r"Invalid phase connection for ")  # multiple different flavors
+_MISSING_PHASE_FOR_WINDING_RE = re.compile(r"Winding of .+ has phases \([^)]*\) that are not all present at its node")
+_SHUNT_AT_REDUCED_PHASE_NODE_RE = re.compile(r"Shunt (-?\d+) is connected to a node without all phases")
 
 _ERROR_MESSAGE_PATTERNS = {
     _MISSING_CASE_FOR_ENUM_RE: MissingCaseForEnumError,
@@ -128,6 +144,12 @@ _ERROR_MESSAGE_PATTERNS = {
     _UNSUPPORTED_REGULATOR_COMBINATION_ERROR_RE: UnsupportedRegulatorCombinationError,
     _UNSUPPORTED_VOLTAGE_REGULATOR_SOURCE_COMBINATION_ERROR_RE: UnsupportedVoltageRegulatorSourceCombinationError,
     _EXPERIMENTAL_FEATURE_RE: ExperimentalFeature,
+    _REDUCED_PHASE_NOT_SUPPORTED_RE: ReducedPhaseNotSupported,
+    _DANGLING_CONDUCTOR_RE: DanglingConductor,
+    _MISSING_PHASE_FOR_WINDING_RE: MissingPhaseForWinding,
+    _INVALID_PHASE_CONNECTION_RE: InvalidPhaseConnection,
+    _LOAD_GEN_ON_ABSENT_PHASE_RE: LoadGenOnAbsentPhase,
+    _SHUNT_AT_REDUCED_PHASE_NODE_RE: ShuntAtReducedPhaseNode,
 }
 
 

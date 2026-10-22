@@ -22,6 +22,7 @@ from power_grid_model.enum import (
     FaultPhase,
     FaultType,
     MeasuredTerminalType,
+    WindingConnection1P,
 )
 from power_grid_model.validation._rules import (
     all_between,
@@ -41,15 +42,18 @@ from power_grid_model.validation._rules import (
     all_not_two_values_zero,
     all_same_current_angle_measurement_type_on_terminal,
     all_same_sensor_type_on_same_terminal,
+    all_supported_enum_values,
     all_unique,
     all_valid_clocks,
     all_valid_enum_values,
     all_valid_fault_phases,
     all_valid_ids,
+    all_valid_single_phase_clocks,
     any_voltage_angle_measurement_if_global_current_measurement,
     no_strict_subset_missing,
     none_match_comparison,
     none_missing,
+    none_provided,
     not_all_missing,
 )
 from power_grid_model.validation.errors import (
@@ -58,12 +62,14 @@ from power_grid_model.validation.errors import (
     InfinityError,
     InvalidEnumValueError,
     InvalidIdError,
+    InvalidValueError,
     MissingValueError,
     MissingVoltageAngleMeasurementError,
     MixedCurrentAngleMeasurementTypeError,
     MixedPowerCurrentSensorError,
     MultiComponentNotUniqueError,
     MultiFieldValidationError,
+    NotApplicableValueError,
     NotBetweenError,
     NotBetweenOrAtError,
     NotBooleanError,
@@ -74,6 +80,7 @@ from power_grid_model.validation.errors import (
     NotLessThanError,
     NotUniqueError,
     SameValueError,
+    SinglePhaseTransformerClockError,
     TwoValuesZeroError,
 )
 
@@ -687,9 +694,110 @@ def test_not_all_missing():
         )
 
 
+def test_none_provided():
+    dfoo = [("id", "i4"), ("foo", "f8"), ("bar", "(3,)f8"), ("bla", "i1"), ("cond", "i1")]
+
+    def _mock_nan_type(component: CT, field: str):
+        return {
+            "foo_test": {
+                "id": np.iinfo("i4").min,
+                "foo": np.nan,
+                "bar": np.nan,
+                "bla": np.iinfo("i1").min,
+                "cond": np.iinfo("i1").min,
+            },
+        }[component][field]
+
+    nan_i1 = np.iinfo("i1").min
+    data = {
+        "foo_test": np.array(
+            [
+                (1, np.nan, (np.nan, np.nan, np.nan), nan_i1, 0),
+                (2, 5.2, (np.nan, 3.4, np.nan), 7, 1),
+                (3, 7.3, (8.4, 8.5, 8.6), 0, 1),
+                (4, np.nan, (np.nan, np.nan, np.nan), nan_i1, 1),
+            ],
+            dtype=dfoo,
+        )
+    }
+
+    with mock.patch("power_grid_model.validation._rules._nan_type", _mock_nan_type):
+        # mask off: nothing is reported, even where a value is provided
+        mask_off = np.zeros(4, dtype=bool)
+        for field in ("foo", "bar", "bla"):
+            assert none_provided(data, "foo_test", field, ["cond"], mask_off) == []
+
+        # mask on: only the records with a provided value are reported
+        mask_on = np.ones(4, dtype=bool)
+        assert none_provided(data, "foo_test", "foo", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "foo"], [2, 3])
+        ]
+        assert none_provided(data, "foo_test", "bar", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "bar"], [2, 3])
+        ]
+        assert none_provided(data, "foo_test", "bla", ["cond"], mask_on) == [
+            NotApplicableValueError("foo_test", ["cond", "bla"], [2, 3])
+        ]
+
+        # partial mask
+        mask = np.array([True, False, True, True])
+        assert none_provided(data, "foo_test", "foo", ["cond"], mask) == [
+            NotApplicableValueError("foo_test", ["cond", "foo"], [3])
+        ]
+        assert none_provided(data, "foo_test", "bla", ["cond"], np.array([True, False, False, True])) == []
+
+
 @pytest.mark.skip("No unit tests available for all_valid_clocks")
 def test_all_valid_clocks():
     raise NotImplementedError(f"Unit test for {all_valid_clocks}")
+
+
+def test_all_valid_single_phase_clocks():
+    na_int8 = np.iinfo("i1").min
+    valid = initialize_array(DatasetType.input, CT.single_phase_transformer, 6)
+    valid[AT.id] = [1, 2, 3, 4, 5, 6]
+    valid[AT.clock] = [0, 6, 12, -6, 18, na_int8]
+    data = {CT.single_phase_transformer: valid}
+    assert all_valid_single_phase_clocks(data, CT.single_phase_transformer, AT.clock) == []
+
+    invalid = initialize_array(DatasetType.input, CT.single_phase_transformer, 6)
+    invalid[AT.id] = [1, 2, 3, 4, 5, 6]
+    invalid[AT.clock] = [1, 0, 3, 5, -1, 6]
+    data = {CT.single_phase_transformer: invalid}
+    assert all_valid_single_phase_clocks(data, CT.single_phase_transformer, AT.clock) == [
+        SinglePhaseTransformerClockError(CT.single_phase_transformer, AT.clock, [1, 3, 4, 5])
+    ]
+
+
+def test_all_supported_enum_values():
+    supported = [WindingConnection1P.a, WindingConnection1P.ab]
+    spt = initialize_array(DatasetType.input, CT.single_phase_transformer, 6)
+    spt[AT.id] = [1, 2, 3, 4, 5, 6]
+    # supported, unsupported, unsupported, unknown, unknown, not provided
+    spt[AT.from_connection] = [
+        WindingConnection1P.a,
+        WindingConnection1P.b,
+        WindingConnection1P.ab_center_tapped,
+        0,
+        9,
+        np.iinfo("i1").min,
+    ]
+    data = {CT.single_phase_transformer: spt}
+    errors = all_supported_enum_values(
+        data, CT.single_phase_transformer, AT.from_connection, WindingConnection1P, supported
+    )
+    assert errors == [InvalidValueError(CT.single_phase_transformer, AT.from_connection, [2, 3], supported)]
+
+    # the unknown values are reported by all_valid_enum_values only
+    assert all_valid_enum_values(data, CT.single_phase_transformer, AT.from_connection, WindingConnection1P) == [
+        InvalidEnumValueError(CT.single_phase_transformer, AT.from_connection, [4, 5], WindingConnection1P)
+    ]
+
+    spt[AT.from_connection] = WindingConnection1P.ab
+    assert (
+        all_supported_enum_values(data, CT.single_phase_transformer, AT.from_connection, WindingConnection1P, supported)
+        == []
+    )
 
 
 def test_all_same_sensor_type_on_same_terminal():

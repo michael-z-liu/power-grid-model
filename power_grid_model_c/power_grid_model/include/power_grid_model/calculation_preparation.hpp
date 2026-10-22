@@ -200,9 +200,10 @@ inline void check_load_gen_typefor_voltage_regulator(typename ModelType::MainMod
             continue;
         }
 
-        auto const& load_gen_type =
-            main_core::get_component<GenericLoadGen>(state.components, voltage_regulator.regulated_object()).type();
-        if (load_gen_type != LoadGenType::const_pq) {
+        auto const& load_gen =
+            main_core::get_component<GenericLoadGen>(state.components, voltage_regulator.regulated_object());
+        // a delta load_gen cannot be voltage regulated
+        if (load_gen.type() != LoadGenType::const_pq || load_gen.connection() == LoadGenConnection::delta) {
             throw UnsupportedLoadGenTypeForVoltageRegulator{std::format("{}", voltage_regulator.id())};
         }
     }

@@ -20,7 +20,8 @@ For an overview of regulated power flow and strategy selection, see
 The automatic tap changer iterates over all regulators with automatic tap changing control.
 The control logic is described as follows:
 
-- For each regulator, calculate the controlled voltage $U_{\text{control}}$ based on `control_side`.
+- For each regulator, calculate the controlled voltage $U_{\text{control}}$ based on `control_side`
+  (see [Controlled voltage](#controlled-voltage)).
 - If the transformer has a `tap_pos` which is not regulated and within `tap_min` and `tap_max` bounds, skip it and
   consider the next regulator.
   In all other cases, go to the next step.
@@ -33,6 +34,47 @@ The control logic is described as follows:
 - Another power flow calculation is run with new tap positions for the regulated transformers.
 - If the maximum number of tap changing iterations is reached, the calculation stops and raises an error of type
   `MaxIterationReached`.
+
+## Order of regulation
+
+The regulators are not all processed at once.
+The transformers are ranked by their distance from the sources, counted in regulated transformers: the rank of a
+regulated transformer is the smallest number of regulated transformers on any path from a source to its controlled
+side, itself included, when that path passes through the transformer itself.
+If its controlled side can also be reached through fewer regulated transformers on a path that does not pass through it
+(for example in a meshed grid), the transformer gets the last rank.
+In every iteration the ranks are visited in order and the first rank in which a tap position changes ends the visit;
+the next iteration starts again from the first rank.
+A transformer is therefore regulated for the grid as the regulators of the earlier ranks have left it, and an earlier
+rank is adjusted again when a later change moves its voltage out of its band.
+
+The ranking graph connects the nodes through all branch types: `line`, `asym_line`, `generic_branch`, `link`,
+`transformer`, `three_winding_transformer` and `single_phase_transformer`.
+A regulated transformer can therefore be ranked when it is only connected to a source through, for example, a SWER
+`asym_line`.
+A transformer that cannot be reached from a source is not regulated.
+The `control_side` of a regulated transformer must be further from the source than its other side: when the
+`control_side` can be reached from a source but the other side cannot, because the graph leads through a regulated
+transformer only from its other side to its `control_side`, the calculation raises an `AutomaticTapInputError`.
+
+## Controlled voltage
+
+The controlled voltage $U_{\text{control}}$ is the voltage at the `control_side` node, compensated by the line drop
+compensation (see [Line drop compensation](../user_manual/components.md#line-drop-compensation)).
+The reduction of the three phases to one number depends on the regulated component:
+
+- For a `transformer` and a `three_winding_transformer`, it is the mean over the phases of the magnitude of the
+  compensated voltage.
+- For a `single_phase_transformer`, it is the voltage of the controlled winding only, from the voltages of the node to
+  earth, because the phases outside the winding have no voltage and must not be averaged in:
+  - a phase-to-earth winding: the magnitude of the compensated voltage of that phase;
+  - a phase-to-phase winding: the magnitude of the difference of the compensated voltages of the two phases;
+  - a centre-tapped winding: the mean of the magnitudes of the compensated voltages of the two legs.
+
+  $U_{\text{set}}$ and $U_{\text{band}}$ are in the same unit: volts across the winding (volts per leg for a centre-tapped
+  winding).
+  See [Single-phase transformer regulated by a tap regulator](
+    ../user_manual/components.md#single-phase-transformer-regulated-by-a-tap-regulator).
 
 ## Initialization and exploitation of regulated transformers
 

@@ -1,0 +1,155 @@
+{
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {
+        "id": 1,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 2,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 3,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 4,
+        "u_rated": 22000.0
+      },
+      {
+        "id": 5,
+        "u_rated": 415.6921938165305
+      },
+      {
+        "id": 6,
+        "u_rated": 415.6921938165305
+      }
+    ],
+    "asym_line": [
+      {
+        "id": 101,
+        "from_node": 1,
+        "to_node": 2,
+        "from_status": 1,
+        "to_status": 1,
+        "r_aa": 0.5,
+        "x_aa": 0.8,
+        "r_ba": 0.1,
+        "x_ba": 0.3,
+        "r_bb": 0.5,
+        "x_bb": 0.8,
+        "r_ca": 0.096,
+        "x_ca": 0.26,
+        "r_cb": 0.1,
+        "x_cb": 0.3,
+        "r_cc": 0.5,
+        "x_cc": 0.8,
+        "c_aa": 1.8e-08,
+        "c_ba": -3e-09,
+        "c_bb": 1.84e-08,
+        "c_ca": -2.4e-09,
+        "c_cb": -3e-09,
+        "c_cc": 1.8e-08
+      },
+      {
+        "id": 102,
+        "from_node": 3,
+        "to_node": 4,
+        "from_status": 1,
+        "to_status": 1,
+        "phases": 1,
+        "r_aa": 28.986960440108934,
+        "x_aa": 16.971230962241698,
+        "c_aa": 1.2e-07
+      }
+    ],
+    "source": [
+      {
+        "id": 201,
+        "node": 1,
+        "status": 1,
+        "u_ref": 1.0,
+        "sk": 100000000.0,
+        "rx_ratio": 0.1,
+        "z01_ratio": 1.0
+      }
+    ],
+    "single_phase_transformer": [
+      {
+        "id": 151,
+        "from_node": 2,
+        "to_node": 3,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 22000.0,
+        "u2": 12700.0,
+        "sn": 200000.0,
+        "uk": 0.05,
+        "pk": 2000.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 4,
+        "to_connection": 1,
+        "clock": 0,
+        "r_grounding_to": 5.0,
+        "x_grounding_to": 0.1
+      },
+      {
+        "id": 152,
+        "from_node": 4,
+        "to_node": 5,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 12700.0,
+        "u2": 240.0,
+        "sn": 25000.0,
+        "uk": 0.04,
+        "pk": 400.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 1,
+        "to_connection": 1,
+        "clock": 0,
+        "tap_side": 0,
+        "tap_pos": 1,
+        "tap_min": -2,
+        "tap_max": 2,
+        "tap_nom": 0,
+        "tap_size": 317.5
+      },
+      {
+        "id": 153,
+        "from_node": 3,
+        "to_node": 6,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 12700.0,
+        "u2": 240.0,
+        "sn": 10000.0,
+        "uk": 0.035,
+        "pk": 180.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 1,
+        "to_connection": 1,
+        "clock": 0
+      }
+    ],
+    "fault": [
+      {
+        "id": 601,
+        "status": 1,
+        "fault_type": 1,
+        "fault_phase": 1,
+        "fault_object": 4,
+        "r_f": 0.0,
+        "x_f": 0.0
+      }
+    ]
+  }
+}

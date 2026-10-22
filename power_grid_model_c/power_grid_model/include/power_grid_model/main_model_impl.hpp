@@ -24,6 +24,7 @@
 #include "auxiliary/dataset.hpp"
 #include "auxiliary/meta_data.hpp"
 #include "auxiliary/update.hpp"
+#include "component/branch.hpp"
 #include "component/component.hpp"
 
 // math model include
@@ -211,6 +212,40 @@ class MainModelImpl {
         has_node_injection_sensors_ = detect_node_injection_sensors();
         state_.comp_topo = std::make_shared<ComponentTopology const>(
             main_core::construct_topology<ModelType>(state_.components, has_node_injection_sensors_));
+        has_reduced_phase_components_ = detect_reduced_phase_components();
+        // the connection is input-only and the vector is only filled if a load_gen is delta (any status)
+        has_delta_load_gens_ = !state_.comp_topo->load_gen_connection.empty();
+    }
+
+    // phases are input-only, so this is fixed at construction; disconnected components count on purpose
+    bool detect_reduced_phase_components() const {
+        return std::ranges::any_of(state_.components.template citer<Branch>(),
+                                   [](Branch const& branch) { return !branch.phase_incidence().all_phases(); });
+    }
+
+    // the positive-sequence calculations cannot represent absent phases or delta load_gens, and state estimation
+    // supports neither; the reduced-phase checks come first, so their message wins
+    void check_reduced_phase_support(Options const& options) const {
+        using enum ReducedPhaseNotSupported::Cause;
+        if (has_reduced_phase_components_) {
+            if (options.calculation_type == CalculationType::state_estimation) {
+                throw ReducedPhaseNotSupported{"State estimation"};
+            }
+            if (options.calculation_symmetry == CalculationSymmetry::symmetric) {
+                // short circuits are routed to the asymmetric calculation, so only power flow can still be symmetric
+                throw ReducedPhaseNotSupported{"Symmetric power flow"};
+            }
+        }
+        if (has_delta_load_gens_) {
+            if (options.calculation_type == CalculationType::state_estimation) {
+                throw ReducedPhaseNotSupported{"State estimation", delta_load_gens};
+            }
+            // loads are ignored in short circuits, so a symmetric short circuit is still allowed
+            if (options.calculation_type == CalculationType::power_flow &&
+                options.calculation_symmetry == CalculationSymmetry::symmetric) {
+                throw ReducedPhaseNotSupported{"Symmetric power flow", delta_load_gens};
+            }
+        }
     }
 
     bool detect_node_injection_sensors() const {
@@ -363,9 +398,13 @@ class MainModelImpl {
             auto const faults = state_.components.template citer<Fault>();
             auto const is_three_phase = std::ranges::all_of(
                 faults, [](Fault const& fault) { return fault.get_fault_type() == FaultType::three_phase; });
-            options.calculation_symmetry =
-                is_three_phase ? CalculationSymmetry::symmetric : CalculationSymmetry::asymmetric;
+            // the positive-sequence solver cannot represent absent phases; this also covers a calculation without
+            // faults
+            options.calculation_symmetry = is_three_phase && !has_reduced_phase_components_
+                                               ? CalculationSymmetry::symmetric
+                                               : CalculationSymmetry::asymmetric;
         }
+        check_reduced_phase_support(options);
 
         if (options.calculation_type == CalculationType::power_flow &&
             options.calculation_method != CalculationMethod::newton_raphson &&
@@ -405,6 +444,15 @@ class MainModelImpl {
     }
 
     void check_no_experimental_features_used(Options const& options, ConstDataset const* batch_dataset) const {
+        // experimental until the maintainers graduate the feature; checked before the calculation, so before the
+        // reduced-phase support checks of calculate()
+        if (has_reduced_phase_components_) {
+            throw ExperimentalFeature{"A network with one- or two-phase branches is an experimental feature"};
+        }
+        if (has_delta_load_gens_) {
+            throw ExperimentalFeature{"A delta-connected load or generator is an experimental feature"};
+        }
+
         bool const is_asymmetric_power_flow = options.calculation_type == CalculationType::power_flow &&
                                               options.calculation_symmetry == CalculationSymmetry::asymmetric;
 
@@ -482,6 +530,8 @@ class MainModelImpl {
     OwnedUpdateDataset cached_inverse_update_{};
     UpdateChange cached_state_changes_{};
     bool has_node_injection_sensors_{false}; // TODO(jguo): cleanup v2 node single link registration path
+    bool has_reduced_phase_components_{false};
+    bool has_delta_load_gens_{false};
 #ifndef NDEBUG
     // construction_complete is used for debug assertions only
     bool construction_complete_{false};

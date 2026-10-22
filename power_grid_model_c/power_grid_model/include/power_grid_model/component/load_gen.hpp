@@ -29,11 +29,13 @@ class GenericLoadGen : public Appliance {
     static constexpr char const* name = "generic_load_gen";
     ComponentType math_model_type() const final { return ComponentType::generic_load_gen; }
 
-    explicit GenericLoadGen(GenericLoadGenInput const& generic_load_gen_input, double u)
-        : Appliance{generic_load_gen_input, u}, type_{generic_load_gen_input.type} {}
+    GenericLoadGen(GenericLoadGenInput const& generic_load_gen_input, double u, LoadGenConnection connection)
+        : Appliance{generic_load_gen_input, u}, type_{generic_load_gen_input.type}, connection_{connection} {}
 
     // getter for load type
     LoadGenType type() const { return type_; }
+    // getter for the connection: wye (entries a, b, c) or delta (entries ab, bc, ca); delta only for asym_load/asym_gen
+    LoadGenConnection connection() const { return connection_; }
     // getter for calculation param, power injection
     template <symmetry_tag sym> ComplexValue<sym> calc_param(bool is_connected_to_source = true) const {
         if (!energized(is_connected_to_source)) {
@@ -48,6 +50,7 @@ class GenericLoadGen : public Appliance {
 
   private:
     LoadGenType type_;
+    LoadGenConnection connection_;
     virtual ComplexValue<symmetric_t> sym_calc_param() const = 0;
     virtual ComplexValue<asymmetric_t> asym_calc_param() const = 0;
 };
@@ -79,7 +82,8 @@ class LoadGen final : public std::conditional_t<is_generator_v<appliance_type_>,
         }
     }();
 
-    LoadGen(LoadGenInput<loadgen_symmetry> const& load_gen_input, double u) : BaseClass{load_gen_input, u} {
+    LoadGen(LoadGenInput<loadgen_symmetry> const& load_gen_input, double u)
+        : BaseClass{load_gen_input, u, checked_connection(load_gen_input)} {
         set_power(load_gen_input.p_specified, load_gen_input.q_specified);
     }
 
@@ -115,6 +119,27 @@ class LoadGen final : public std::conditional_t<is_generator_v<appliance_type_>,
     }
 
   private:
+    // not provided means wye; delta is only supported for asym_load and asym_gen
+    static LoadGenConnection checked_connection(LoadGenInput<loadgen_symmetry> const& load_gen_input) {
+        using enum LoadGenConnection;
+        if (is_nan(load_gen_input.connection)) {
+            return wye;
+        }
+        switch (load_gen_input.connection) {
+        case wye:
+            return wye;
+        case delta:
+            if constexpr (is_symmetric_v<loadgen_symmetry>) {
+                throw InvalidPhaseConnection{name, load_gen_input.id, "delta",
+                                             "a delta connection is only supported for asym_load and asym_gen"};
+            } else {
+                return delta;
+            }
+        default:
+            throw MissingCaseForEnumError{std::string{name} + " connection", load_gen_input.connection};
+        }
+    }
+
     ComplexValue<loadgen_symmetry> s_specified_{std::complex<double>{nan, nan}}; // specified power injection
 
     // direction of load_gen

@@ -20,6 +20,7 @@
 #include "../common/logging.hpp"
 #include "../common/timer.hpp"
 
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -69,6 +70,12 @@ template <symmetry_tag sym, typename DerivedSolver> class IterativePFSolver {
                 // Calculate maximum deviation of voltage at any bus
                 Timer const sub_timer{log, LogEvent::iterate_unknown};
                 max_dev = derived_solver.iterate_unknown(output.u, err_tol, cache_run);
+            }
+            // a NaN deviation fails the loop condition, which would end the loop as if converged and return NaN
+            // results without an error; the cache run of a batch is exempt: it runs one iteration on the input data,
+            // which may leave values (e.g. the load powers) to the update data, and its results are discarded
+            if (std::isnan(max_dev) && !cache_run) {
+                throw IterationDiverge{num_iter, max_dev, err_tol};
             }
         }
 

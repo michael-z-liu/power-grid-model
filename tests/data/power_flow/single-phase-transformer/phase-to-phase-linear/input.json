@@ -1,0 +1,134 @@
+{
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {
+        "id": 1,
+        "u_rated": 11000.0
+      },
+      {
+        "id": 2,
+        "u_rated": 11000.0
+      },
+      {
+        "id": 3,
+        "u_rated": 415.0
+      },
+      {
+        "id": 4,
+        "u_rated": 415.6921938165305
+      }
+    ],
+    "asym_line": [
+      {
+        "id": 101,
+        "from_node": 1,
+        "to_node": 2,
+        "from_status": 1,
+        "to_status": 1,
+        "r_aa": 0.25,
+        "x_aa": 0.4,
+        "r_ba": 0.05,
+        "x_ba": 0.15,
+        "r_bb": 0.25,
+        "x_bb": 0.4,
+        "r_ca": 0.048,
+        "x_ca": 0.13,
+        "r_cb": 0.05,
+        "x_cb": 0.15,
+        "r_cc": 0.25,
+        "x_cc": 0.4,
+        "c_aa": 9e-09,
+        "c_ba": -1.5e-09,
+        "c_bb": 9.2e-09,
+        "c_ca": -1.2e-09,
+        "c_cb": -1.5e-09,
+        "c_cc": 9e-09
+      }
+    ],
+    "source": [
+      {
+        "id": 201,
+        "node": 1,
+        "status": 1,
+        "u_ref": 1.0,
+        "sk": 100000000.0,
+        "rx_ratio": 0.1,
+        "z01_ratio": 1.0
+      }
+    ],
+    "single_phase_transformer": [
+      {
+        "id": 151,
+        "from_node": 2,
+        "to_node": 3,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 11000.0,
+        "u2": 415.0,
+        "sn": 50000.0,
+        "uk": 0.04,
+        "pk": 600.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 4,
+        "to_connection": 4,
+        "clock": 0
+      },
+      {
+        "id": 152,
+        "from_node": 2,
+        "to_node": 4,
+        "from_status": 1,
+        "to_status": 1,
+        "u1": 11000.0,
+        "u2": 240.0,
+        "sn": 25000.0,
+        "uk": 0.04,
+        "pk": 350.0,
+        "i0": 0.0,
+        "p0": 0.0,
+        "from_connection": 6,
+        "to_connection": 1,
+        "clock": 6
+      }
+    ],
+    "asym_load": [
+      {
+        "id": 301,
+        "node": 3,
+        "status": 1,
+        "type": 1,
+        "p_specified": [
+          20000.0,
+          12000.0,
+          0.0
+        ],
+        "q_specified": [
+          5000.0,
+          3000.0,
+          0.0
+        ]
+      },
+      {
+        "id": 302,
+        "node": 4,
+        "status": 1,
+        "type": 1,
+        "p_specified": [
+          15000.0,
+          0.0,
+          0.0
+        ],
+        "q_specified": [
+          4000.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  }
+}

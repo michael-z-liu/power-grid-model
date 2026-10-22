@@ -401,6 +401,18 @@ class TwoValuesZeroError(MultiFieldValidationError):
     _message = "Fields {field} are both zero for {n} {objects}."
 
 
+class NotApplicableValueError(MultiFieldValidationError):
+    """
+    A value is provided for a field that does not apply, given the other field(s).
+    E.g. `r_bb` of an `asym_line` with `phases` a, which has no conductor on phase b.
+    """
+
+    _message = (
+        "Combination of fields {field} is not valid for {n} {objects}: "
+        "a value is provided that does not apply and must be left empty."
+    )
+
+
 class ComparisonError(SingleFieldValidationError):
     """
     Base class for comparison errors.
@@ -501,6 +513,18 @@ class TransformerClockError(MultiFieldValidationError):
         "Invalid clock number for {n} {objects}. "
         "If one side has wye winding and the other side has not, the clock number should be odd. "
         "If either both or none of the sides have wye winding, the clock number should be even."
+    )
+
+
+class SinglePhaseTransformerClockError(SingleFieldValidationError):
+    """
+    Invalid clock number of a single-phase transformer.
+    """
+
+    _message = (
+        "Invalid clock number for {n} {objects}. "
+        "The clock of a single-phase transformer must be 0 or 6 (modulo 12); "
+        "6 reverses the polarity of the to-side winding."
     )
 
 
@@ -611,3 +635,15 @@ class MissingVoltageAngleMeasurementError(MultiComponentValidationError):
         "Missing voltage angle measurement for {n} {objects}. "
         "If a voltage sensor measures the voltage of a terminal, it must also measure the voltage angle."
     )
+
+
+class ValidationWarning(UserWarning):
+    """
+    Input data that is valid, but probably not what was intended.
+
+    It is raised with warnings.warn and does not change the result of the validation.
+    E.g. u1 of a single_phase_transformer that differs by more than 20% from the nominal winding voltage of its node.
+    Or a phase-to-phase winding of a single_phase_transformer that has no earth reference.
+    Or a u_set of a transformer_tap_regulator of a single_phase_transformer that is more than 20% off the nominal
+    voltage of the control side winding.
+    """

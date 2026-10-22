@@ -40,6 +40,22 @@ Steps:
                 If type is constant PQ: I_inj_i += conj(S_inj_j/U_i)
                 If type is constant impedance: I_inj_i += conj((S_inj_j * abs(U_i)^2) / U_i) = conj((S_inj_j) * U_i
                 If type is constant current: I_inj_i += conj(S_inj_j*abs(U_i)/U_i)
+                If the load is delta (phase-to-phase) connected: I_inj_i += D^T I_delta, with the branch currents
+                    I_delta_k = conj(S_k(U) / U_k) of the type-dependent branch powers (see delta_load_gen.hpp)
+
+    Constant impedance loads in a network with an absent phase (a bus with a one- or two-phase slot pattern):
+        The current of a constant impedance load is linear in U, I_inj = -Y_load U, with Y_load = -conj(S_inj) on the
+        diagonal (wye) or the branch admittances of a delta load (see add_linear_loads). In such a network these loads
+        are moved from I_inj into the matrix, which is then Y bus + y_ref + Y_load; the solution is the same.
+        Explicitly, a constant impedance load to earth is the only earth reference of a floating common mode (e.g. the
+        ab secondary of an ab-ab single phase transformer, held to earth only by a low admittance), and the iteration
+        diverges there with a gain of about Y_load / (low admittance) per iteration; in the matrix, the load anchors it.
+        - The matrix is refactorized whenever the constant impedance loads of the input change, so that it always
+          holds those of the current input (deterministic in a batch, whatever the order of the scenarios).
+        - A floating common mode with only constant power or constant current loads still diverges.
+        - Linear current (one iteration) then treats constant impedance loads exactly in such a network.
+        - Networks without an absent phase, including a network flagged reduced-phase with all buses abc, keep the
+          explicit treatment, bit for bit.
 
 Nomenclature:
     I_inj : Injected current
@@ -53,6 +69,7 @@ Nomenclature:
 */
 
 #include "common_solver_functions.hpp"
+#include "delta_load_gen.hpp"
 #include "iterative_pf_solver.hpp"
 #include "sparse_lu_solver.hpp"
 #include "y_bus.hpp"
@@ -67,7 +84,9 @@ Nomenclature:
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace power_grid_model::math_solver {
@@ -89,15 +108,23 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     IterativeCurrentPFSolver(YBus<sym> const& y_bus, MathModelTopology const& topo)
         : IterativePFSolver<sym, IterativeCurrentPFSolver>{y_bus, topo},
           rhs_u_(y_bus.size()),
-          sparse_solver_{y_bus.row_indptr_lu(), y_bus.col_indices_lu(), y_bus.lu_diag()} {}
+          sparse_solver_{y_bus.row_indptr_lu(), y_bus.col_indices_lu(), y_bus.lu_diag()},
+          absent_phase_{has_absent_phase(topo)} {}
 
     // Add source admittance to Y bus and set variable for prepared y bus to true
     void initialize_derived_solver(YBus<sym> const& y_bus, PowerFlowInput<sym> const& input,
                                    SolverOutput<sym>& output) {
         this->make_average_source_start(input, output.u);
+        detail::apply_slot_patterns<sym>(y_bus.math_topology(), output.u);
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u);
 
         auto const& sources_per_bus = this->sources_per_bus_.get();
         IdxVector const& bus_entry = y_bus.lu_diag();
+        // at an absent-phase network, the matrix holds the const_y load_gens of this input, so it is refactorized
+        // whenever they change
+        if (absent_phase_) {
+            update_const_y_admittance(y_bus.math_topology(), input);
+        }
         // if Y bus is not up to date
         // re-build matrix and prefactorize Build y bus data with source admittance
         if (parameters_changed_) {
@@ -110,6 +137,14 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
                     // YBus_diag += Y_source // NOSONAR
                     mat_data[data_sequence] +=
                         y_bus.math_model_param().source_param[source_number].template y_ref<sym>();
+                }
+            }
+            if (absent_phase_) {
+                // YBus_diag += Y_load of the const_y load_gens // NOSONAR(S125)
+                for (auto const& [bus_number, load_gens] : enumerated_zip_sequence(this->load_gens_per_bus_.get())) {
+                    if (has_const_y_load(load_gens)) {
+                        mat_data[bus_entry[bus_number]] += const_y_admittance_[bus_number];
+                    }
                 }
             }
             // prefactorize
@@ -135,9 +170,11 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
         // loop buses: i
         for (auto const& [bus_number, load_gens, sources] :
              enumerated_zip_sequence(load_gens_per_bus, sources_per_bus)) {
-            add_loads(load_gens, bus_number, input, load_gen_type, u);
+            add_loads(load_gens, bus_number, input, load_gen_type, u, y_bus.math_topology());
             add_sources(sources, bus_number, y_bus, input);
         }
+        // a load on an absent phase is ignored; its current conj(s / u) is not finite at u = 0
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), rhs_u_);
     }
 
     // Solve the linear equations I_inj = YU
@@ -149,10 +186,8 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
         double max_dev = 0.0;
         // loop all buses
         for (Idx bus_number = 0; bus_number != this->n_bus_; ++bus_number) {
-            // Get maximum iteration for a bus
-            double const dev = max_val(cabs(rhs_u_[bus_number] - u[bus_number]));
-            // Keep maximum deviation of all buses
-            max_dev = std::max(dev, max_dev);
+            // Keep maximum deviation of all buses; a NaN deviation is kept
+            max_dev = detail::fold_max_deviation<sym>(max_dev, cabs(rhs_u_[bus_number] - u[bus_number]));
             // assign updated values
             u[bus_number] = rhs_u_[bus_number];
         }
@@ -168,12 +203,74 @@ class IterativeCurrentPFSolver : public IterativePFSolver<sym_type, IterativeCur
     SparseSolverType sparse_solver_;
     std::shared_ptr<BlockPermArray const> perm_;
     bool parameters_changed_ = true;
+    // a bus has an absent phase (asymmetric only); then the const_y load_gens are part of the matrix instead of the
+    // right-hand side
+    bool absent_phase_;
+    // per bus, the admittance of the const_y load_gens in the current matrix; empty unless absent_phase_
+    ComplexTensorVector<sym> const_y_admittance_;
+    // per bus, the admittance of the const_y load_gens of this input (scratch of update_const_y_admittance, swapped
+    // with const_y_admittance_ when they differ, so that its memory is reused); each thread has its own solver
+    ComplexTensorVector<sym> y_load_;
+
+    // the gate of the const_y handling: not has_reduced_phase alone, which a math model with all buses abc may have
+    static bool has_absent_phase(MathModelTopology const& topo) {
+        if constexpr (is_symmetric_v<sym>) {
+            return false;
+        } else {
+            return topo.has_reduced_phase &&
+                   std::ranges::any_of(topo.bus_phase_mask, [](PhaseMask phases) { return !phases.all(); });
+        }
+    }
+
+    // the const_y admittance per bus of this input; if any entry differs (exactly) from the one in the matrix, store it
+    // and mark the matrix for refactorization, so that the matrix always holds the const_y load_gens of the current
+    // input, whatever the order of the scenarios in a batch
+    void update_const_y_admittance(MathModelTopology const& topo, PowerFlowInput<sym> const& input) {
+        std::vector<LoadGenType> const& load_gen_type = this->load_gen_type_.get();
+        auto const& load_gens_per_bus = this->load_gens_per_bus_.get();
+        y_load_.assign(static_cast<std::size_t>(this->n_bus_), ComplexTensor<sym>{});
+        for (auto const& [bus_number, load_gens] : enumerated_zip_sequence(load_gens_per_bus)) {
+            detail::add_const_y_loads(load_gens, bus_number, input, load_gen_type, y_load_[bus_number], topo);
+        }
+        auto const exactly_equal = [](ComplexTensor<sym> const& x, ComplexTensor<sym> const& y) {
+            if constexpr (is_symmetric_v<sym>) {
+                return x == y;
+            } else {
+                return (x == y).all();
+            }
+        };
+        if (!std::ranges::equal(y_load_, const_y_admittance_, exactly_equal)) {
+            std::swap(y_load_, const_y_admittance_);
+            parameters_changed_ = true;
+        }
+    }
+
+    // a bus without const_y load_gens keeps its matrix entry untouched
+    bool has_const_y_load(IdxRange const& load_gens) const {
+        std::vector<LoadGenType> const& load_gen_type = this->load_gen_type_.get();
+        return std::ranges::any_of(load_gens,
+                                   [&load_gen_type](Idx load) { return load_gen_type[load] == LoadGenType::const_y; });
+    }
 
     void add_loads(IdxRange const& load_gens, Idx bus_number, PowerFlowInput<sym> const& input,
-                   std::vector<LoadGenType> const& load_gen_type, ComplexValueVector<sym> const& u) {
+                   std::vector<LoadGenType> const& load_gen_type, ComplexValueVector<sym> const& u,
+                   [[maybe_unused]] MathModelTopology const& topo) {
         for (Idx const load_number : load_gens) {
             // load type
             LoadGenType const type = load_gen_type[load_number];
+            // at an absent-phase network the const_y load_gens are in the matrix
+            if (absent_phase_ && type == LoadGenType::const_y) {
+                continue;
+            }
+            if constexpr (!is_symmetric_v<sym>) {
+                if (topo.is_delta_load_gen(load_number)) {
+                    // I_inj_i = D^T conj(S_k(U) / U_k) over the branches k of the delta load
+                    rhs_u_[bus_number] += delta_load_gen::phase_current(
+                        input.s_injection[load_number], type, u[bus_number], topo.bus_phase(bus_number),
+                        delta_load_gen::nominal_voltage(topo.slot_pattern(bus_number)));
+                    continue;
+                }
+            }
             switch (type) {
                 using enum LoadGenType;
 

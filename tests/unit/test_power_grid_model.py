@@ -244,6 +244,55 @@ def test_batch_power_flow(model: PowerGridModel, update_batch: BatchDataset, sym
     compare_result(result, sym_output_batch, rtol=0.0, atol=1e-8)
 
 
+@pytest.mark.parametrize(
+    ("calculation_method", "calculation_initialization"),
+    [
+        ("newton_raphson", "default"),
+        ("newton_raphson", "flat"),
+        ("iterative_current", "default"),
+        ("linear_current", "default"),
+    ],
+)
+@pytest.mark.parametrize("symmetric", [True, False])
+def test_batch_power_flow_with_power_left_to_the_update_data(
+    input_row, update_batch_row, calculation_method, calculation_initialization, symmetric
+):
+    # The input data of a batch need not be valid on its own. The cache run on the input data must not fail on a load
+    # power that every scenario provides: the iterative methods then see a NaN deviation in their one iteration. With a
+    # const_power load, Newton-Raphson from a flat start does too (with the linear start, the NaN is in the matrix).
+    def input_with(q_specified: float):
+        input_data = deepcopy(input_row)
+        input_data[CT.sym_load][AT.type] = LoadGenType.const_power
+        input_data[CT.sym_load][AT.q_specified] = q_specified
+        return input_data
+
+    # a lighter load than in update_batch_row, so that the const_power load converges with every method
+    update_data = deepcopy(update_batch_row)
+    update_data[CT.sym_load]["data"][AT.q_specified] = [10.0, 30.0]
+
+    def batch_result(q_specified: float):
+        return PowerGridModel(input_with(q_specified)).calculate_power_flow(
+            symmetric=symmetric,
+            calculation_method=calculation_method,
+            calculation_initialization=calculation_initialization,
+            update_data=update_data,
+        )
+
+    result = batch_result(np.nan)
+    expected = batch_result(500.0)
+    assert not np.isnan(result[CT.node][AT.u]).any()
+    np.testing.assert_array_equal(result[CT.node][AT.u], expected[CT.node][AT.u])
+
+    # a single calculation on the input data itself still raises
+    if calculation_method != "newton_raphson" or calculation_initialization == "flat":
+        with pytest.raises(IterationDiverge, match="Max deviation: nan"):
+            PowerGridModel(input_with(np.nan)).calculate_power_flow(
+                symmetric=symmetric,
+                calculation_method=calculation_method,
+                calculation_initialization=calculation_initialization,
+            )
+
+
 def test_construction_error(input):
     input[CT.sym_load][AT.id][0] = 0
     with pytest.raises(PowerGridError, match="Conflicting id detected:"):

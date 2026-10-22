@@ -230,7 +230,7 @@ def _get_indexer(source: np.ndarray, target: np.ndarray, default_value: int | No
         return np.full_like(target, fill_value=default_value)
 
     clipped_indices = np.take(permutation_sort, indices, mode="clip")
-    return np.where(source[clipped_indices] == target, permutation_sort[clipped_indices], default_value)
+    return np.where(source[clipped_indices] == target, clipped_indices, default_value)
 
 
 def _set_default_value(

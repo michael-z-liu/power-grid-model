@@ -323,6 +323,90 @@ class FaultPhase(IntEnum):
     """
 
 
+class PhaseConnection(IntEnum):
+    """The phases with a conductor of a reduced-phase (one- or two-phase) branch. Not provided means abc."""
+
+    abc = 0
+    """
+    All three phases have a conductor
+    """
+    a = 1
+    """
+    Only the first phase has a conductor
+    """
+    b = 2
+    """
+    Only the second phase has a conductor
+    """
+    c = 3
+    """
+    Only the third phase has a conductor
+    """
+    ab = 4
+    """
+    The first and second phase have a conductor
+    """
+    ac = 5
+    """
+    The first and third phase have a conductor
+    """
+    bc = 6
+    """
+    The second and third phase have a conductor
+    """
+
+
+class WindingConnection1P(IntEnum):
+    """
+    The phase slots of a winding of a single-phase transformer. A single phase is a phase-to-earth winding; for a
+    phase-to-phase winding, the first phase is the positive terminal. Required; there is no default.
+    """
+
+    a = 1
+    """
+    Between the first phase and earth
+    """
+    b = 2
+    """
+    Between the second phase and earth
+    """
+    c = 3
+    """
+    Between the third phase and earth
+    """
+    ab = 4
+    """
+    Between the first and the second phase
+    """
+    ac = 5
+    """
+    Between the first and the third phase
+    """
+    bc = 6
+    """
+    Between the second and the third phase
+    """
+    ab_center_tapped = 7
+    """
+    Centre-tapped (split-phase) winding: a to the centre tap and the centre tap to b; to side only
+    """
+
+
+class LoadGenConnection(IntEnum):
+    """
+    The connection of an asymmetric load or generator. Optional; the default is wye.
+    """
+
+    wye = 0
+    """
+    Phase-to-earth: p/q_specified are the a, b and c values
+    """
+    delta = 1
+    """
+    Phase-to-phase: p/q_specified are the ab, bc and ca values; only for asym_load and asym_gen
+    """
+
+
 class LoggerType(IntEnum):
     """Logger types for opt-in diagnostic output from calculations.
 

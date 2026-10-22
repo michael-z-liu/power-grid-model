@@ -193,6 +193,8 @@ class Fault final : public Base {
         return fault_phase_;
     }
     constexpr ID get_fault_object() const { return fault_object_; }
+    // fault_phase was not provided or is default_value, so get_fault_phase() returns the default of the fault type
+    constexpr bool has_default_phase() const { return fault_phase_ == FaultPhase::default_value; }
 
   private:
     // short circuit parameters

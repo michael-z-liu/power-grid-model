@@ -65,6 +65,10 @@ int main(int argc, char** argv) {
     void* node_input = PGM_create_buffer(handle, PGM_def_input_node, 1);
     void* source_input = PGM_create_buffer(handle, PGM_def_input_source, 1);
     void* load_input = PGM_create_buffer(handle, PGM_def_input_sym_load, 1);
+    // buffers are uninitialized: set all attributes to NaN before the deserializer fills in the given ones
+    PGM_buffer_set_nan(handle, PGM_def_input_node, node_input, 0, 1);
+    PGM_buffer_set_nan(handle, PGM_def_input_source, source_input, 0, 1);
+    PGM_buffer_set_nan(handle, PGM_def_input_sym_load, load_input, 0, 1);
     PGM_dataset_writable_set_buffer(handle, writable_input, "node", NULL, node_input);
     PGM_dataset_writable_set_buffer(handle, writable_input, "source", NULL, source_input);
     PGM_dataset_writable_set_buffer(handle, writable_input, "sym_load", NULL, load_input);

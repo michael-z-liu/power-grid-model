@@ -1,0 +1,104 @@
+{
+  "version": "1.0",
+  "type": "update",
+  "is_batch": true,
+  "attributes": {},
+  "data": [
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 1,
+          "fault_object": 5,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 2,
+          "fault_object": 5,
+          "r_f": 0.1,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 2,
+          "fault_phase": 4,
+          "fault_object": 5,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 3,
+          "fault_phase": 4,
+          "fault_object": 5,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 3,
+          "fault_phase": 6,
+          "fault_object": 2,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 1,
+          "fault_object": 7,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 1,
+          "fault_object": 6,
+          "r_f": 0.0,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 2,
+          "fault_phase": 4,
+          "fault_object": 6,
+          "r_f": 0.05,
+          "x_f": 0.0
+        }
+      ]
+    }
+  ]
+}

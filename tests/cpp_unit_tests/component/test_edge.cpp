@@ -102,6 +102,13 @@ TEST_CASE("Test edge") {
         CHECK(Edge::name == std::string{"edge"});
     }
 
+    SUBCASE("Phase incidence") {
+        BranchPhaseIncidence const incidence = edge_ref.phase_incidence();
+        CHECK(incidence == BranchPhaseIncidence{});
+        CHECK(incidence.all_phases());
+        CHECK(incidence.coupling == PhaseCoupling::per_phase);
+    }
+
     SUBCASE("Status Flags") {
         CHECK(edge_ref.from_status() == 1);
         CHECK(edge_ref.to_status() == 1);

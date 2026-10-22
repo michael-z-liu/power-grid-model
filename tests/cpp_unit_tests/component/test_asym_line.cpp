@@ -18,7 +18,12 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <complex>
+#include <cstddef>
+#include <vector>
 
 namespace power_grid_model {
 
@@ -39,10 +44,10 @@ void execute_subcases(const AsymLineInput& input, const ComplexTensor<asymmetric
 
     DoubleComplex const y1_series =
         (y_series(0, 0) + y_series(1, 1) + y_series(2, 2)) / 3.0 -
-        (y_series(0, 1) + y_series(1, 2) + y_series(1, 0) + y_series(1, 2) + y_series(2, 0) + y_series(2, 1)) / 6.0;
+        (y_series(0, 1) + y_series(0, 2) + y_series(1, 0) + y_series(1, 2) + y_series(2, 0) + y_series(2, 1)) / 6.0;
     DoubleComplex const y1_shunt =
         (y_shunt(0, 0) + y_shunt(1, 1) + y_shunt(2, 2)) / 3.0 -
-        (y_shunt(0, 1) + y_shunt(1, 2) + y_shunt(1, 0) + y_shunt(1, 2) + y_shunt(2, 0) + y_shunt(2, 1)) / 6.0;
+        (y_shunt(0, 1) + y_shunt(0, 2) + y_shunt(1, 0) + y_shunt(1, 2) + y_shunt(2, 0) + y_shunt(2, 1)) / 6.0;
 
     // symmetric
     DoubleComplex const yff1 = y1_series + 0.5 * y1_shunt;
@@ -74,6 +79,7 @@ void execute_subcases(const AsymLineInput& input, const ComplexTensor<asymmetric
         CHECK(branch.base_i_from() == doctest::Approx(base_i));
         CHECK(branch.base_i_to() == doctest::Approx(base_i));
         CHECK(branch.phase_shift() == 0.0);
+        CHECK(branch.phase_incidence() == BranchPhaseIncidence{});
     }
 
     SUBCASE("Symmetric parameters") {
@@ -352,6 +358,356 @@ TEST_CASE("Test asym line") {
         auto const c_matrix =
             ComplexTensor<asymmetric_t>(input.c_aa, input.c_bb, input.c_cc, input.c_ba, input.c_ca, input.c_cb);
         execute_subcases(input, y_series, c_matrix, base_i, base_y, system_frequency, voltage_lvl);
+    }
+}
+
+namespace {
+// conductor data a, b, c, n of the existing test cases, symmetric
+using ConductorMatrix = std::array<std::array<double, 4>, 4>;
+constexpr ConductorMatrix r_conductors{{{0.4369, 0.0496, 0.0485, 0.0496},
+                                        {0.0496, 0.4369, 0.0496, 0.0485},
+                                        {0.0485, 0.0496, 0.4369, 0.0496},
+                                        {0.0496, 0.0485, 0.0496, 0.4569}}};
+constexpr ConductorMatrix x_conductors{{{0.8538, 0.7886, 0.7663, 0.7886},
+                                        {0.7886, 0.8538, 0.7886, 0.7663},
+                                        {0.7663, 0.7886, 0.8538, 0.7886},
+                                        {0.7886, 0.7663, 0.7886, 0.8738}}};
+constexpr ConductorMatrix c_conductors{{{0.32e-6, -0.05e-6, -0.04e-6, 0.0},
+                                        {-0.05e-6, 0.33e-6, -0.05e-6, 0.0},
+                                        {-0.04e-6, -0.05e-6, 0.31e-6, 0.0},
+                                        {0.0, 0.0, 0.0, 0.0}}};
+constexpr double reduced_frequency = 50.0;
+constexpr double reduced_voltage = 10.0e3;
+constexpr double reduced_tolerance = 1e-12;
+
+struct ReducedPhaseSet {
+    PhaseConnection connection;
+    PhaseMask mask;
+    std::vector<Idx> phases;
+};
+
+std::vector<ReducedPhaseSet> reduced_phase_sets() {
+    using enum PhaseConnection;
+    return {{.connection = a, .mask = phase_mask_a, .phases = {0}},
+            {.connection = b, .mask = phase_mask_b, .phases = {1}},
+            {.connection = c, .mask = phase_mask_c, .phases = {2}},
+            {.connection = ab, .mask = phase_mask_ab, .phases = {0, 1}},
+            {.connection = ac, .mask = phase_mask_ac, .phases = {0, 2}},
+            {.connection = bc, .mask = phase_mask_bc, .phases = {1, 2}}};
+}
+
+// input with values only for the present phases (and the neutral); the absent entries are left empty
+AsymLineInput reduced_phase_input(ReducedPhaseSet const& phase_set, bool neutral) {
+    AsymLineInput input{
+        .id = 1, .from_node = 2, .to_node = 3, .from_status = 1, .to_status = 1, .phases = phase_set.connection};
+    input.i_n = 216.0;
+    auto const is_present = [&phase_set, neutral](Idx conductor) {
+        return conductor == 3 ? neutral : phase_set.mask.has(conductor);
+    };
+    auto const set_rx = [&is_present](double& r, double& x, Idx row, Idx col) {
+        if (is_present(row) && is_present(col)) {
+            r = r_conductors[static_cast<size_t>(row)][static_cast<size_t>(col)];
+            x = x_conductors[static_cast<size_t>(row)][static_cast<size_t>(col)];
+        }
+    };
+    set_rx(input.r_aa, input.x_aa, 0, 0);
+    set_rx(input.r_ba, input.x_ba, 1, 0);
+    set_rx(input.r_bb, input.x_bb, 1, 1);
+    set_rx(input.r_ca, input.x_ca, 2, 0);
+    set_rx(input.r_cb, input.x_cb, 2, 1);
+    set_rx(input.r_cc, input.x_cc, 2, 2);
+    set_rx(input.r_na, input.x_na, 3, 0);
+    set_rx(input.r_nb, input.x_nb, 3, 1);
+    set_rx(input.r_nc, input.x_nc, 3, 2);
+    set_rx(input.r_nn, input.x_nn, 3, 3);
+    auto const set_c = [&phase_set](double& c, Idx row, Idx col) {
+        if (phase_set.mask.has(row) && phase_set.mask.has(col)) {
+            c = c_conductors[static_cast<size_t>(row)][static_cast<size_t>(col)];
+        }
+    };
+    set_c(input.c_aa, 0, 0);
+    set_c(input.c_ba, 1, 0);
+    set_c(input.c_bb, 1, 1);
+    set_c(input.c_ca, 2, 0);
+    set_c(input.c_cb, 2, 1);
+    set_c(input.c_cc, 2, 2);
+    return input;
+}
+
+// a 1x1 or 2x2 block of the present phases, with closed-form operations, independent of the code under test
+struct Block {
+    size_t n{};
+    std::array<std::array<DoubleComplex, 2>, 2> value{};
+
+    friend Block operator+(Block const& x, Block const& y) {
+        Block result{.n = x.n};
+        for (size_t i = 0; i != x.n; ++i) {
+            for (size_t j = 0; j != x.n; ++j) {
+                result.value[i][j] = x.value[i][j] + y.value[i][j];
+            }
+        }
+        return result;
+    }
+    friend Block operator*(DoubleComplex factor, Block const& x) {
+        Block result{.n = x.n};
+        for (size_t i = 0; i != x.n; ++i) {
+            for (size_t j = 0; j != x.n; ++j) {
+                result.value[i][j] = factor * x.value[i][j];
+            }
+        }
+        return result;
+    }
+};
+
+Block inverse(Block const& x) {
+    if (x.n == 1) {
+        return {.n = 1, .value = {{{1.0 / x.value[0][0], 0.0}, {0.0, 0.0}}}};
+    }
+    DoubleComplex const det = x.value[0][0] * x.value[1][1] - x.value[0][1] * x.value[1][0];
+    return {.n = 2,
+            .value = {{{x.value[1][1] / det, -x.value[0][1] / det}, {-x.value[1][0] / det, x.value[0][0] / det}}}};
+}
+
+// series impedance of the present phases, with the neutral eliminated (Z_PP - Z_Pn Z_nP / Z_nn)
+Block expected_z_series(std::vector<Idx> const& phases, bool neutral) {
+    auto const z = [](Idx row, Idx col) {
+        auto const r = static_cast<size_t>(row);
+        auto const c = static_cast<size_t>(col);
+        return DoubleComplex{r_conductors[r][c], x_conductors[r][c]};
+    };
+    Block result{.n = phases.size()};
+    for (size_t i = 0; i != phases.size(); ++i) {
+        for (size_t j = 0; j != phases.size(); ++j) {
+            result.value[i][j] = z(phases[i], phases[j]);
+            if (neutral) {
+                result.value[i][j] -= z(phases[i], 3) * z(3, phases[j]) / z(3, 3);
+            }
+        }
+    }
+    return result;
+}
+
+Block expected_c(std::vector<Idx> const& phases) {
+    Block result{.n = phases.size()};
+    for (size_t i = 0; i != phases.size(); ++i) {
+        for (size_t j = 0; j != phases.size(); ++j) {
+            result.value[i][j] = c_conductors[static_cast<size_t>(phases[i])][static_cast<size_t>(phases[j])];
+        }
+    }
+    return result;
+}
+
+void check_block(ComplexTensor<asymmetric_t> const& actual, Block const& expected, std::vector<Idx> const& phases) {
+    CHECK(!actual.isNaN().any());
+    for (Idx row = 0; row != 3; ++row) {
+        for (Idx col = 0; col != 3; ++col) {
+            CAPTURE(row);
+            CAPTURE(col);
+            auto const row_it = std::ranges::find(phases, row);
+            auto const col_it = std::ranges::find(phases, col);
+            if (row_it == phases.end() || col_it == phases.end()) {
+                CHECK(actual(row, col) == 0.0);
+                continue;
+            }
+            DoubleComplex const value =
+                expected
+                    .value[static_cast<size_t>(row_it - phases.begin())][static_cast<size_t>(col_it - phases.begin())];
+            CHECK(cabs(actual(row, col) - value) < reduced_tolerance * std::max(1.0, cabs(value)));
+        }
+    }
+}
+
+void check_zero(BranchCalcParam<asymmetric_t> const& param) {
+    for (auto const& value : param.value) {
+        CHECK((value == ComplexTensor<asymmetric_t>{}).all());
+    }
+}
+
+void check_reduced_phase_line(ReducedPhaseSet const& phase_set, bool neutral) {
+    double const base_i = base_power_3p / reduced_voltage / sqrt3;
+    double const base_y = base_i / (reduced_voltage / sqrt3);
+    AsymLine asym_line{reduced_phase_input(phase_set, neutral), reduced_frequency, reduced_voltage, reduced_voltage};
+    Branch& branch = asym_line;
+    auto const& phases = phase_set.phases;
+
+    Block const y_series = (1.0 / base_y) * inverse(expected_z_series(phases, neutral));
+    Block const y_shunt = (1.0i * 2.0 * pi * reduced_frequency / base_y) * expected_c(phases);
+    Block const y_tt = y_series + 0.5 * y_shunt;
+    Block const y_ft = -1.0 * y_series;
+    Block const branch_shunt = 0.5 * y_shunt + inverse(inverse(y_series) + 2.0 * inverse(y_shunt));
+
+    CHECK(branch.phase_incidence() ==
+          BranchPhaseIncidence{.from = phase_set.mask, .to = phase_set.mask, .coupling = PhaseCoupling::per_phase});
+    CHECK_THROWS_AS(branch.calc_param<symmetric_t>(), ReducedPhaseNotSupported);
+
+    // both sides connected
+    BranchCalcParam<asymmetric_t> param = branch.calc_param<asymmetric_t>();
+    check_block(param.yff(), y_tt, phases);
+    check_block(param.ytt(), y_tt, phases);
+    check_block(param.yft(), y_ft, phases);
+    check_block(param.ytf(), y_ft, phases);
+    // not energized
+    check_zero(branch.calc_param<asymmetric_t>(false));
+    // from side connected: open-end shunt 0.5 Ysh + (Zs + 2 Ysh^-1)^-1
+    CHECK(branch.set_status(na_IntS, false));
+    param = branch.calc_param<asymmetric_t>();
+    check_block(param.yff(), branch_shunt, phases);
+    check_zero({.value = {param.ytt(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+    // to side connected
+    CHECK(branch.set_status(false, true));
+    param = branch.calc_param<asymmetric_t>();
+    check_block(param.ytt(), branch_shunt, phases);
+    check_zero({.value = {param.yff(), param.yft(), param.ytf(), ComplexTensor<asymmetric_t>{}}});
+    // not connected
+    CHECK(branch.set_status(false, false));
+    check_zero(branch.calc_param<asymmetric_t>());
+}
+
+ComplexTensor<asymmetric_t> test_impedance() {
+    ComplexTensor<asymmetric_t> result;
+    for (Idx row = 0; row != 3; ++row) {
+        for (Idx col = 0; col != 3; ++col) {
+            auto const r = static_cast<size_t>(row);
+            auto const c = static_cast<size_t>(col);
+            result(row, col) = DoubleComplex{r_conductors[r][c], x_conductors[r][c]};
+        }
+    }
+    return result;
+}
+} // namespace
+
+TEST_CASE("Test masked_inv") {
+    ComplexTensor<asymmetric_t> const z = test_impedance();
+
+    SUBCASE("All phases is the plain inverse") { CHECK((masked_inv(z, phase_mask_abc) == inv(z)).all()); }
+
+    SUBCASE("Single phase with nan on the absent entries") {
+        ComplexTensor<asymmetric_t> z_b;
+        z_b.setConstant(DoubleComplex{nan, nan});
+        z_b(1, 1) = z(1, 1);
+        ComplexTensor<asymmetric_t> const y = masked_inv(z_b, phase_mask_b);
+        CHECK(!y.isNaN().any());
+        CHECK(cabs(y(1, 1) - 1.0 / z(1, 1)) < reduced_tolerance);
+        for (Idx row = 0; row != 3; ++row) {
+            for (Idx col = 0; col != 3; ++col) {
+                if (row != 1 || col != 1) {
+                    CHECK(y(row, col) == 0.0);
+                }
+            }
+        }
+    }
+
+    SUBCASE("Two phases against the closed-form inverse") {
+        ComplexTensor<asymmetric_t> z_ab = z;
+        z_ab(2, 2) = nan;
+        z_ab(0, 2) = nan;
+        z_ab(2, 1) = nan;
+        Block const z_block{.n = 2, .value = {{{z(0, 0), z(0, 1)}, {z(1, 0), z(1, 1)}}}};
+        check_block(masked_inv(z_ab, phase_mask_ab), inverse(z_block), {0, 1});
+    }
+}
+
+TEST_CASE("Test asym line - reduced phases") {
+    SUBCASE("All one- and two-phase sets, with and without a neutral") {
+        for (auto const& phase_set : reduced_phase_sets()) {
+            for (bool const neutral : {false, true}) {
+                CAPTURE(phase_letters(phase_set.mask));
+                CAPTURE(neutral);
+                check_reduced_phase_line(phase_set, neutral);
+            }
+        }
+    }
+
+    SUBCASE("Not provided and abc give identical parameters") {
+        AsymLineInput input = reduced_phase_input(
+            {.connection = PhaseConnection::abc, .mask = phase_mask_abc, .phases = {0, 1, 2}}, true);
+        AsymLine const line_abc{input, reduced_frequency, reduced_voltage, reduced_voltage};
+        input.phases = AsymLineInput{}.phases; // not provided
+        AsymLine const line_na{input, reduced_frequency, reduced_voltage, reduced_voltage};
+        auto const param_na = line_na.calc_param<asymmetric_t>();
+        auto const param_abc = line_abc.calc_param<asymmetric_t>();
+        for (size_t k = 0; k != param_na.value.size(); ++k) {
+            CHECK((param_na.value[k] == param_abc.value[k]).all());
+        }
+        CHECK(line_abc.phase_incidence() == BranchPhaseIncidence{});
+        CHECK(line_na.phase_incidence() == BranchPhaseIncidence{});
+    }
+
+    SUBCASE("SWER line") {
+        double const r = 1.40 + (pi * pi * reduced_frequency * 1e-4);
+        double const x = 4.0 * pi * reduced_frequency * 1e-4 * std::log(658.5 * std::sqrt(100.0 / 50.0) / 0.00127);
+        AsymLineInput const input{.id = 1,
+                                  .from_node = 2,
+                                  .to_node = 3,
+                                  .from_status = 1,
+                                  .to_status = 1,
+                                  .phases = PhaseConnection::a,
+                                  .r_aa = 20.0 * r,
+                                  .x_aa = 20.0 * x,
+                                  .c_aa = 20.0 * 6e-9};
+        double const base_y = base_power_3p / (22.0e3 * 22.0e3);
+        AsymLine const swer{input, reduced_frequency, 22.0e3, 22.0e3};
+        auto const param = swer.calc_param<asymmetric_t>();
+        DoubleComplex const y_series = 1.0 / DoubleComplex{20.0 * r, 20.0 * x} / base_y;
+        DoubleComplex const y_shunt = 1.0i * 2.0 * pi * reduced_frequency * 20.0 * 6e-9 / base_y;
+        check_block(param.yft(), {.n = 1, .value = {{{-y_series, 0.0}, {0.0, 0.0}}}}, {0});
+        check_block(param.yff(), {.n = 1, .value = {{{y_series + 0.5 * y_shunt, 0.0}, {0.0, 0.0}}}}, {0});
+    }
+
+    SUBCASE("Invalid input") {
+        ReducedPhaseSet const phase_a = reduced_phase_sets().front();
+        auto const construct = [](AsymLineInput const& input) {
+            return AsymLine{input, reduced_frequency, reduced_voltage, reduced_voltage};
+        };
+        AsymLineInput input = reduced_phase_input(phase_a, false);
+        REQUIRE_NOTHROW(construct(input));
+
+        SUBCASE("Unknown phases") {
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+            input.phases = static_cast<PhaseConnection>(IntS{9});
+            CHECK_THROWS_AS(construct(input), MissingCaseForEnumError);
+        }
+        SUBCASE("c0 and c1") {
+            input.c_aa = nan;
+            input.c0 = 0.2e-6;
+            input.c1 = 0.3e-6;
+            CHECK_THROWS_WITH_AS(construct(input),
+                                 "Invalid phase connection for asym_line 1 with phases (a): c0 and c1 are only "
+                                 "supported with all three phases; use the c matrix\n",
+                                 InvalidPhaseConnection);
+        }
+        SUBCASE("Missing entry of a present phase") {
+            input.r_aa = nan;
+            CHECK_THROWS_WITH_AS(construct(input),
+                                 "Invalid phase connection for asym_line 1 with phases (a): r_aa is required\n",
+                                 InvalidPhaseConnection);
+        }
+        SUBCASE("Entry of an absent phase") {
+            input.r_bb = 0.4;
+            CHECK_THROWS_WITH_AS(construct(input),
+                                 "Invalid phase connection for asym_line 1 with phases (a): r_bb refers to an absent "
+                                 "phase or a missing neutral and must be left empty\n",
+                                 InvalidPhaseConnection);
+        }
+        SUBCASE("Neutral entry of an absent phase") {
+            input = reduced_phase_input(phase_a, true);
+            REQUIRE_NOTHROW(construct(input));
+            input.r_nb = 0.05;
+            CHECK_THROWS_AS(construct(input), InvalidPhaseConnection);
+        }
+        SUBCASE("Neutral entries without the neutral self impedance") {
+            input = reduced_phase_input(phase_a, true);
+            input.r_nn = nan;
+            input.x_nn = nan;
+            CHECK_THROWS_WITH_AS(construct(input),
+                                 "Invalid phase connection for asym_line 1 with phases (a): r_na refers to an absent "
+                                 "phase or a missing neutral and must be left empty\n",
+                                 InvalidPhaseConnection);
+        }
+        SUBCASE("Zero capacitance is allowed") {
+            input.c_aa = 0.0;
+            CHECK_NOTHROW(construct(input));
+        }
     }
 }
 

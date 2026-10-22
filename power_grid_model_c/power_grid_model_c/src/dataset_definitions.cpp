@@ -44,6 +44,7 @@ PGM_MetaAttribute const* const PGM_def_input_asym_line_from_node = PGM_meta_get_
 PGM_MetaAttribute const* const PGM_def_input_asym_line_to_node = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "to_node");
 PGM_MetaAttribute const* const PGM_def_input_asym_line_from_status = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "from_status");
 PGM_MetaAttribute const* const PGM_def_input_asym_line_to_status = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "to_status");
+PGM_MetaAttribute const* const PGM_def_input_asym_line_phases = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "phases");
 PGM_MetaAttribute const* const PGM_def_input_asym_line_r_aa = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "r_aa");
 PGM_MetaAttribute const* const PGM_def_input_asym_line_r_ba = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "r_ba");
 PGM_MetaAttribute const* const PGM_def_input_asym_line_r_bb = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_line", "r_bb");
@@ -130,6 +131,40 @@ PGM_MetaAttribute const* const PGM_def_input_transformer_r_grounding_from = PGM_
 PGM_MetaAttribute const* const PGM_def_input_transformer_x_grounding_from = PGM_meta_get_attribute_by_name(nullptr, "input", "transformer", "x_grounding_from");
 PGM_MetaAttribute const* const PGM_def_input_transformer_r_grounding_to = PGM_meta_get_attribute_by_name(nullptr, "input", "transformer", "r_grounding_to");
 PGM_MetaAttribute const* const PGM_def_input_transformer_x_grounding_to = PGM_meta_get_attribute_by_name(nullptr, "input", "transformer", "x_grounding_to");
+// component single_phase_transformer
+PGM_MetaComponent const* const PGM_def_input_single_phase_transformer = PGM_meta_get_component_by_name(nullptr, "input", "single_phase_transformer");
+// attributes of input single_phase_transformer
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_id = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "id");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_node = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "from_node");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_node = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "to_node");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_status = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "from_status");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_status = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "to_status");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_u1 = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "u1");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_u2 = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "u2");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_sn = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "sn");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "uk");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "pk");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_i0 = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "i0");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_p0 = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "p0");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_half = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "uk_half");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_half = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "pk_half");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_from_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "from_connection");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_to_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "to_connection");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_clock = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "clock");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_side = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_side");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_pos = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_pos");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_min = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_min");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_max = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_max");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_nom = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_nom");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_tap_size = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "tap_size");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_min = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "uk_min");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_uk_max = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "uk_max");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_min = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "pk_min");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_pk_max = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "pk_max");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_r_grounding_from = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "r_grounding_from");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_x_grounding_from = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "x_grounding_from");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_r_grounding_to = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "r_grounding_to");
+PGM_MetaAttribute const* const PGM_def_input_single_phase_transformer_x_grounding_to = PGM_meta_get_attribute_by_name(nullptr, "input", "single_phase_transformer", "x_grounding_to");
 // component transformer_tap_regulator
 PGM_MetaComponent const* const PGM_def_input_transformer_tap_regulator = PGM_meta_get_component_by_name(nullptr, "input", "transformer_tap_regulator");
 // attributes of input transformer_tap_regulator
@@ -203,6 +238,7 @@ PGM_MetaAttribute const* const PGM_def_input_sym_load_status = PGM_meta_get_attr
 PGM_MetaAttribute const* const PGM_def_input_sym_load_type = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_load", "type");
 PGM_MetaAttribute const* const PGM_def_input_sym_load_p_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_load", "p_specified");
 PGM_MetaAttribute const* const PGM_def_input_sym_load_q_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_load", "q_specified");
+PGM_MetaAttribute const* const PGM_def_input_sym_load_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_load", "connection");
 // component sym_gen
 PGM_MetaComponent const* const PGM_def_input_sym_gen = PGM_meta_get_component_by_name(nullptr, "input", "sym_gen");
 // attributes of input sym_gen
@@ -212,6 +248,7 @@ PGM_MetaAttribute const* const PGM_def_input_sym_gen_status = PGM_meta_get_attri
 PGM_MetaAttribute const* const PGM_def_input_sym_gen_type = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_gen", "type");
 PGM_MetaAttribute const* const PGM_def_input_sym_gen_p_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_gen", "p_specified");
 PGM_MetaAttribute const* const PGM_def_input_sym_gen_q_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_gen", "q_specified");
+PGM_MetaAttribute const* const PGM_def_input_sym_gen_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "sym_gen", "connection");
 // component asym_load
 PGM_MetaComponent const* const PGM_def_input_asym_load = PGM_meta_get_component_by_name(nullptr, "input", "asym_load");
 // attributes of input asym_load
@@ -221,6 +258,7 @@ PGM_MetaAttribute const* const PGM_def_input_asym_load_status = PGM_meta_get_att
 PGM_MetaAttribute const* const PGM_def_input_asym_load_type = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_load", "type");
 PGM_MetaAttribute const* const PGM_def_input_asym_load_p_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_load", "p_specified");
 PGM_MetaAttribute const* const PGM_def_input_asym_load_q_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_load", "q_specified");
+PGM_MetaAttribute const* const PGM_def_input_asym_load_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_load", "connection");
 // component asym_gen
 PGM_MetaComponent const* const PGM_def_input_asym_gen = PGM_meta_get_component_by_name(nullptr, "input", "asym_gen");
 // attributes of input asym_gen
@@ -230,6 +268,7 @@ PGM_MetaAttribute const* const PGM_def_input_asym_gen_status = PGM_meta_get_attr
 PGM_MetaAttribute const* const PGM_def_input_asym_gen_type = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_gen", "type");
 PGM_MetaAttribute const* const PGM_def_input_asym_gen_p_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_gen", "p_specified");
 PGM_MetaAttribute const* const PGM_def_input_asym_gen_q_specified = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_gen", "q_specified");
+PGM_MetaAttribute const* const PGM_def_input_asym_gen_connection = PGM_meta_get_attribute_by_name(nullptr, "input", "asym_gen", "connection");
 // component voltage_regulator
 PGM_MetaComponent const* const PGM_def_input_voltage_regulator = PGM_meta_get_component_by_name(nullptr, "input", "voltage_regulator");
 // attributes of input voltage_regulator
@@ -413,6 +452,20 @@ PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_p_to = PGM_meta_get_
 PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_q_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "asym_line", "q_to");
 PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_i_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "asym_line", "i_to");
 PGM_MetaAttribute const* const PGM_def_sym_output_asym_line_s_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "asym_line", "s_to");
+// component single_phase_transformer
+PGM_MetaComponent const* const PGM_def_sym_output_single_phase_transformer = PGM_meta_get_component_by_name(nullptr, "sym_output", "single_phase_transformer");
+// attributes of sym_output single_phase_transformer
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_id = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "id");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_energized = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "energized");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_loading = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "loading");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_p_from = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "p_from");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_q_from = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "q_from");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_i_from = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "i_from");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_s_from = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "s_from");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_p_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "p_to");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_q_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "q_to");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_i_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "i_to");
+PGM_MetaAttribute const* const PGM_def_sym_output_single_phase_transformer_s_to = PGM_meta_get_attribute_by_name(nullptr, "sym_output", "single_phase_transformer", "s_to");
 // component transformer_tap_regulator
 PGM_MetaComponent const* const PGM_def_sym_output_transformer_tap_regulator = PGM_meta_get_component_by_name(nullptr, "sym_output", "transformer_tap_regulator");
 // attributes of sym_output transformer_tap_regulator
@@ -636,6 +689,20 @@ PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_p_to = PGM_meta_get
 PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_q_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "asym_line", "q_to");
 PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_i_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "asym_line", "i_to");
 PGM_MetaAttribute const* const PGM_def_asym_output_asym_line_s_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "asym_line", "s_to");
+// component single_phase_transformer
+PGM_MetaComponent const* const PGM_def_asym_output_single_phase_transformer = PGM_meta_get_component_by_name(nullptr, "asym_output", "single_phase_transformer");
+// attributes of asym_output single_phase_transformer
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_id = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "id");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_energized = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "energized");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_loading = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "loading");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_p_from = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "p_from");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_q_from = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "q_from");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_i_from = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "i_from");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_s_from = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "s_from");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_p_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "p_to");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_q_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "q_to");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_i_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "i_to");
+PGM_MetaAttribute const* const PGM_def_asym_output_single_phase_transformer_s_to = PGM_meta_get_attribute_by_name(nullptr, "asym_output", "single_phase_transformer", "s_to");
 // component transformer_tap_regulator
 PGM_MetaComponent const* const PGM_def_asym_output_transformer_tap_regulator = PGM_meta_get_component_by_name(nullptr, "asym_output", "transformer_tap_regulator");
 // attributes of asym_output transformer_tap_regulator
@@ -808,6 +875,13 @@ PGM_MetaAttribute const* const PGM_def_update_transformer_id = PGM_meta_get_attr
 PGM_MetaAttribute const* const PGM_def_update_transformer_from_status = PGM_meta_get_attribute_by_name(nullptr, "update", "transformer", "from_status");
 PGM_MetaAttribute const* const PGM_def_update_transformer_to_status = PGM_meta_get_attribute_by_name(nullptr, "update", "transformer", "to_status");
 PGM_MetaAttribute const* const PGM_def_update_transformer_tap_pos = PGM_meta_get_attribute_by_name(nullptr, "update", "transformer", "tap_pos");
+// component single_phase_transformer
+PGM_MetaComponent const* const PGM_def_update_single_phase_transformer = PGM_meta_get_component_by_name(nullptr, "update", "single_phase_transformer");
+// attributes of update single_phase_transformer
+PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_id = PGM_meta_get_attribute_by_name(nullptr, "update", "single_phase_transformer", "id");
+PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_from_status = PGM_meta_get_attribute_by_name(nullptr, "update", "single_phase_transformer", "from_status");
+PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_to_status = PGM_meta_get_attribute_by_name(nullptr, "update", "single_phase_transformer", "to_status");
+PGM_MetaAttribute const* const PGM_def_update_single_phase_transformer_tap_pos = PGM_meta_get_attribute_by_name(nullptr, "update", "single_phase_transformer", "tap_pos");
 // component transformer_tap_regulator
 PGM_MetaComponent const* const PGM_def_update_transformer_tap_regulator = PGM_meta_get_component_by_name(nullptr, "update", "transformer_tap_regulator");
 // attributes of update transformer_tap_regulator
@@ -981,6 +1055,15 @@ PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_from = PGM_meta_get
 PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_from_angle = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "asym_line", "i_from_angle");
 PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_to = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "asym_line", "i_to");
 PGM_MetaAttribute const* const PGM_def_sc_output_asym_line_i_to_angle = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "asym_line", "i_to_angle");
+// component single_phase_transformer
+PGM_MetaComponent const* const PGM_def_sc_output_single_phase_transformer = PGM_meta_get_component_by_name(nullptr, "sc_output", "single_phase_transformer");
+// attributes of sc_output single_phase_transformer
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_id = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "id");
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_energized = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "energized");
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_from = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "i_from");
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_from_angle = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "i_from_angle");
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_to = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "i_to");
+PGM_MetaAttribute const* const PGM_def_sc_output_single_phase_transformer_i_to_angle = PGM_meta_get_attribute_by_name(nullptr, "sc_output", "single_phase_transformer", "i_to_angle");
 // component three_winding_transformer
 PGM_MetaComponent const* const PGM_def_sc_output_three_winding_transformer = PGM_meta_get_component_by_name(nullptr, "sc_output", "three_winding_transformer");
 // attributes of sc_output three_winding_transformer

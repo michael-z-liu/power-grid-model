@@ -9,6 +9,7 @@
 #include <doctest/doctest.h>
 
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace power_grid_model {
@@ -111,6 +112,55 @@ TEST_CASE("Exceptions") {
               "Invalid clock for transformer 0, clock 1\n");
         CHECK(std::string{InvalidTransformerClock{na_IntID, na_IntS}.what()} ==
               "Invalid clock for transformer -2147483648, clock -128\n");
+    }
+    SUBCASE("MissingPhaseForWinding") {
+        auto const msg = std::string{MissingPhaseForWinding{"branch #3", "ab", "a"}.what()};
+        CHECK(msg.find("branch #3") != std::string::npos);
+        CHECK(msg.find("(ab)") != std::string::npos);
+        CHECK(msg.find("node phases: a") != std::string::npos);
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
+        CHECK(msg.find("not all present") != std::string::npos);
+        CHECK(std::string{MissingPhaseForWinding{"branch with ID 7", "abc", "a"}.what()} ==
+              "Winding of branch with ID 7 has phases (abc) that are not all present at its node (node phases: "
+              "a). A connected winding must have all of its phases present.\n");
+    }
+    SUBCASE("DanglingConductor") {
+        auto const msg = std::string{DanglingConductor{"branch #2", "bc", "a", "open"}.what()};
+        CHECK(msg ==
+              "Conductors of branch #2 on phases (bc) are not present at any of its connected nodes (from node phases: "
+              "a, to node phases: open). Every conductor must be present at the nodes it connects.\n");
+        CHECK(std::string{DanglingConductor{"branch with ID 42", "b", "a", "open"}.what()}.starts_with(
+            "Conductors of branch with ID 42 on phases (b) are not present"));
+    }
+    SUBCASE("LoadGenOnAbsentPhase") {
+        auto const msg = std::string{LoadGenOnAbsentPhase{ID{12}, "bc", "a"}.what()};
+        CHECK(msg.starts_with("Load or generator 12 has a non-zero specified power on phases (bc) that are not present "
+                              "at its node (node phases: a)."));
+        CHECK(msg.find("sym_load or sym_gen puts power on all three phases") != std::string::npos);
+        CHECK(msg.find("balanced") == std::string::npos);
+        // the wye message is unchanged, also when the wye connection is passed explicitly
+        CHECK(msg == "Load or generator 12 has a non-zero specified power on phases (bc) that are not present at its "
+                     "node (node phases: a). Use an asym_load or asym_gen with zero power on the absent phases; a "
+                     "sym_load or sym_gen puts power on all three phases.\n");
+        CHECK(std::string{LoadGenOnAbsentPhase{ID{12}, "bc", "a", LoadGenConnection::wye}.what()} == msg);
+    }
+    SUBCASE("LoadGenOnAbsentPhase with a delta load_gen") {
+        auto const msg = std::string{LoadGenOnAbsentPhase{ID{13}, "c", "ab", LoadGenConnection::delta}.what()};
+        CHECK(msg == "Load or generator 13 has a non-zero specified power on phases (c) that are not present at its "
+                     "node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and "
+                     "b, bc needs b and c, ca needs c and a.\n");
+        // the prefix is shared with the wye flavour, so the error mappings still match
+        CHECK(msg.starts_with("Load or generator 13 has a non-zero specified power on phases"));
+        CHECK(msg.find("sym_load") == std::string::npos);
+    }
+    SUBCASE("ShuntAtReducedPhaseNode") {
+        CHECK(std::string{ShuntAtReducedPhaseNode{ID{500}}.what()} ==
+              "Shunt 500 is connected to a node without all phases. A shunt at a node without all phases is not "
+              "supported.\n");
+    }
+    SUBCASE("InvalidPhaseConnection") {
+        CHECK(std::string{InvalidPhaseConnection{"asym_line", ID{5}, "a", "r_bb is required"}.what()} ==
+              "Invalid phase connection for asym_line 5 with phases (a): r_bb is required\n");
     }
     SUBCASE("SparseMatrixError") {
         CHECK(std::string{SparseMatrixError{}.what()} ==
@@ -275,6 +325,37 @@ TEST_CASE("Exceptions") {
               "The short circuit phases (0) do not match the short circuit type (2)\n");
         CHECK(std::string{InvalidShortCircuitPhases{FaultType::two_phase_to_ground, FaultPhase::abc}.what()} ==
               "The short circuit phases (0) do not match the short circuit type (3)\n");
+        auto const msg = std::string{InvalidShortCircuitPhases{"abc", "a"}.what()};
+        CHECK(msg == "The short circuit phases (abc) are not all present at the faulted node (node phases: a); this "
+                     "short circuit type cannot be applied there\n");
+        CHECK(msg.find("short circuit type") != std::string::npos); // mapped like the other constructor in Python
+
+        // model-level check with the fault ID (M8)
+        auto const msg_id = std::string{InvalidShortCircuitPhases{601, 4, "b", "a", false}.what()};
+        CHECK(msg_id == "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); "
+                        "this short circuit type cannot be applied there\n");
+        CHECK(msg_id.find("short circuit type") != std::string::npos);
+        auto const msg_default = std::string{InvalidShortCircuitPhases{601, 4, "b", "a", true}.what()};
+        CHECK(msg_default ==
+              "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); this "
+              "short circuit type cannot be applied there; the phases are the default of the fault type, so set "
+              "fault_phase explicitly\n");
+        CHECK(msg_default.find("short circuit type") != std::string::npos);
+    }
+    SUBCASE("ReducedPhaseNotSupported") {
+        auto const msg = std::string{ReducedPhaseNotSupported{"State estimation"}.what()};
+        CHECK(msg == "State estimation is not supported in a network with one- or two-phase nodes.\n");
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
+        // the default cause is the reduced phase nodes
+        CHECK(std::string{
+                  ReducedPhaseNotSupported{"State estimation", ReducedPhaseNotSupported::Cause::reduced_phase_nodes}
+                      .what()} == msg);
+    }
+    SUBCASE("ReducedPhaseNotSupported with delta-connected load_gens") {
+        auto const msg = std::string{
+            ReducedPhaseNotSupported{"Symmetric power flow", ReducedPhaseNotSupported::Cause::delta_load_gens}.what()};
+        CHECK(msg == "Symmetric power flow is not supported in a network with delta-connected loads or generators.\n");
+        CHECK(msg.find(" is not implemented for ") == std::string::npos);
     }
     SUBCASE("InvalidShortCircuitPhaseOrType") {
         CHECK(std::string{InvalidShortCircuitPhaseOrType{}.what()} ==

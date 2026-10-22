@@ -6,6 +6,7 @@
 
 #include "common/common.hpp"
 #include "common/enum.hpp"
+#include "common/exception.hpp"
 #include "common/grouped_index_vector.hpp"
 #include "common/maybe_owning_view.hpp"
 #include "common/small_vector.hpp"
@@ -13,8 +14,12 @@
 #include "common/three_phase_tensor.hpp"
 
 #include <array>
+#include <cassert>
 #include <concepts>
+#include <cstddef>
+#include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace power_grid_model {
@@ -162,16 +167,177 @@ using BranchIdx = std::array<Idx, 2>;
 // in case of indices for math model, -1/disconnected means the branch is not connected to that side
 using Branch3Idx = std::array<Idx, 3>;
 
+// phase slots of a bus or a branch terminal: a = bit 0, b = bit 1, c = bit 2
+// bit operations are confined to this class so that they all operate on unsigned 8-bit values
+class PhaseMask {
+  public:
+    using underlying_type = std::uint8_t;
+
+    constexpr PhaseMask() = default; // no phases
+    explicit constexpr PhaseMask(underlying_type value) : bits_{static_cast<underlying_type>(value & all_bits)} {}
+
+    constexpr underlying_type bits() const { return bits_; }
+    constexpr bool none() const { return bits_ == 0; }
+    constexpr bool all() const { return bits_ == all_bits; }
+    // phase is the phase slot 0, 1, 2 for a, b, c; any other value is not present
+    constexpr bool has(Idx phase) const {
+        if (phase < 0 || phase >= static_cast<Idx>(single_phase_bits.size())) {
+            return false;
+        }
+        return (bits_ & single_phase_bits[static_cast<std::size_t>(phase)]) != 0;
+    }
+    // all phases of other are present in this mask
+    constexpr bool contains(PhaseMask other) const { return (bits_ & other.bits_) == other.bits_; }
+    // the phases of this mask that are not in other
+    constexpr PhaseMask without(PhaseMask other) const {
+        return PhaseMask{static_cast<underlying_type>(bits_ & static_cast<underlying_type>(other.bits_ ^ all_bits))};
+    }
+
+    friend constexpr PhaseMask operator|(PhaseMask lhs, PhaseMask rhs) {
+        return PhaseMask{static_cast<underlying_type>(lhs.bits_ | rhs.bits_)};
+    }
+    friend constexpr PhaseMask operator&(PhaseMask lhs, PhaseMask rhs) {
+        return PhaseMask{static_cast<underlying_type>(lhs.bits_ & rhs.bits_)};
+    }
+    friend constexpr bool operator==(PhaseMask const& lhs, PhaseMask const& rhs) = default;
+
+  private:
+    static constexpr underlying_type all_bits{0b111};
+    static constexpr std::array<underlying_type, 3> single_phase_bits{0b001, 0b010, 0b100};
+
+    underlying_type bits_{};
+};
+static_assert(sizeof(PhaseMask) == 1);
+
+inline constexpr PhaseMask phase_mask_none{};
+inline constexpr PhaseMask phase_mask_a{0b001};
+inline constexpr PhaseMask phase_mask_b{0b010};
+inline constexpr PhaseMask phase_mask_c{0b100};
+inline constexpr PhaseMask phase_mask_ab{0b011};
+inline constexpr PhaseMask phase_mask_ac{0b101};
+inline constexpr PhaseMask phase_mask_bc{0b110};
+inline constexpr PhaseMask phase_mask_abc{0b111};
+
+// set the slots of the absent phases to exactly zero
+// this is done by assignment, never by multiplication, so that a non-finite value in an absent slot is discarded too
+template <scalar_value T> inline void mask_absent_phases(three_phase_tensor::Vector<T>& value, PhaseMask phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!phases.has(phase)) {
+            value(phase) = T{};
+        }
+    }
+}
+
+// set the rows of the phases absent in row_phases and the columns of the phases absent in col_phases to exactly zero
+template <scalar_value T>
+inline void mask_absent_phases(three_phase_tensor::Tensor<T>& value, PhaseMask row_phases, PhaseMask col_phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!row_phases.has(phase)) {
+            value.row(phase).setZero();
+        }
+        if (!col_phases.has(phase)) {
+            value.col(phase).setZero();
+        }
+    }
+}
+
+// overwrite the diagonal of each absent phase with one, so that an absent slot has the equation 1 * x = 0
+template <scalar_value T>
+inline void set_absent_phase_identity(three_phase_tensor::Tensor<T>& value, PhaseMask phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!phases.has(phase)) {
+            value(phase, phase) = T{1.0};
+        }
+    }
+}
+
+constexpr std::string_view phase_letters(PhaseMask mask) {
+    constexpr std::array<std::string_view, 8> letters{"-", "a", "b", "ab", "c", "ac", "bc", "abc"};
+    return letters[mask.bits()];
+}
+
+// the phases that a short circuit with the given (resolved) fault phases is applied to
+constexpr PhaseMask fault_phase_mask(FaultPhase fault_phase) {
+    using enum FaultPhase;
+
+    switch (fault_phase) {
+    case abc:
+        return phase_mask_abc;
+    case a:
+        return phase_mask_a;
+    case b:
+        return phase_mask_b;
+    case c:
+        return phase_mask_c;
+    case ab:
+        return phase_mask_ab;
+    case ac:
+        return phase_mask_ac;
+    case bc:
+        return phase_mask_bc;
+    default:
+        throw MissingCaseForEnumError{"fault_phase_mask", fault_phase};
+    }
+}
+
+// how the phases of the two terminals of a branch are coupled
+//   per_phase: phase k at one terminal is connected to phase k at the other (line-like)
+//   winding: all phases of a terminal are coupled through a winding (transformer-like)
+//   link: phase k at one terminal is connected to phase k at the other, like per_phase, but the branch is an ideal
+//         connection that carries whatever phases its nodes have, so its phases are never dangling
+enum class PhaseCoupling : IntS { per_phase = 0, winding = 1, link = 2 };
+
+// angle pattern of the phase slots of a bus, only used for the start values of the iterative power flow
+//   three_phase: the slots are 120 degrees apart (0, -120, +120)
+//   split_phase: slots a and b are the two legs of a centre-tapped winding, 180 degrees apart (0, 180); no slot c
+enum class SlotPattern : std::uint8_t { three_phase = 0, split_phase = 1 };
+
+// delta (phase-to-phase) entry k of a load_gen: from phase `from` to phase `to`, U_k = U_from - U_to; ab, bc, ca
+struct DeltaBranch {
+    Idx from{};
+    Idx to{};
+    PhaseMask phases{}; // the two phases the entry needs
+};
+inline constexpr std::array<DeltaBranch, 3> delta_branches{{{.from = 0, .to = 1, .phases = phase_mask_ab},
+                                                            {.from = 1, .to = 2, .phases = phase_mask_bc},
+                                                            {.from = 2, .to = 0, .phases = phase_mask_ac}}};
+
+// non-earth terminals of a branch at each side and how they couple
+struct BranchPhaseIncidence {
+    PhaseMask from{phase_mask_abc};
+    PhaseMask to{phase_mask_abc};
+    PhaseCoupling coupling{PhaseCoupling::per_phase}; // per_phase and link require from == to
+    // slot pattern the branch imposes on its to node; split_phase only for a centre-tapped to winding
+    SlotPattern to_pattern{SlotPattern::three_phase};
+
+    constexpr bool all_phases() const { return from.all() && to.all(); }
+    friend constexpr bool operator==(BranchPhaseIncidence const& lhs, BranchPhaseIncidence const& rhs) = default;
+};
+inline constexpr BranchPhaseIncidence three_phase_winding{
+    .from = phase_mask_abc, .to = phase_mask_abc, .coupling = PhaseCoupling::winding};
+inline constexpr BranchPhaseIncidence link_incidence{
+    .from = phase_mask_abc, .to = phase_mask_abc, .coupling = PhaseCoupling::link};
+
 struct MathModelTopology {
     Idx slack_bus{};
     bool is_radial{};
+    // true if at least one bus has fewer than three phases; only then bus_phase_mask is filled
+    bool has_reduced_phase{false};
     std::vector<double> phase_shift;
+    // phases present at each bus; size n_bus() if has_reduced_phase, otherwise empty (all buses abc)
+    std::vector<PhaseMask> bus_phase_mask;
+    // slot pattern of each bus, for the start values; size n_bus() if has_reduced_phase, otherwise empty (all
+    // buses three_phase)
+    std::vector<SlotPattern> bus_slot_pattern;
     std::vector<BranchIdx> branch_bus_idx;
     std::vector<BranchIdx> fill_in;
     DenseGroupedIdxVector sources_per_bus;
     DenseGroupedIdxVector shunts_per_bus;
     SparseGroupedIdxVector load_gens_per_bus;
     std::vector<LoadGenType> load_gen_type;
+    // connection of each load_gen; size n_load_gen() if at least one load_gen of this math model is delta, otherwise
+    // empty (all wye)
+    std::vector<LoadGenConnection> load_gen_connection;
     DenseGroupedIdxVector voltage_sensors_per_bus;
     DenseGroupedIdxVector power_sensors_per_source;
     DenseGroupedIdxVector power_sensors_per_load_gen;
@@ -186,6 +352,18 @@ struct MathModelTopology {
 
     Idx n_bus() const { return static_cast<Idx>(phase_shift.size()); }
 
+    PhaseMask bus_phase(Idx bus) const {
+        assert(bus >= 0 && bus < n_bus());
+        assert(!has_reduced_phase || std::ssize(bus_phase_mask) == n_bus());
+        return has_reduced_phase ? bus_phase_mask[static_cast<std::size_t>(bus)] : phase_mask_abc;
+    }
+
+    SlotPattern slot_pattern(Idx bus) const {
+        assert(bus >= 0 && bus < n_bus());
+        assert(!has_reduced_phase || std::ssize(bus_slot_pattern) == n_bus());
+        return has_reduced_phase ? bus_slot_pattern[static_cast<std::size_t>(bus)] : SlotPattern::three_phase;
+    }
+
     Idx n_branch() const { return static_cast<Idx>(branch_bus_idx.size()); }
 
     Idx n_source() const { return sources_per_bus.element_size(); }
@@ -193,6 +371,15 @@ struct MathModelTopology {
     Idx n_shunt() const { return shunts_per_bus.element_size(); }
 
     Idx n_load_gen() const { return load_gens_per_bus.element_size(); }
+
+    bool has_delta_load_gen() const { return !load_gen_connection.empty(); }
+
+    bool is_delta_load_gen(Idx load_gen) const {
+        assert(load_gen >= 0 && load_gen < n_load_gen());
+        assert(!has_delta_load_gen() || std::ssize(load_gen_connection) == n_load_gen());
+        return has_delta_load_gen() &&
+               load_gen_connection[static_cast<std::size_t>(load_gen)] == LoadGenConnection::delta;
+    }
 
     Idx n_voltage_sensor() const { return voltage_sensors_per_bus.element_size(); }
 
@@ -452,6 +639,8 @@ struct ComponentTopology {
     IdxVector source_node_idx;
     IdxVector load_gen_node_idx;
     std::vector<LoadGenType> load_gen_type;
+    // connection of each load_gen; size n_load_gen if at least one load_gen is delta, otherwise empty (all wye)
+    std::vector<LoadGenConnection> load_gen_connection;
     IdxVector voltage_sensor_node_idx;
     IdxVector power_sensor_object_idx; // the index is relative to branch, source, shunt or load_gen
     std::vector<MeasuredTerminalType> power_sensor_terminal_type;
@@ -472,6 +661,7 @@ struct ReducedComponentTopology {
     MaybeOwningConstVector<Idx> source_node_idx;
     MaybeOwningConstVector<Idx> load_gen_node_idx;
     MaybeOwningConstVector<LoadGenType> load_gen_type;
+    MaybeOwningConstVector<LoadGenConnection> load_gen_connection; // empty if all load_gens are wye
     MaybeOwningConstVector<Idx> voltage_sensor_node_idx;
     MaybeOwningConstVector<Idx> power_sensor_object_idx; // the index is relative to branch, source, shunt or load_gen
     MaybeOwningConstVector<MeasuredTerminalType> power_sensor_terminal_type;
@@ -493,6 +683,7 @@ struct ReducedComponentTopology {
             .source_node_idx = std::span{comp_topo.source_node_idx},
             .load_gen_node_idx = std::span{comp_topo.load_gen_node_idx},
             .load_gen_type = std::span{comp_topo.load_gen_type},
+            .load_gen_connection = std::span{comp_topo.load_gen_connection},
             .voltage_sensor_node_idx = std::span{comp_topo.voltage_sensor_node_idx},
             .power_sensor_object_idx = std::span{comp_topo.power_sensor_object_idx},
             .power_sensor_terminal_type = std::span{comp_topo.power_sensor_terminal_type},
@@ -540,6 +731,12 @@ struct ComponentConnections {
     std::vector<Branch3Connected> branch3_connected;
     std::vector<BranchConnected> link_connected;
     DoubleVector branch_phase_shift;
+    // one entry per branch_connected entry; empty means all branches are abc -> abc, per phase
+    std::vector<BranchPhaseIncidence> branch_phase_incidence;
+    // IDs of the branches and 3-way branches, only filled together with branch_phase_incidence; used in the error
+    // messages of the phase validation, which use the index if they are empty
+    std::vector<ID> branch_id;
+    std::vector<ID> branch3_id;
     // 3-way branch, phase shift = phase_node_x - phase_internal_node
     std::vector<std::array<double, 3>> branch3_phase_shift;
     IntSVector source_connected;

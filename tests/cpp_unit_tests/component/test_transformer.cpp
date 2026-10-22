@@ -408,6 +408,8 @@ TEST_CASE("Test Transfomer - Test 0 YNyn12") {
 
     SUBCASE("Test transformer phase shift") { CHECK(YNyn12.phase_shift() == doctest::Approx(0.0)); }
 
+    SUBCASE("Test transformer phase incidence") { CHECK(YNyn12.phase_incidence() == three_phase_winding); }
+
     SUBCASE("Test transformer loading") { CHECK(YNyn12.loading(60.0e6, 0.0) == doctest::Approx(2.0)); }
 
     SUBCASE("Test transformer set_limit - false") {

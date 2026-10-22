@@ -201,6 +201,19 @@ The newly added attribute will have rubbish value in the memory.
 
 Therefore, it is your choice of trade-off: maximum performance or backwards compatibility.
 
+For example, the [reduced-phase networks](../user_manual/reduced-phase-networks.md) added the attribute `phases` to
+the existing component `asym_line`, and the attribute `connection` to `sym_load`, `sym_gen`, `asym_load` and
+`asym_gen`.
+Code that fills a buffer made with `PGM_create_buffer` without calling `PGM_buffer_set_nan` leaves them as garbage.
+A garbage `connection` of exactly 1 (`delta`) makes an `asym_load` raise `ExperimentalFeature` in a calculation, unless
+the experimental features are enabled, and makes a `sym_load` fail the construction with `InvalidPhaseConnection`.
+A garbage `connection` of 0 is harmless (`wye`), and any other value makes the construction of the model fail.
+A garbage `phases` of 0 is harmless (`abc`); 1 to 6 make the construction of a three-phase `asym_line` fail with
+`InvalidPhaseConnection`, because the values of the absent phases are provided, and any other value makes it fail with
+`MissingCaseForEnumError`.
+With `PGM_buffer_set_nan`, they are not provided, which means `abc` and `wye`, and the behaviour is unchanged.
+See [C API compatibility](../user_manual/reduced-phase-networks.md#c-api-compatibility).
+
 ```{note}
 You do not need to call `PGM_buffer_set_nan` on output buffers, 
 because the buffer will be overwritten in the calculation core with the real output data.

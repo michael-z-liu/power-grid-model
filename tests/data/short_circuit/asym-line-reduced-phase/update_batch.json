@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "type": "update",
+  "is_batch": true,
+  "attributes": {},
+  "data": [
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 1,
+          "fault_object": 9,
+          "r_f": 0.5,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 1,
+          "fault_phase": 3,
+          "fault_object": 6,
+          "r_f": 0.5,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 2,
+          "fault_phase": 6,
+          "fault_object": 5,
+          "r_f": 0.5,
+          "x_f": 0.0
+        }
+      ]
+    },
+    {
+      "fault": [
+        {
+          "id": 601,
+          "fault_type": 0,
+          "fault_phase": 0,
+          "fault_object": 3,
+          "r_f": 0.5,
+          "x_f": 0.0
+        }
+      ]
+    }
+  ]
+}

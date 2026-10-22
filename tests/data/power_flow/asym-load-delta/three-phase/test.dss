@@ -1,0 +1,18 @@
+Clear
+Set DefaultBaseFrequency=50
+New Circuit.c phases=3 basekv=11.0 pu=1.0 angle=0 bus1=n1 Z1=[0.1203995000154087, 1.203995000154087] Z0=[0.1203995000154087, 1.203995000154087]
+New Line.l101 phases=3 bus1=n1.1.2.3 bus2=n2.1.2.3 length=1 units=km rmatrix=[0.5 | 0.1 0.5 | 0.096 0.1 0.5] xmatrix=[0.8 | 0.3 0.8 | 0.26 0.3 0.8] cmatrix=[18.0 | -3.0 18.4 | -2.4 -3.0 18.0]
+New Line.l102 phases=3 bus1=n2.1.2.3 bus2=n3.1.2.3 length=1 units=km rmatrix=[0.37428761538461536 | 0.07253976923076923 0.3712654615384615 | 0.07116969230769231 0.07237061538461538 0.37404415384615386] xmatrix=[0.5421159230769231 | 0.17476315384615382 0.5564586923076924 | 0.13501753846153847 0.17294492307692305 0.5378432307692309] cmatrix=[12.5 | -2.5 12.5 | -2.5 -2.5 12.5]
+New Load.ld301 bus1=n2.1.2.3 phases=3 conn=delta model=1 kV=11.0 kW=450.0 kvar=150.0 vminpu=0.1 vmaxpu=2
+New Load.ld302_ab bus1=n3.1.2 phases=1 conn=delta model=5 kV=11.0 kW=120.0 kvar=40.0 vminpu=0.1 vmaxpu=2
+New Load.ld302_ca bus1=n3.3.1 phases=1 conn=delta model=5 kV=11.0 kW=80.0 kvar=20.0 vminpu=0.1 vmaxpu=2
+New Load.ld303_bc bus1=n3.2.3 phases=1 conn=delta model=2 kV=11.0 kW=100.0 kvar=30.0 vminpu=0.1 vmaxpu=2
+New Load.ld303_ca bus1=n3.3.1 phases=1 conn=delta model=2 kV=11.0 kW=60.0 kvar=15.0 vminpu=0.1 vmaxpu=2
+New Load.ld304_a bus1=n3.1 phases=1 conn=wye model=1 kV=6.350852961085884 kW=60.0 kvar=20.0 vminpu=0.1 vmaxpu=2
+New Load.ld304_b bus1=n3.2 phases=1 conn=wye model=1 kV=6.350852961085884 kW=30.0 kvar=10.0 vminpu=0.1 vmaxpu=2
+New Load.ld401_bc bus1=n2.2.3 phases=1 conn=delta model=1 kV=11.0 kW=-50.0 kvar=-10.0 vminpu=0.1 vmaxpu=2
+Set VoltageBases=[11.0]
+CalcVoltageBases
+Set Tolerance=1e-12
+Set MaxIterations=200
+Solve

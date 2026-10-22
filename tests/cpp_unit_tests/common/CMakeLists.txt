@@ -15,6 +15,7 @@ add_executable(
     "test_typing.cpp"
     "test_iterator_facade.cpp"
     "test_maybe_owning_view.cpp"
+    "test_matrix_utils.cpp"
 )
 
 target_link_libraries(

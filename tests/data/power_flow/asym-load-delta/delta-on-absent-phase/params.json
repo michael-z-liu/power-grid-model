@@ -1,0 +1,13 @@
+{
+  "calculation_method": [
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-06,
+  "atol": 0.0001,
+  "experimental_features": "enabled",
+  "raises": {
+    "raises": "LoadGenOnAbsentPhase",
+    "reason": "Load or generator 301 has a non-zero specified power on phases (c) that are not present at its node (node phases: ab). A delta (phase-to-phase) entry needs both of its phases: ab needs a and b, bc needs b and c, ca needs c and a."
+  }
+}

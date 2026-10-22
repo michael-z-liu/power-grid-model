@@ -1,0 +1,13 @@
+{
+  "calculation_method": [
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-06,
+  "atol": 0.0001,
+  "experimental_features": "enabled",
+  "raises": {
+    "raises": "ReducedPhaseNotSupported",
+    "reason": "Symmetric power flow is not supported in a network with one- or two-phase nodes."
+  }
+}

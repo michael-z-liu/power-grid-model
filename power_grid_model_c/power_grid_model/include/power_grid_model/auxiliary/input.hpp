@@ -102,6 +102,7 @@ struct AsymLineInput {
     ID to_node{na_IntID};  // node IDs to which this branch is connected at both sides
     IntS from_status{na_IntS};  // whether the branch is connected at each side
     IntS to_status{na_IntS};  // whether the branch is connected at each side
+    PhaseConnection phases{static_cast<PhaseConnection>(na_IntS)};  // phases with a conductor; default abc
     double r_aa{nan};  // Lower triangle matrix values for R, X and C matrices
     double r_ba{nan};  // Lower triangle matrix values for R, X and C matrices
     double r_bb{nan};  // Lower triangle matrix values for R, X and C matrices
@@ -222,6 +223,48 @@ struct TransformerInput {
     operator BranchInput const&() const { return reinterpret_cast<BranchInput const&>(*this); }
 };
 
+struct SinglePhaseTransformerInput {
+    ID id{na_IntID};  // ID of the object
+    ID from_node{na_IntID};  // node IDs to which this branch is connected at both sides
+    ID to_node{na_IntID};  // node IDs to which this branch is connected at both sides
+    IntS from_status{na_IntS};  // whether the branch is connected at each side
+    IntS to_status{na_IntS};  // whether the branch is connected at each side
+    double u1{nan};  // rated winding voltage at both sides (across the connection)
+    double u2{nan};  // rated winding voltage at both sides (across the connection)
+    double sn{nan};  // rated power
+    double uk{nan};  // short circuit and open testing parameters
+    double pk{nan};  // short circuit and open testing parameters
+    double i0{nan};  // short circuit and open testing parameters
+    double p0{nan};  // short circuit and open testing parameters
+    double uk_half{nan};  // short circuit parameters between the primary and one half of a centre-tapped winding (on sn/2); default from uk and pk
+    double pk_half{nan};  // short circuit parameters between the primary and one half of a centre-tapped winding (on sn/2); default from uk and pk
+    WindingConnection1P from_connection{static_cast<WindingConnection1P>(na_IntS)};  // phase slots of the winding at each side
+    WindingConnection1P to_connection{static_cast<WindingConnection1P>(na_IntS)};  // phase slots of the winding at each side
+    IntS clock{na_IntS};  // 0 or 6 (reversed polarity); default 0
+    BranchSide tap_side{static_cast<BranchSide>(na_IntS)};  // side of tap changer
+    IntS tap_pos{na_IntS};  // tap changer parameters
+    IntS tap_min{na_IntS};  // tap changer parameters
+    IntS tap_max{na_IntS};  // tap changer parameters
+    IntS tap_nom{na_IntS};  // tap changer parameters
+    double tap_size{nan};  // size of each tap
+    double uk_min{nan};  // tap dependent short circuit parameters
+    double uk_max{nan};  // tap dependent short circuit parameters
+    double pk_min{nan};  // tap dependent short circuit parameters
+    double pk_max{nan};  // tap dependent short circuit parameters
+    double r_grounding_from{nan};  // impedance between the earthed winding terminal and earth (phase-to-earth windings only)
+    double x_grounding_from{nan};  // impedance between the earthed winding terminal and earth (phase-to-earth windings only)
+    double r_grounding_to{nan};  // impedance between the earthed winding terminal and earth (phase-to-earth windings only)
+    double x_grounding_to{nan};  // impedance between the earthed winding terminal and earth (phase-to-earth windings only)
+
+    // implicit conversions to BaseInput
+    operator BaseInput&() { return reinterpret_cast<BaseInput&>(*this); }
+    operator BaseInput const&() const { return reinterpret_cast<BaseInput const&>(*this); }
+
+    // implicit conversions to BranchInput
+    operator BranchInput&() { return reinterpret_cast<BranchInput&>(*this); }
+    operator BranchInput const&() const { return reinterpret_cast<BranchInput const&>(*this); }
+};
+
 struct ThreeWindingTransformerInput {
     ID id{na_IntID};  // ID of the object
     ID node_1{na_IntID};  // node IDs to which this branch3 is connected at three sides
@@ -308,6 +351,7 @@ struct LoadGenInput {
     LoadGenType type{static_cast<LoadGenType>(na_IntS)};  // type of the load_gen
     RealValue<sym> p_specified{nan};  // specified active/reactive power
     RealValue<sym> q_specified{nan};  // specified active/reactive power
+    LoadGenConnection connection{static_cast<LoadGenConnection>(na_IntS)};  // wye (phase-to-earth) or delta (phase-to-phase); default wye
 
     // implicit conversions to BaseInput
     operator BaseInput&() { return reinterpret_cast<BaseInput&>(*this); }

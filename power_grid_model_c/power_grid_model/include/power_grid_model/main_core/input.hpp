@@ -23,6 +23,7 @@
 #include "../component/node.hpp"
 #include "../component/power_sensor.hpp"
 #include "../component/shunt.hpp"
+#include "../component/single_phase_transformer.hpp"
 #include "../component/source.hpp"
 #include "../component/three_winding_transformer.hpp"
 #include "../component/transformer.hpp"
@@ -43,6 +44,17 @@ namespace power_grid_model::main_core {
 
 constexpr std::array<Branch3Side, 3> const branch3_sides = {Branch3Side::side_1, Branch3Side::side_2,
                                                             Branch3Side::side_3};
+
+// whether the component at idx is of the given type; false when the container does not hold that type
+template <typename ComponentType, class ComponentContainer>
+inline bool is_component_type([[maybe_unused]] ComponentContainer const& components,
+                              [[maybe_unused]] Idx2D const& idx) {
+    if constexpr (common::component_container_c<ComponentContainer, ComponentType>) {
+        return idx.group == get_component_type_index<ComponentType>(components);
+    } else {
+        return false;
+    }
+}
 
 // template to construct components
 // using forward interators
@@ -175,8 +187,27 @@ inline void add_component(ComponentContainer& components, Inputs component_input
                 main_core::get_component_idx_by_id<ComponentContainer>(components, input.regulated_object);
             regulated_objects.push_back(regulated_object_idx);
 
+            bool const is_single_phase_transformer =
+                is_component_type<SinglePhaseTransformer>(components, regulated_object_idx);
+
             ID const regulated_terminal = [&input, &components, &regulated_object_idx] {
                 using enum ControlSide;
+
+                if constexpr (common::component_container_c<ComponentContainer, SinglePhaseTransformer>) {
+                    if (is_component_type<SinglePhaseTransformer>(components, regulated_object_idx)) {
+                        auto const& regulated_object =
+                            get_component<SinglePhaseTransformer>(components, regulated_object_idx);
+                        switch (input.control_side) {
+                        case to:
+                            [[fallthrough]];
+                        case from:
+                            return regulated_object.node(static_cast<BranchSide>(input.control_side));
+                        default:
+                            throw MissingCaseForEnumError{std::format("{} item retrieval", Component::name),
+                                                          input.control_side};
+                        }
+                    }
+                }
 
                 if (regulated_object_idx.group == get_component_type_index<Transformer>(components)) {
                     auto const& regulated_object = get_component<Transformer>(components, regulated_object_idx);
@@ -210,12 +241,31 @@ inline void add_component(ComponentContainer& components, Inputs component_input
             }();
 
             if (regulated_object_idx.group != get_component_type_index<Transformer>(components) &&
-                regulated_object_idx.group != get_component_type_index<ThreeWindingTransformer>(components)) {
+                regulated_object_idx.group != get_component_type_index<ThreeWindingTransformer>(components) &&
+                !is_single_phase_transformer) {
                 throw InvalidRegulatedObject(input.regulated_object, Component::name);
             }
 
             auto const regulated_object_type = get_component<Base>(components, regulated_object_idx).math_model_type();
-            double const u_rated = get_component<Node>(components, regulated_terminal).u_rated();
+            double u_rated = get_component<Node>(components, regulated_terminal).u_rated();
+
+            if constexpr (common::component_container_c<ComponentContainer, SinglePhaseTransformer>) {
+                if (is_single_phase_transformer) {
+                    // a tap limit that is not provided follows the tap position, so it cannot bound the regulation;
+                    // the check does not depend on the status of the regulator (D71)
+                    if (!get_component<SinglePhaseTransformer>(components, regulated_object_idx)
+                             .tap_limits_provided()) {
+                        throw AutomaticTapInputError{std::format("The {} {} regulated by {} {} needs both tap_min and "
+                                                                 "tap_max.",
+                                                                 SinglePhaseTransformer::name, input.regulated_object,
+                                                                 Component::name, id)};
+                    }
+                    // u_set and u_band are winding volts; the controlled voltage is in per unit of the phase-to-earth
+                    // base u_rated / sqrt3 of the node, which also gives the per-phase impedance base for the line
+                    // drop compensation (D69, D70)
+                    u_rated /= sqrt3;
+                }
+            }
 
             emplace_component<Component>(components, id, input, regulated_object_type, u_rated);
         } else if constexpr (std::derived_from<Component, VoltageRegulator>) {

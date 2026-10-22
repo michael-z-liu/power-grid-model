@@ -25,6 +25,7 @@
 #include "../container_fwd.hpp"
 #include "container_queries.hpp"
 
+#include <algorithm>
 #include <concepts>
 #include <type_traits>
 #include <vector>
@@ -43,6 +44,23 @@ constexpr void apply_registration(ComponentContainer const& components, std::vec
 
     target.resize(std::distance(begin, end));
     std::transform(begin, end, target.begin(), func);
+}
+
+// the incidence vector is only filled if at least one branch is not abc -> abc, per phase
+// empty means that all branches are abc -> abc, per phase
+// the branch IDs are registered together with the incidence, for the error messages of the phase validation
+// comp_conn is freshly constructed (construct_components_connections), so both vectors are empty on entry
+template <std::derived_from<Edge> Component, class ComponentContainer>
+    requires common::component_container_c<ComponentContainer, Component>
+constexpr void register_branch_phase_incidence(ComponentContainer const& components, ComponentConnections& comp_conn) {
+    if (std::ranges::all_of(components.template citer<Component>(),
+                            [](Edge const& edge) { return edge.phase_incidence().all_phases(); })) {
+        // fast path: nothing allocated
+        return;
+    }
+    apply_registration<Component>(components, comp_conn.branch_phase_incidence,
+                                  [](Edge const& edge) { return edge.phase_incidence(); });
+    apply_registration<Component>(components, comp_conn.branch_id, [](Edge const& edge) { return edge.id(); });
 }
 
 // TODO(mgovers): cleanup v2: remove use_legacy_topology path
@@ -108,6 +126,15 @@ constexpr void register_topology_components(ComponentContainer const& components
 
     apply_registration<Component>(components, comp_topo.load_gen_type,
                                   [](GenericLoadGen const& load_gen) { return load_gen.type(); });
+
+    // the connection vector is only filled if at least one load_gen is delta; empty means that all are wye (fast path:
+    // nothing allocated; comp_topo is freshly constructed by construct_topology, so the vector is empty on entry)
+    if (std::ranges::any_of(components.template citer<Component>(), [](GenericLoadGen const& load_gen) {
+            return load_gen.connection() == LoadGenConnection::delta;
+        })) {
+        apply_registration<Component>(components, comp_topo.load_gen_connection,
+                                      [](GenericLoadGen const& load_gen) { return load_gen.connection(); });
+    }
 }
 
 // TODO(mgovers): cleanup v2: remove use_legacy_topology path
@@ -264,6 +291,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Edge>(components, comp_conn.branch_phase_shift,
                              [](Edge const& edge) { return edge.phase_shift(); });
+    register_branch_phase_incidence<Edge>(components, comp_conn);
 }
 
 template <std::same_as<Branch3> Component, class ComponentContainer>
@@ -294,6 +322,7 @@ constexpr void register_connections_components(ComponentContainer const& compone
     });
     apply_registration<Component>(components, comp_conn.branch_phase_shift,
                                   [](Branch const& branch) { return branch.phase_shift(); });
+    register_branch_phase_incidence<Branch>(components, comp_conn);
 }
 
 // TODO(jguo): cleanup v2 node single link registration path
@@ -358,6 +387,10 @@ ComponentConnections construct_components_connections(typename ModelType::Compon
                 detail::register_connections_components<CompType>(components, comp_conn);
             }
         });
+    if (!comp_conn.branch_phase_incidence.empty()) {
+        detail::apply_registration<Branch3>(components, comp_conn.branch3_id,
+                                            [](Branch3 const& branch3) { return branch3.id(); });
+    }
     return comp_conn;
 }
 

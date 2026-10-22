@@ -36,6 +36,37 @@ class ValidationError:
     ids: list[int] | list[tuple[ComponentType, int]] | None = None
 ```
 
+## Validation warnings
+
+Some input is valid, but probably not what was intended.
+For such input, the validation functions emit a `ValidationWarning` through the standard Python `warnings` module.
+A warning does not change the result: the data is still valid, `validate_input_data` and `validate_batch_data` still
+return `None`, and the assertion functions do not raise.
+Each kind of warning is emitted at most once per call (the winding-voltage warning at most once per side), and its
+message names the IDs of the components.
+For batch data, the winding-voltage warning checks the input data once; the earth-reference warning and the warning
+about the `u_set` of a tap regulator check every scenario after its update and name the scenarios.
+
+For example, a `ValidationWarning` is emitted when `u1` or `u2` of a `single_phase_transformer` differs by more than
+20% from the nominal winding voltage implied by the `u_rated` of its node (see
+[Reduced-phase networks](reduced-phase-networks.md#validation)).
+A `ValidationWarning` is also emitted when a phase-to-phase winding of a `single_phase_transformer` has no earth
+reference, and when the `u_set` of a `transformer_tap_regulator` of a `single_phase_transformer` differs by more than
+20% from the nominal voltage of the controlled winding (see
+[Reduced-phase networks](reduced-phase-networks.md#validation)).
+
+Use the `warnings` module to turn warnings into errors, or to record them:
+
+```py
+import warnings
+
+from power_grid_model.validation import ValidationWarning, validate_input_data
+
+with warnings.catch_warnings():
+    warnings.simplefilter("error", ValidationWarning)  # raise instead of warn
+    errors = validate_input_data(input_data, symmetric=False)
+```
+
 ## Validation functions
 
 ### Manual validation
@@ -87,3 +118,13 @@ Other than the result/exception type, the behaviour of these functions is the sa
 For more information on the validation functions please see the
 [API reference](../api_reference/python-api-reference.md#validation).
 ```
+
+## Reduced-phase networks
+
+The validation functions check the attributes of one- and two-phase lines (`asym_line` with `phases`),
+`single_phase_transformer` and the `connection` of loads and generators.
+Validate such networks with `symmetric=False`.
+The rules that need the phases of the nodes, which are derived from the topology, are only checked by the calculation:
+for example, whether all phases of a transformer winding are present at its node, or whether a load has power on an
+absent phase.
+See [Reduced-phase networks](reduced-phase-networks.md#validation) for the full list.

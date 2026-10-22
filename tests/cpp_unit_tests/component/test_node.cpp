@@ -7,9 +7,12 @@
 #include <power_grid_model/auxiliary/update.hpp>
 #include <power_grid_model/common/common.hpp>
 #include <power_grid_model/common/enum.hpp>
+#include <power_grid_model/common/three_phase_tensor.hpp>
 #include <power_grid_model/component/component.hpp>
 
 #include <doctest/doctest.h>
+
+#include <complex>
 
 namespace power_grid_model {
 
@@ -77,6 +80,54 @@ TEST_CASE("Test node") {
         auto expected = base_update;
         auto const inv = Node::inverse(base_update);
         CHECK(inv.id == expected.id);
+    }
+}
+
+TEST_CASE("Test node output with absent phases") {
+    // the solvers leave the voltage and injection of an absent phase slot at exactly zero; the node then reports zero
+    // for every field of that phase, as for a de-energised node, and the present phases are unaffected
+    Node const node{{.id = 1, .u_rated = 10.0e3}};
+
+    ComplexValue<asymmetric_t> u_full;
+    ComplexValue<asymmetric_t> s_full;
+    u_full << std::polar(1.02, -0.05), 0.98 * a2, 1.01 * a;
+    s_full << DoubleComplex{0.3, 0.1}, DoubleComplex{2.1, 2.2}, DoubleComplex{3.1, 3.2};
+    ComplexValue<asymmetric_t> const u_reduced{u_full(0), 0.0, 0.0}; // single phase node on phase a
+    ComplexValue<asymmetric_t> const s_reduced{s_full(0), 0.0, 0.0};
+
+    SUBCASE("Steady state") {
+        auto const full = node.get_output<asymmetric_t>(u_full, s_full);
+        auto const reduced = node.get_output<asymmetric_t>(u_reduced, s_reduced);
+        CHECK(reduced.energized);
+        // present phase: bit for bit the same as in a full phase node
+        CHECK(reduced.u(0) == full.u(0));
+        CHECK(reduced.u_pu(0) == full.u_pu(0));
+        CHECK(reduced.u_angle(0) == full.u_angle(0));
+        CHECK(reduced.p(0) == full.p(0));
+        CHECK(reduced.q(0) == full.q(0));
+        CHECK(full.u_angle(0) == doctest::Approx(-0.05));
+        // absent phases: exactly zero, in particular no NaN and u_angle = arg(0) = 0
+        for (Idx phase = 1; phase != 3; ++phase) {
+            CHECK(reduced.u(phase) == 0.0);
+            CHECK(reduced.u_pu(phase) == 0.0);
+            CHECK(reduced.u_angle(phase) == 0.0);
+            CHECK(reduced.p(phase) == 0.0);
+            CHECK(reduced.q(phase) == 0.0);
+        }
+    }
+
+    SUBCASE("Short circuit") {
+        auto const full = node.get_sc_output(u_full);
+        auto const reduced = node.get_sc_output(u_reduced);
+        CHECK(reduced.energized);
+        CHECK(reduced.u(0) == full.u(0));
+        CHECK(reduced.u_pu(0) == full.u_pu(0));
+        CHECK(reduced.u_angle(0) == full.u_angle(0));
+        for (Idx phase = 1; phase != 3; ++phase) {
+            CHECK(reduced.u(phase) == 0.0);
+            CHECK(reduced.u_pu(phase) == 0.0);
+            CHECK(reduced.u_angle(phase) == 0.0);
+        }
     }
 }
 

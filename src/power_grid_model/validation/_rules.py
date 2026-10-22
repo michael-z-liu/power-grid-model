@@ -35,7 +35,7 @@ Output data:
 
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
 from typing import Any
 
@@ -57,12 +57,14 @@ from power_grid_model.validation.errors import (
     InvalidAssociatedEnumValueError,
     InvalidEnumValueError,
     InvalidIdError,
+    InvalidValueError,
     MissingValueError,
     MissingVoltageAngleMeasurementError,
     MixedCurrentAngleMeasurementTypeError,
     MixedPowerCurrentSensorError,
     MultiComponentNotUniqueError,
     MultiFieldValidationError,
+    NotApplicableValueError,
     NotBetweenError,
     NotBetweenOrAtError,
     NotBooleanError,
@@ -74,6 +76,7 @@ from power_grid_model.validation.errors import (
     NotUniqueError,
     PQSigmaPairError,
     SameValueError,
+    SinglePhaseTransformerClockError,
     TransformerClockError,
     TwoValuesZeroError,
     UnsupportedMeasuredTerminalType,
@@ -556,6 +559,37 @@ def all_valid_enum_values(
     return []
 
 
+def all_supported_enum_values(
+    data: SingleDataset, component: ComponentType, field: AttributeType, enum: type[Enum], supported: Sequence[Enum]
+) -> list[InvalidValueError]:
+    """
+    Check that for all records of a particular type of component, the valid values of the supplied enum class in the
+    'field' column are supported. Returns an empty list on success, or a list containing a single error object on
+    failure.
+
+    NaN values and values that are not in the enum class are ignored; all_valid_enum_values reports the latter, so
+    that they are not reported twice.
+
+    Args:
+        data (SingleDataset): The input/update data set for all components
+        component (ComponentType): The component of interest
+        field (AttributeType): The field of interest
+        enum (Type[Enum]): The enum type of the field
+        supported (Sequence[Enum]): The supported values of the enum type
+
+    Returns:
+        A list containing zero or one InvalidValueError, listing all ids where the value in the field of interest was a
+        valid, but unsupported value of the enum type, and the supported values.
+    """
+    values = data[component][field]
+    unsupported = [member.value for member in enum if member not in supported]
+    invalid = np.isin(values, np.array(unsupported, dtype=values.dtype))
+    if invalid.any():
+        ids = data[component][AttributeType.id][invalid].flatten().tolist()
+        return [InvalidValueError(component, field, ids, list(supported))]
+    return []
+
+
 def all_valid_associated_enum_values(  # noqa: PLR0913,PLR0917
     data: SingleDataset,
     component: ComponentType,
@@ -878,6 +912,41 @@ def not_all_missing(data: SingleDataset, fields: list[AttributeType], component_
     return errors
 
 
+def none_provided(
+    data: SingleDataset,
+    component: ComponentType,
+    field: AttributeType,
+    condition_fields: list[AttributeType],
+    mask: np.ndarray,
+) -> list[NotApplicableValueError]:
+    """
+    Check that the value in the 'field' column is not provided (i.e. is NaN) for the records selected by 'mask'. The
+    value does not apply to these records, given the values in the 'condition_fields' columns.
+
+    Args:
+        data: The input/update data set for all components
+        component: The component of interest
+        field: The field of interest
+        condition_fields: The fields that determine whether 'field' applies, reported together with 'field'
+        mask: A boolean array that selects the records for which 'field' does not apply
+
+    Returns:
+        A list containing zero or one NotApplicableValueError, listing all ids in 'mask' where a value was provided
+        in the field of interest.
+    """
+    values = data[component][field]
+    nan = _nan_type(component, field)
+    provided = np.logical_not(np.isnan(values)) if np.isnan(nan) else np.not_equal(values, nan)
+    if provided.ndim > 1:
+        # handle both symmetric and asymmetric values
+        provided = np.any(provided, axis=tuple(range(1, provided.ndim)))
+    invalid = np.logical_and(mask, provided)
+    if invalid.any():
+        ids = data[component][AttributeType.id][invalid].flatten().tolist()
+        return [NotApplicableValueError(component, [*condition_fields, field], ids)]
+    return []
+
+
 def none_missing(
     data: SingleDataset, component: ComponentType, fields: AttributeType | list[AttributeType]
 ) -> list[MissingValueError]:
@@ -977,6 +1046,30 @@ def all_valid_clocks(
                 ids=data[component][AttributeType.id][err].flatten().tolist(),
             )
         ]
+    return []
+
+
+def all_valid_single_phase_clocks(
+    data: SingleDataset, component: ComponentType, field: AttributeType
+) -> list[SinglePhaseTransformerClockError]:
+    """
+    Custom validation rule: the clock of a single-phase transformer must be 0 or 6 (modulo 12). NaN values are
+    ignored.
+
+    Args:
+        data: The input/update data set for all components
+        component: The component of interest
+        field: The clock field
+
+    Returns:
+        A list containing zero or one SinglePhaseTransformerClockError, listing all ids where the clock was invalid.
+    """
+    clk = data[component][field]
+    # the modulo of numpy is never negative for a positive divisor, so -6 maps to 6
+    invalid = np.not_equal(clk, _nan_type(component, field)) & ~np.isin(np.mod(clk.astype(np.int16), 12), [0, 6])
+    if invalid.any():
+        ids = data[component][AttributeType.id][invalid].flatten().tolist()
+        return [SinglePhaseTransformerClockError(component, field, ids)]
     return []
 
 

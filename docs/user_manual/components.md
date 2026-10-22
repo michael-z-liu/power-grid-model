@@ -56,6 +56,14 @@ Physically a node can be a busbar, a joint, or other similar component.
 |-----------|-----------|----------|-------------------------|:--------:|:--------:|:------------:|
 | `u_rated` | `double`  | volt (V) | rated line-line voltage | &#10004; | &#10060; |    `> 0`     |
 
+```{note}
+For a node without all three phases, for example a single-wire earth return (SWER) node or a 240-0-240 V split-phase
+node, `u_rated` is still $\sqrt3$ times the nominal phase-to-earth voltage: 22 kV for a 12.7 kV SWER node and
+$240\sqrt3 = 415.7$ V for a split-phase node with 240 V from each leg to the centre tap.
+The phases of a node are derived from the lines and transformer windings connected to it.
+See [Reduced-phase networks](reduced-phase-networks.md).
+```
+
 #### Steady state output
 
 | name      | data type         | unit                       | description                                                                                     |
@@ -307,6 +315,164 @@ $$
 \end{aligned}
 $$
 
+### Single-Phase Transformer
+
+* type name: `single_phase_transformer`
+
+`single_phase_transformer` is a [branch](#branch) with one winding on each side, for example a SWER isolating
+transformer (`ab` → `a`), a SWER distribution transformer (`a` → `a`) or a single-phase transformer on two phases of
+a three-phase network (`bc` → `a`). Each winding is connected between two phases of its node, or between one phase
+and earth. The to-side winding can also be centre-tapped, for a 240-0-240 V split-phase supply (see
+[Centre-tapped (split-phase) secondary](#centre-tapped-split-phase-secondary)).
+
+```{warning}
+The single-phase transformer is an experimental feature. A calculation on a model with a `single_phase_transformer`
+requires experimental features to be enabled (see [Reduced-phase networks](reduced-phase-networks.md)). The Python
+data validation (`validate_input_data`) checks its attributes; the rules that need the phases of the nodes are checked
+by the calculation.
+```
+
+#### Input
+
+| name               | data type                                                                   | unit             | description                                                                         |                 required                 |  update  |                valid values                |
+| ------------------ | --------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- | :--------------------------------------: | :------: | :----------------------------------------: |
+| `u1`               | `double`                                                                    | volt (V)         | rated winding voltage at from-side, across the terminals of the winding             |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `u2`               | `double`                                                                    | volt (V)         | rated winding voltage at to-side, across the terminals of the winding               |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `sn`               | `double`                                                                    | volt-ampere (VA) | rated power                                                                         |                 &#10004;                 | &#10060; |                   `> 0`                    |
+| `uk`               | `double`                                                                    | -                | relative short circuit voltage, `0.1` means 10%                                     |                 &#10004;                 | &#10060; |      `>= pk / sn` and `> 0` and `< 1`      |
+| `pk`               | `double`                                                                    | watt (W)         | short circuit (copper) loss                                                         |                 &#10004;                 | &#10060; |                   `>= 0`                   |
+| `i0`               | `double`                                                                    | -                | relative no-load (magnetizing) current                                              |                 &#10004;                 | &#10060; |           `>= p0 / sn` and `< 1`           |
+| `p0`               | `double`                                                                    | watt (W)         | no-load (iron / magnetizing) loss                                                   |                 &#10004;                 | &#10060; |                   `>= 0`                   |
+| `uk_half`          | `double`                                                                    | -                | relative short circuit voltage between the from-side winding and one half of a centre-tapped to-side winding, on `sn / 2` | &#10060; default from `uk` and `pk` | &#10060; | only for `ab_center_tapped`; `> uk / 2` and `>= pk_half / (sn / 2)` |
+| `pk_half`          | `double`                                                                    | watt (W)         | short circuit (copper) loss between the from-side winding and one half of a centre-tapped to-side winding, on `sn / 2` | &#10060; default `0.375 pk` | &#10060; | only for `ab_center_tapped`; `>= pk / 4` and `<= pk / 2` |
+| `from_connection`  | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the from-side winding                                                     |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`          |
+| `to_connection`    | {py:class}`WindingConnection1P <power_grid_model.enum.WindingConnection1P>` | -                | phases of the to-side winding                                                       |                 &#10004;                 | &#10060; |   `a`, `b`, `c`, `ab`, `ac`, `bc`, `ab_center_tapped` |
+| `clock`            | `int8_t`                                                                    | -                | relative polarity: `6` reverses the to-side winding                                 |           &#10060; default `0`           | &#10060; |       `0` or `6` (modulo 12)               |
+| `tap_side`         | {py:class}`BranchSide <power_grid_model.enum.BranchSide>`                   | -                | side of tap changer                                                                 |       &#10060; default `from_side`       | &#10060; |                                            |
+| `tap_pos`          | `int8_t`                                                                    | -                | current position of tap changer                                                     |        &#10060; default `tap_nom`        | &#10004; | within the provided limits (see **Taps** below) |
+| `tap_min`          | `int8_t`                                                                    | -                | position of tap changer at minimum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
+| `tap_max`          | `int8_t`                                                                    | -                | position of tap changer at maximum voltage                                          | &#10060; not provided means no limit     | &#10060; |                                            |
+| `tap_nom`          | `int8_t`                                                                    | -                | nominal position of tap changer                                                     |           &#10060; default `0`           | &#10060; | between `tap_min` and `tap_max` if both are provided |
+| `tap_size`         | `double`                                                                    | volt (V)         | size of each tap of the tap changer                                                 |           &#10060; default `0`           | &#10060; |                   `>= 0`                   |
+| `uk_min`           | `double`                                                                    | -                | relative short circuit voltage at minimum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_min / sn` and `> 0` and `< 1`    |
+| `uk_max`           | `double`                                                                    | -                | relative short circuit voltage at maximum tap                                       |      &#10060; default same as `uk`       | &#10060; |    `>= pk_max / sn` and `> 0` and `< 1`    |
+| `pk_min`           | `double`                                                                    | watt (W)         | short circuit (copper) loss at minimum tap                                          |      &#10060; default same as `pk`       | &#10060; |                   `>= 0`                   |
+| `pk_max`           | `double`                                                                    | watt (W)         | short circuit (copper) loss at maximum tap                                          |      &#10060; default same as `pk`       | &#10060; |                   `>= 0`                   |
+| `r_grounding_from` | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal of a phase-to-earth from-side winding and earth |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `x_grounding_from` | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal of a phase-to-earth from-side winding and earth  |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`                     |
+| `r_grounding_to`   | `double`                                                                    | ohm (Ω)          | resistance between the earthed terminal (or the centre tap) of the to-side winding and earth |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`, `ab_center_tapped` |
+| `x_grounding_to`   | `double`                                                                    | ohm (Ω)          | reactance between the earthed terminal (or the centre tap) of the to-side winding and earth  |           &#10060; default `0`           | &#10060; | only for `a`, `b`, `c`, `ab_center_tapped` |
+
+* **Connections.** `a`, `b` and `c` are phase-to-earth windings; `ab`, `ac` and `bc` are phase-to-phase windings,
+  whose first phase is the positive terminal (`ab` is $U_a - U_b$). An unknown or missing connection raises
+  `MissingCaseForEnumError`. The phases of a winding must be present at its node (`MissingPhaseForWinding`); the
+  phases of a node behind the transformer are derived from its windings, so a SWER node behind an `ab` → `a`
+  transformer only has phase `a`.
+* **Winding voltages.** `u1` and `u2` are the rated voltages across the winding terminals, for example 22 kV for an
+  `ab` winding, 12.7 kV for an `a` SWER winding and 240 V for an `a` low-voltage winding. The `u_rated` of every node
+  stays $\sqrt3$ × the phase-to-earth voltage (22 kV for a 12.7 kV SWER node, 415 V for a 240 V node), so the
+  nominal winding voltage implied by a node is $u_{\text{rated}} / \sqrt3$ for a phase-to-earth winding and
+  $u_{\text{rated}}$ for a phase-to-phase winding. Other values give an off-nominal ratio. `validate_input_data` emits
+  a `ValidationWarning` when a winding voltage differs by more than 20% from the nominal winding voltage implied by
+  its node, for example for `u1` = 22 kV on an `a` winding at a 22 kV node; the data stays valid.
+* **Earthing.** The earthed end of a phase-to-earth winding is connected to earth through `r_grounding_<side>` +
+  j `x_grounding_<side>`; not provided means solidly earthed. For a SWER isolating transformer this is the earth
+  electrode, which carries the entire SWER load current. A phase-to-phase winding has no earthed terminal, so its
+  `r_grounding` and `x_grounding` must be left empty (`InvalidPhaseConnection`); its common-mode voltage is held by a
+  very small admittance to earth, as for the zero sequence of a delta winding of `transformer`. The two windings of
+  an `a` → `a` transformer each have their own earthing impedance; a shared electrode is not supported.
+* **Polarity and phase shift.** `clock` 6 reverses the polarity of the to-side winding (for example `ac` with
+  `clock` 6 is a `ca` winding); any value other than 0 or 6 (modulo 12) raises `InvalidTransformerClock`. The output
+  angles are physical: a SWER node behind an `ab` → `a` transformer has a voltage angle of about +30°.
+* **Taps.** All tap attributes are optional; without them the ratio is nominal. The tap changer works as for
+  [transformer](#transformer) and `tap_pos` can be updated, but each limit is optional. The tap direction is decided
+  once, from the provided limits. It is reversed (a higher `tap_pos` lowers the voltage of the tapped winding) when
+  both limits are provided and `tap_max < tap_min`, when only `tap_min` is provided and `tap_min > tap_nom`, or when
+  only `tap_max` is provided and `tap_max < tap_nom`. Otherwise it is normal, also without limits. A provided limit
+  always limits the tap position in that direction, at construction and in an update; a limit that is not provided
+  leaves its side unbounded. For example, with `tap_nom` 5 and only `tap_min` 9 the tap changer is reversed, a
+  `tap_pos` of 10 is limited to 9 and every `tap_pos` below 9 is allowed. `uk_min`/`pk_min` only apply when
+  `tap_min` is provided and `uk_max`/`pk_max` only when `tap_max` is provided. The automatic tap changer
+  ([`transformer_tap_regulator`](#single-phase-transformer-regulated-by-a-tap-regulator)) can regulate this component
+  in an asymmetric power flow. It needs both `tap_min` and `tap_max`, and a `tap_size` that is not 0.
+* **Calculations.** As for [one- and two-phase lines](#asym-line), symmetric calculations and state
+  estimation are not supported (`ReducedPhaseNotSupported`) and a short circuit is always calculated
+  asymmetrically. The output of a phase that is not part of a winding is 0.
+
+#### Steady state output
+
+The output is the standard [branch output](#branch). The `loading` is the larger of the apparent powers of the two
+sides divided by `sn`, where the apparent power of a side is the absolute value of the complex sum of its per-phase
+powers: $\max(|\sum_p \underline{S}_{\text{from},p}|, |\sum_p \underline{S}_{\text{to},p}|) / s_n$. A
+centre-tapped side counts each half separately, see
+[Centre-tapped (split-phase) secondary](#centre-tapped-split-phase-secondary).
+
+#### Electric Model
+
+The series impedance and the magnetizing admittance are computed from `uk`, `pk`, `i0` and `p0` as for
+[transformer](#transformer), in ohm and siemens referred to the to side. With $n$ the ratio of the (tap-adjusted)
+winding voltages $u_1 / u_2$, the admittance of the two windings is
+
+$$
+   Y_{\text{prim}} = y_{\text{series}} \begin{bmatrix} 1/n^2 & -1/n \\ -1/n & 1 \end{bmatrix}
+   + \frac{y_{\text{shunt}}}{2} \begin{bmatrix} 1/n^2 & 0 \\ 0 & 1 \end{bmatrix}
+$$
+
+It is mapped onto the phases of the two nodes by the terminals of the windings, the earthing impedances are added
+and eliminated, and the result is converted to per unit with the phase-to-earth base voltage $u_{\text{rated}} /
+\sqrt3$ of each node. With one side disconnected, the connected winding sees the open-end shunt of the $\pi$ model.
+See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
+
+#### Centre-tapped (split-phase) secondary
+
+A `to_connection` of `ab_center_tapped` makes the to-side winding a centre-tapped winding, for example the
+240-0-240 V secondary of a split-phase distribution transformer: half 1 runs from phase `a` to the centre tap and
+half 2 from the centre tap to phase `b`. The two legs are the phases `a` and `b` of the to node, each measured to
+the earthed centre tap, so $U_b \approx -U_a$; the node has no phase `c`. A centre-tapped winding is only allowed on
+the to side; on the from side it raises `InvalidPhaseConnection`. The from-side winding can be any of `a`, `b`, `c`,
+`ab`, `ac` and `bc`.
+
+* **Voltages and ratings.** `u2` is the full winding, end to end: 480 V for a 240-0-240 V winding; each half is
+  `u2 / 2`. `uk`, `pk` and `sn` are the nameplate values of the full winding (the from-side winding against both
+  halves in series, at `sn`). Each leg is 240 V to the centre tap, so the split-phase node has a `u_rated` of
+  $240\sqrt3 = 415.69$ V; the nominal winding voltage implied by the node is $2 u_{\text{rated}} / \sqrt3$.
+* **Half-winding impedance.** `uk_half` and `pk_half` are the short-circuit test between the from-side winding and
+  *one* half, with the other half open, on the rating `sn / 2` of a half and the half voltage `u2 / 2`. In per unit on
+  `sn` and the half voltage this is a resistance of $4 p_{k,\text{half}} / s_n$ and an impedance magnitude of
+  $2 u_{k,\text{half}}$. Each is optional: not provided, it follows the split of Kersting, $0.5R + j0.8X$ for the
+  from-side winding and $R + j0.4X$ for each half (with $R + jX$ from `uk` and `pk`), which gives `pk_half` $=
+  0.375\,p_k$ and `uk_half` $= \tfrac12 |1.5R + j1.2X|$ with $R = p_k / s_n$. `uk_half` must be larger than `uk / 2`
+  (at `uk / 2` the impedance of each half branch is zero and the model is singular), `pk_half` must be between
+  `pk / 4` and `pk / 2`, and `uk_half` must be at least `pk_half / (sn / 2)`. `validate_input_data` checks these
+  ranges, using the default for a value that is not provided; the calculation does not. On a winding that is not
+  centre-tapped, `uk_half` and `pk_half` must be left empty (`InvalidPhaseConnection`).
+* **Earthing.** The centre tap is solidly earthed, or earthed through `r_grounding_to` + j `x_grounding_to`. A node
+  has no neutral conductor, so a wye `asym_load` on phase `a` or `b` of the split-phase node is connected between its
+  leg and true earth. With an earthing impedance, the whole out-of-balance load current therefore returns through
+  it. That is right for earth faults, but pessimistic for loads with a neutral conductor that is earthed at the
+  customer (MEN). 240 V loads are `asym_load` on phase `a` or `b`; 480 V loads between `a` and `b` are delta
+  `asym_load` with the **ab** entry (see [Generic Load and Generator](#generic-load-and-generator)), whose power is
+  split about evenly over the two legs in the output.
+* **Loading.** Each half is rated `sn / 2`, so the to side counts twice the apparent power of its more loaded leg:
+  $\max(|\sum_p \underline{S}_{\text{from},p}|,\ 2|\underline{S}_{\text{to},a}|,\ 2|\underline{S}_{\text{to},b}|) / s_n$.
+  A balanced full load gives 1.0 on both sides, and so does all load on one leg at `sn / 2`.
+* **Phase shift and polarity.** The reference of a centre-tapped winding is leg `a`, so an `a` → `ab_center_tapped`
+  transformer has no phase shift and an `ab` → `ab_center_tapped` transformer gives the split-phase node an angle of
+  about +30° on leg `a` and −150° on leg `b`. `clock` 6 reverses both halves.
+* **Status.** With the from side open, the two halves stay coupled to each other through the core: the
+  transformer acts as a balancer between the legs. With the to side open, the from side sees the open-end
+  magnetizing admittance, as for the other connections.
+* **Short circuits at the split-phase node.** `single_phase_to_ground` on `a` or `b` (leg to earth, which is the
+  centre tap when it is solidly earthed), `two_phase` on `ab` (480 V) and `two_phase_to_ground` on `ab` are valid.
+  `three_phase`, and the default phases of the two-phase faults (`bc`), raise `InvalidShortCircuitPhaseOrType`,
+  naming the fault.
+* **Start values.** The iterative power flow methods start leg `b` of a split-phase node, and of the nodes without
+  phase `c` that are connected to it by lines or links, opposite to leg `a`. A transformer that is fed *from* a split-phase node
+  (for example an `ab` or `b` from-side winding on a 240-0-240 V node) still gets a start that assumes 120° between
+  the phases, which is 30° or 60° off on its far side. This only affects the flat and average-source initialization
+  of Newton-Raphson and the iterative current method, never the results; if such a calculation does not converge,
+  use Newton-Raphson with its default (linear) initialization.
+
 ### Generic Branch
 
 * type name: `generic_branch`
@@ -377,7 +543,8 @@ $$
 `asym_line` is a [branch](#branch) with specified resistance and reactance per phase.
 A cable can be modelled as `line` or `asym_line`. An `asym_line` can only connect two nodes with the same rated voltage.
 If `i_n` is not provided, `loading` of line will be a `nan` value.
-The `asym_line` denotes a 3 or 4 phase line with phases `a`, `b`, `c` and optionally `n` for neutral.
+The `asym_line` denotes a 3 or 4 phase line with phases `a`, `b`, `c` and optionally `n` for neutral, or, with
+`phases`, a one- or two-phase line (see *One- and two-phase lines* below).
 
 #### Input
 
@@ -395,33 +562,39 @@ $$
 This representation holds for all values `r_aa` ... `r_nn`, `x_aa` ... `x_nn` and `c_aa` ... `c_cc`.
 If the neutral values are not provided, the last row and column from the above matrix are omitted.
 
+The capacitance matrix `c_aa` ... `c_cc` is the nodal (Maxwell) capacitance matrix.
+Its diagonal entries are positive and its mutual (off-diagonal) entries are usually negative.
+For example, when the matrix is built from `c0` and `c1`, the mutual entries equal $(c_0 - c_1) / 3$, which is negative for $c_1 > c_0$.
+The mutual capacitances `c_ba`, `c_ca` and `c_cb` may therefore have any sign.
+
 | name   | data type | unit       | description                       | required                     |  update  | valid values |
 |--------|-----------|------------|-----------------------------------|------------------------------|:--------:|:------------:|
-| `r_aa` | `double`  | ohm (Ω)    | Series serial resistance aa       | &#10004;                     | &#10060; |    `> 0`     |
-| `r_ba` | `double`  | ohm (Ω)    | Series serial resistance ba       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_bb` | `double`  | ohm (Ω)    | Series serial resistance bb       | &#10004;                     | &#10060; |    `> 0`     |
-| `r_ca` | `double`  | ohm (Ω)    | Series serial resistance ca       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_cb` | `double`  | ohm (Ω)    | Series serial resistance cb       | &#10004;                     | &#10060; |    `>= 0`    |
-| `r_cc` | `double`  | ohm (Ω)    | Series serial resistance cc       | &#10004;                     | &#10060; |    `> 0`     |
+| `phases` | {py:class}`PhaseConnection <power_grid_model.enum.PhaseConnection>` | - | Phases with a conductor | &#10060; default `abc` | &#10060; | `abc`, `a`, `b`, `c`, `ab`, `ac`, `bc` |
+| `r_aa` | `double`  | ohm (Ω)    | Series serial resistance aa       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `r_ba` | `double`  | ohm (Ω)    | Series serial resistance ba       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_bb` | `double`  | ohm (Ω)    | Series serial resistance bb       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `r_ca` | `double`  | ohm (Ω)    | Series serial resistance ca       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_cb` | `double`  | ohm (Ω)    | Series serial resistance cb       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `r_cc` | `double`  | ohm (Ω)    | Series serial resistance cc       | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
 | `r_na` | `double`  | ohm (Ω)    | Series serial resistance na       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nb` | `double`  | ohm (Ω)    | Series serial resistance nb       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nc` | `double`  | ohm (Ω)    | Series serial resistance nc       | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `r_nn` | `double`  | ohm (Ω)    | Series serial resistance nn       | &#10024; for a neutral phase | &#10060; |    `> 0`     |
-| `x_aa` | `double`  | ohm (Ω)    | Series serial reactance aa        | &#10004;                     | &#10060; |    `> 0`     |
-| `x_ba` | `double`  | ohm (Ω)    | Series serial reactance ba        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_bb` | `double`  | ohm (Ω)    | Series serial reactance bb        | &#10004;                     | &#10060; |    `> 0`     |
-| `x_ca` | `double`  | ohm (Ω)    | Series serial reactance ca        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_cb` | `double`  | ohm (Ω)    | Series serial reactance cb        | &#10004;                     | &#10060; |    `>= 0`    |
-| `x_cc` | `double`  | ohm (Ω)    | Series serial reactance cc        | &#10004;                     | &#10060; |    `> 0`     |
+| `x_aa` | `double`  | ohm (Ω)    | Series serial reactance aa        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `x_ba` | `double`  | ohm (Ω)    | Series serial reactance ba        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_bb` | `double`  | ohm (Ω)    | Series serial reactance bb        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
+| `x_ca` | `double`  | ohm (Ω)    | Series serial reactance ca        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_cb` | `double`  | ohm (Ω)    | Series serial reactance cb        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `>= 0`    |
+| `x_cc` | `double`  | ohm (Ω)    | Series serial reactance cc        | &#10004; with `abc` (see *One- and two-phase lines*) | &#10060; |    `> 0`     |
 | `x_na` | `double`  | ohm (Ω)    | Series serial reactance na        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nb` | `double`  | ohm (Ω)    | Series serial reactance nb        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nc` | `double`  | ohm (Ω)    | Series serial reactance nc        | &#10024; for a neutral phase | &#10060; |    `>= 0`    |
 | `x_nn` | `double`  | ohm (Ω)    | Series serial reactance nn        | &#10024; for a neutral phase | &#10060; |    `> 0`     |
 | `c_aa` | `double`  | farad (F)  | Shunt nodal capacitance matrix aa | &#10024; for a full c matrix | &#10060; |    `> 0`     |
-| `c_ba` | `double`  | farad (F)  | Shunt nodal capacitance matrix ba | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
+| `c_ba` | `double`  | farad (F)  | Shunt nodal capacitance matrix ba | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
 | `c_bb` | `double`  | farad (F)  | Shunt nodal capacitance matrix bb | &#10024; for a full c matrix | &#10060; |    `> 0`     |
-| `c_ca` | `double`  | farad (F)  | Shunt nodal capacitance matrix ca | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
-| `c_cb` | `double`  | farad (F)  | Shunt nodal capacitance matrix cb | &#10024; for a full c matrix | &#10060; |    `>= 0`    |
+| `c_ca` | `double`  | farad (F)  | Shunt nodal capacitance matrix ca | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
+| `c_cb` | `double`  | farad (F)  | Shunt nodal capacitance matrix cb | &#10024; for a full c matrix | &#10060; |  any (usually `< 0`) |
 | `c_cc` | `double`  | farad (F)  | Shunt nodal capacitance matrix cc | &#10024; for a full c matrix | &#10060; |    `> 0`     |
 | `c0`   | `double`  | farad (F)  | zero-sequence shunt capacitance   | &#10024; without a c matrix  | &#10060; |    `> 0`     |
 | `c1`   | `double`  | farad (F)  | Series shunt capacitance          | &#10024; without a c matrix  | &#10060; |    `> 0`     |
@@ -462,6 +635,38 @@ The table below provides guidance in providing valid input.
 | &#10004;      | &#10060; | &#10060; | &#10004; |                           |
 | &#10060;      | &#10004; | &#10060; | &#10060; | MultiFieldValidationError |
 | &#10060;      | &#10004; | &#10004; | &#10004; |                           |
+
+##### One- and two-phase lines
+
+```{warning}
+One- and two-phase lines are an experimental feature. A calculation on a model with an `asym_line` with `phases`
+other than `abc` requires experimental features to be enabled (see
+[Reduced-phase networks](reduced-phase-networks.md)).
+```
+
+With `phases` set to a single phase (`a`, `b` or `c`) or two phases (`ab`, `ac` or `bc`), the `asym_line` only has
+conductors on those phases. A single-wire earth return (SWER) line is a single-phase line whose self impedance
+includes the earth return.
+
+* Provide `r`, `x` and `c` values only for the present phases (and for the neutral, if any) and leave the values of
+  the absent phases empty. A neutral is present when `r_nn` or `x_nn` is provided; then the entries between the
+  neutral and the present phases are required as well. Every value between two present conductors is required
+  (a mutual capacitance of 0 is allowed); a value that refers to an absent phase or a missing neutral is an error.
+  `validate_input_data` reports a `MissingValueError` for a missing value and a `NotApplicableValueError` for a value
+  that does not apply; the construction of the model raises `InvalidPhaseConnection` for both.
+* `c0` and `c1` are only supported with `abc`; use the c matrix otherwise.
+* The phases of each node are derived from the lines connected to it. A conductor must be present at the nodes it
+  connects (`DanglingConductor`), and a transformer winding must have all of its phases present at its node
+  (`MissingPhaseForWinding`).
+* Symmetric calculations and state estimation are not supported for a model with one- or two-phase lines
+  (`ReducedPhaseNotSupported`). A short circuit is always calculated asymmetrically.
+* Loads and generators may not have power on a phase that is not present at their node, and shunts are not
+  supported at a node without all phases.
+* A fault may only involve phases present at its node (see "Faults at nodes without all phases" under
+  [Fault](#fault)).
+* The output of an absent phase is 0.
+
+See the [design of reduced-phase components](../advanced_documentation/multi-phase-and-swer-design.md) for details.
 
 #### Electric Model
 
@@ -734,6 +939,7 @@ However, the reference direction and meaning of `RealValueInput` is different, a
 |---------------|------------------|----------------------------|--------------------------|:----------------------------:|:--------:|
 | `p_specified` | `RealValueInput` | watt (W)                   | specified active power   | &#10024; only for power flow | &#10004; |
 | `q_specified` | `RealValueInput` | volt-ampere-reactive (var) | specified reactive power | &#10024; only for power flow | &#10004; |
+| `connection`  | {py:class}`LoadGenConnection <power_grid_model.enum.LoadGenConnection>` | - | `wye` (phase-to-earth) or `delta` (phase-to-phase); default `wye`; `delta` only for `asym_load` and `asym_gen` | &#10060; | &#10060; |
 
 ##### Electric model
 
@@ -761,6 +967,110 @@ S = S_{\text{specified}}
 $$
 
 where $\bar{u}$ is the calculated node voltage.
+
+##### Delta (phase-to-phase) connection
+
+```{note}
+Delta-connected loads and generators are an experimental feature (see
+[Reduced-phase networks](reduced-phase-networks.md)).
+```
+
+By default, a load/generator is connected phase-to-earth (`connection` is `wye`) and the three entries of `p_specified`
+and `q_specified` of an `asym_load` or `asym_gen` are the powers of phases a, b and c.
+With `connection` set to `delta`, the entries are the powers of the three phase-to-phase branches **ab**, **bc** and
+**ca**.
+Entry $k$ is the branch from its first to its second phase, e.g. the **ab** entry is the branch with
+$U_{ab} = U_a - U_b$.
+A single phase-to-phase load is a delta load with one non-zero entry; a load between phases a and c uses the **ca**
+entry.
+The reference directions of load and generator are as above.
+
+The branch voltages $U_\Delta$ follow from the phase voltages $U$ through the connection matrix $D$, and the phase
+currents $I$ from the branch currents $I_\Delta$ through its transpose:
+
+$$
+U_\Delta = D U =
+\begin{bmatrix} 1 & -1 & 0 \\ 0 & 1 & -1 \\ -1 & 0 & 1 \end{bmatrix}
+\begin{bmatrix} U_a \\ U_b \\ U_c \end{bmatrix}
+\qquad
+I = D^T I_\Delta
+\qquad
+I_{\Delta,k} = \overline{\left( \frac{S_k(U_{\Delta,k})}{U_{\Delta,k}} \right)}
+$$
+
+The branch power depends on the branch voltage in the same ZIP way as for a wye connection, but relative to the nominal
+branch voltage $U_{\Delta,\text{nom}}$ instead of the nominal phase voltage:
+
+$$
+S_k = S_{\text{specified},k} \cdot \left( \frac{|U_{\Delta,k}|}{U_{\Delta,\text{nom}}} \right)^n
+$$
+
+with $n = 0$ for `const_power`, $n = 1$ for `const_current` and $n = 2$ for `const_impedance`.
+Therefore, `p_specified` and `q_specified` are the powers at rated voltage across that branch.
+The nominal branch voltage follows from the node:
+
+* at a node with the three-phase pattern (all three phases, or two of them as `ab`, `bc` or `ac`),
+  $U_{\Delta,\text{nom}}$ is the phase-to-phase voltage, which equals $u_\text{rated}$.
+  At a 400 V node, a `const_impedance` delta entry of 10 kW is a 16 $\Omega$ branch: $400^2 / 10^4 = 16$.
+* at a split-phase node (the two legs of a centre-tapped winding), $U_{\Delta,\text{nom}}$ is the voltage across both
+  legs, $2 \cdot u_\text{rated} / \sqrt{3}$.
+  For a 240-0-240 V winding this is 480 V (with $u_\text{rated} = 240 \sqrt{3}$ V), and a `const_impedance` entry of
+  10 kW is a 23.04 $\Omega$ branch: $480^2 / 10^4 = 23.04$.
+
+##### Output of a delta load/generator
+
+The output of a delta load/generator is expressed per **phase** at its node, in the same layout as for a wye
+connection, and not per branch.
+The phase current is $I = D^T I_\Delta$, `i` is its magnitude, and the phase power is
+$S = U \circ \overline{I}$, which gives `p`, `q`, `s` and `pf` per phase.
+This keeps the power balance at the node per phase, and the sum of the three `p` values is the total active power of the
+three branches.
+Branch-level output is not available.
+
+Note that this makes a single phase-to-phase load appear on both of its phases.
+For example, a resistive `p_specified` of $P$ on the **ab** entry at balanced voltages gives
+$p_a = p_b = P/2$, $q_a = -P/(2\sqrt{3})$ and $q_b = +P/(2\sqrt{3})$, and zero on phase c.
+At a split-phase node, where $U_b = -U_a$, the same load gives equal powers $S_a = S_b = S/2$ on both legs.
+The phases that no entry of the load touches report exactly zero.
+
+##### Delta entries and the phases of a node
+
+An entry of a delta load/generator is *specified* when it is neither `NaN` nor zero, as for a wye connection.
+A specified entry needs **both** of its phases at its node:
+
+| node phases                                 | non-zero entries allowed |
+|---------------------------------------------|--------------------------|
+| `abc`                                       | ab, bc, ca               |
+| `ab` (three-phase pattern or split-phase)   | ab                       |
+| `bc`                                        | bc                       |
+| `ac`                                        | ca                       |
+| `a`, `b` or `c`                             | none                     |
+
+Otherwise, a {py:class}`LoadGenOnAbsentPhase <power_grid_model.errors.LoadGenOnAbsentPhase>` error is raised.
+Entries that are zero do not contribute to the calculation.
+
+##### Limitations of the delta connection
+
+* It is an experimental feature, and needs the experimental features to be enabled in the calculation (see
+  [Reduced-phase networks](reduced-phase-networks.md)).
+* `delta` is only supported for `asym_load` and `asym_gen`.
+  A delta `sym_load` or `sym_gen` raises an {py:class}`InvalidPhaseConnection
+  <power_grid_model.errors.InvalidPhaseConnection>` error.
+* Delta loads and generators are only supported in an asymmetric power flow.
+  A symmetric power flow or any state estimation in a network with a delta-connected load/generator raises a
+  {py:class}`ReducedPhaseNotSupported <power_grid_model.errors.ReducedPhaseNotSupported>` error.
+* A `voltage_regulator` cannot regulate a delta-connected load/generator.
+* As for all loads and generators, a short circuit calculation ignores them.
+* `validate_input_data` checks `connection`: it must be `wye`, `delta` or not provided, `delta` is only allowed for
+  `asym_load` and `asym_gen`, and a `voltage_regulator` cannot regulate a delta load or generator. Whether the
+  phases of the non-zero delta entries are present at the node is checked by the calculation
+  (`LoadGenOnAbsentPhase`).
+* Compatibility for C API callers: `PGM_create_buffer` returns uninitialised memory. Call `PGM_buffer_set_nan` on
+  every input buffer before setting attributes. Otherwise the new `connection` attribute holds garbage: a value other
+  than `wye`, `delta` or `na` fails the construction of the model with a `MissingCaseForEnumError`, and a garbage value
+  of exactly `delta` (1) would silently make an `asym_load` or `asym_gen` a delta load (which still needs the
+  experimental features to be enabled). See
+  [C API compatibility](reduced-phase-networks.md#c-api-compatibility).
 
 ### Shunt
 
@@ -1174,6 +1484,39 @@ The supported values of `fault_phase`, as well as its default value, are listed 
 | `FaultType.two_phase`              | `FaultPhase.bc`, `FaultPhase.ac`, `FaultPhase.ab` | `FaultPhase.bc`            | Two phases are connected with fault impedance.                         |
 | `FaultType.two_phase_to_ground`    | `FaultPhase.bc`, `FaultPhase.ac`, `FaultPhase.ab` | `FaultPhase.bc`            | Two phases are connected with fault impedance then grounded.           |
 
+##### Faults at nodes without all phases
+
+```{warning}
+Nodes without all phases are an experimental feature (see [Asym Line](#asym-line),
+[Single-Phase Transformer](#single-phase-transformer) and [Reduced-phase networks](reduced-phase-networks.md)).
+```
+
+The phases of a fault must all be present at its node. The phases of a node are derived from the lines and
+transformer windings connected to it. The valid faults are:
+
+| node phases                                | valid faults                                                                                   |
+|--------------------------------------------|------------------------------------------------------------------------------------------------|
+| `a`, `b` or `c` (for example a SWER node)  | `single_phase_to_ground` on that phase (at an `a` node this is also the default)               |
+| two phases, for example `ab`               | `single_phase_to_ground` on either phase; `two_phase` and `two_phase_to_ground` on both phases |
+| split phase (`ab_center_tapped` secondary) | `single_phase_to_ground` on `a` or `b`; `two_phase` and `two_phase_to_ground` on `ab`          |
+| `abc`                                      | all faults; `three_phase` is only valid here                                                   |
+
+* A fault on a phase that is not present at its node raises `InvalidShortCircuitPhaseOrType`, naming the fault, its
+  node and the phases of the node, for example "The short circuit phases (b) of fault 601 are not all present at its
+  node 4 (node phases: a); this short circuit type cannot be applied there".
+* The default phases (`a` for `single_phase_to_ground`, `bc` for `two_phase` and `two_phase_to_ground`) are not
+  adapted to the node. At a node without these phases, set `fault_phase` explicitly; the error message says when the
+  phases are the default of the fault type and an explicit phase can fit the node (not for a `three_phase` fault,
+  or a two-phase fault at a node with fewer than two phases). For a SWER network fed by a `single_phase_transformer`, a
+  `to_connection` of `a` makes the default single-phase fault valid.
+* A fault with `status` 0 and a fault at an isolated or de-energised node are not checked; their output is 0.
+* In a batch calculation, the check runs for each scenario, so the update data may fix the base input.
+* The rule that all faults in one connected network (per math model) have the same `fault_type` and `fault_phase`
+  still applies. A fault on a SWER line on phase `a` and a fault on a lateral on phase `b` therefore cannot be in
+  the same connected network.
+* The voltage factor $c$ is taken from the `u_rated` of the source node, not from the fault location. For a fault on
+  a 240 V node fed from a 22 kV source, $c$ follows the 22 kV level.
+
 ## Regulator
 
 * type name: `regulator`
@@ -1196,9 +1539,11 @@ Which object types are supported as `regulated_object` is regulator type-depende
 * base: [regulator](#regulator)
 
 `transformer_tap_regulator` defines a regulator for transformers in the grid.
-A transformer tap regulator regulates a component that is either a
-[transformer](#transformer) or a
-[Three-Winding Transformer](#three-winding-transformer).
+A transformer tap regulator regulates a component that is a
+[transformer](#transformer), a
+[Three-Winding Transformer](#three-winding-transformer) or a
+[Single-Phase Transformer](#single-phase-transformer) (see
+[below](#single-phase-transformer-regulated-by-a-tap-regulator)).
 
 The transformer tap regulator changes the `tap_pos` of the transformer it regulates in the range set by the user via
 `tap_min` and `tap_max` (i.e., `(tap_min <= tap_pos <= tap_max)` or `(tap_min >= tap_pos >= tap_max)`).
@@ -1217,7 +1562,7 @@ The actual grid state is not changed after calculations are done.
 
 | name                       | data type                                                                                                                                                                                                                                                                  | unit     | description                                                                                             |           required           |  update  |                           valid values                           |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------------------------------------------------------------------------------------------------------|:----------------------------:|:--------:|:----------------------------------------------------------------:|
-| `control_side`             | {py:class}`BranchSide <power_grid_model.enum.BranchSide>` if the regulated object is a [transformer](#transformer) and {py:class}`Branch3Side <power_grid_model.enum.Branch3Side>` if it the regulated object is a [Three-Winding Transformer](#three-winding-transformer) | -        | the controlled side of the transformer                                                                  | &#10024; only for power flow | &#10060; | `control_side` should be the relatively further side to a source |
+| `control_side`             | {py:class}`BranchSide <power_grid_model.enum.BranchSide>` if the regulated object is a [transformer](#transformer) or a [Single-Phase Transformer](#single-phase-transformer) and {py:class}`Branch3Side <power_grid_model.enum.Branch3Side>` if it the regulated object is a [Three-Winding Transformer](#three-winding-transformer) | -        | the controlled side of the transformer                                                                  | &#10024; only for power flow | &#10060; | `control_side` should be the relatively further side to a source |
 | `u_set`                    | `double`                                                                                                                                                                                                                                                                   | volt (V) | the voltage setpoint (at the center of the band)                                                        | &#10024; only for power flow | &#10004; |                              `>= 0`                              |
 | `u_band`                   | `double`                                                                                                                                                                                                                                                                   | volt (V) | the width of the voltage band ($=2*\left(\Delta U\right)_{\text{acceptable}}$)                          | &#10024; only for power flow | &#10004; |                        `> 0` (see below)                         |
 | `line_drop_compensation_r` | `double`                                                                                                                                                                                                                                                                   | ohm (Ω)  | compensation for voltage drop due to resistance during transport (see [below](#line-drop-compensation)) |    &#10060; default `0.0`    | &#10004; |                              `>= 0`                              |
@@ -1297,6 +1642,52 @@ node_1 --- transformer_4 --- node_2 --- line_5 --- node_3
 source_6     |                                    load_7
       transformer_tap_regulator_8
 ```
+
+##### Single-phase transformer regulated by a tap regulator
+
+A [Single-Phase Transformer](#single-phase-transformer) is regulated in the same way, with the following differences.
+The regulation is experimental, like the component itself (see
+[Reduced-phase networks](reduced-phase-networks.md#experimental-feature)).
+
+**Regulated voltage.** The controlled voltage is the voltage of the winding at the `control_side`, computed from the
+voltages of its node to earth, after the line drop compensation.
+It depends on the connection of that winding:
+
+| connection of the winding at `control_side` | controlled voltage                                    | `u_set` and `u_band` are                                 | example `u_set`           |
+|---------------------------------------------|-------------------------------------------------------|----------------------------------------------------------|---------------------------|
+| `a`, `b`, `c` (phase-to-earth)              | the voltage of that phase                             | phase-to-earth volts                                     | 12.7 kV (SWER), 240 V     |
+| `ab`, `ac`, `bc` (phase-to-phase)           | the voltage between the two phases                    | phase-to-phase volts                                     | 22 kV, 415 V              |
+| `ab_center_tapped`                          | the mean of the voltages of the two legs to earth     | leg-to-earth volts (half of the voltage of the winding)  | 240 V                     |
+
+* **Unit.** `u_set` and `u_band` are in volts across the winding, like `u1` and `u2` of the transformer, and not at the
+  scale of `u_rated` of the node.
+  For a SWER winding at a 22 kV node, `u_set` is about 12.7 kV and not 22 kV.
+  The validation warns when `u_set` is more than 20% away from the nominal voltage of the winding.
+* **Node to earth.** The voltage is the one at the node, which is what the loads see and what the node output shows.
+  When the control side winding has an earth electrode (`r_grounding_<side>`), the voltage of the node to earth is
+  regulated, not the voltage across the winding, and the two differ by the drop over the electrode.
+* **Line drop compensation.** `line_drop_compensation_r` and `line_drop_compensation_x` are the impedance of one
+  conductor in ohm, as the compensation is applied to the current of each conductor of the winding.
+  * For a phase-to-earth winding, it is the impedance of the line to the regulated point including the earth return,
+    for example $r_{aa}$ and $x_{aa}$ of a SWER `asym_line`.
+  * For a phase-to-phase winding, the current flows out through one conductor and back through the other, so the
+    compensation is the loop of two conductors: $2 Z_{\text{compensation}}$, with $Z_{\text{compensation}}$ the impedance
+    of one conductor of the two-phase line.
+  * For a centre-tapped winding, each leg has its own compensation with the same impedance; the neutral is ignored.
+* **Requirements.**
+  * The transformer must provide both `tap_min` and `tap_max`, and `tap_size`.
+    Without a tap limit the range of the tap changer is not bounded, and the calculation raises an
+    `AutomaticTapInputError`; the validation reports a missing `tap_min`, `tap_max` or `tap_size`
+    (`MissingValueError`) of a regulated single-phase transformer, whatever the status of the regulator.
+    With a `tap_size` of 0 the tap position has no effect.
+  * The numbering of the tap positions may be reversed (`tap_max < tap_min`); `control_side` may be the side of the tap
+    changer or the other side.
+  * Only asymmetric power flow is supported; a symmetric calculation raises `ReducedPhaseNotSupported`, as for the
+    component itself.
+  * The `control_side` must be the side further from the source, as for the other transformers.
+  * Several regulators in series, for example an isolating transformer and a regulator in the SWER line behind it, are
+    regulated in order of their distance from the source, also when the transformers are connected through
+    `asym_line`s.
 
 ### Voltage Regulator
 

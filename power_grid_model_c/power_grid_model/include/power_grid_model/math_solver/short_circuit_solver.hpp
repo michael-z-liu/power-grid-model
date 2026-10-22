@@ -43,6 +43,7 @@ template <symmetry_tag sym> class ShortCircuitSolver {
 
     ShortCircuitSolverOutput<sym> run_short_circuit(YBus<sym> const& y_bus, ShortCircuitInput const& input) {
         check_input_valid(input);
+        check_fault_phases_present(y_bus.math_topology(), input);
 
         auto const [fault_type, fault_phase] = extract_fault_type_phase(input.faults);
 
@@ -385,6 +386,7 @@ template <symmetry_tag sym> class ShortCircuitSolver {
             }
         }
 
+        detail::mask_absent_phase_values<sym>(y_bus.math_topology(), output.u_bus);
         output.branch = y_bus.template calculate_branch_flow<BranchShortCircuitSolverOutput<sym>>(output.u_bus);
         output.shunt = y_bus.template calculate_shunt_flow<ApplianceShortCircuitSolverOutput<sym>>(output.u_bus);
     }
@@ -452,6 +454,24 @@ template <symmetry_tag sym> class ShortCircuitSolver {
             if (first.fault_type == FaultType::nan || first.fault_phase == FaultPhase::default_value ||
                 first.fault_phase == FaultPhase::nan) {
                 throw InvalidShortCircuitPhaseOrType{};
+            }
+        }
+    }
+
+    // in a math model with one- or two-phase buses, a short circuit must only involve phases present at its bus;
+    // otherwise it would silently result in a zero fault current; backstop for direct solver use; the model checks
+    // with the fault ID first (M8)
+    static void check_fault_phases_present(MathModelTopology const& topo, ShortCircuitInput const& input) {
+        if (!topo.has_reduced_phase) {
+            return;
+        }
+        for (auto const& [bus_number, faults] : enumerated_zip_sequence(input.fault_buses)) {
+            PhaseMask const bus_phases = topo.bus_phase(bus_number);
+            for (Idx const fault_number : faults) {
+                PhaseMask const fault_phases = fault_phase_mask(input.faults[fault_number].fault_phase);
+                if (!bus_phases.contains(fault_phases)) {
+                    throw InvalidShortCircuitPhases{phase_letters(fault_phases), phase_letters(bus_phases)};
+                }
             }
         }
     }

@@ -1,0 +1,13 @@
+{
+  "calculation_method": [
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-06,
+  "atol": 0.0001,
+  "experimental_features": "enabled",
+  "raises": {
+    "raises": "MissingPhaseForWinding",
+    "reason": "The ab winding of the single-phase transformer is at a node that only has phase a."
+  }
+}

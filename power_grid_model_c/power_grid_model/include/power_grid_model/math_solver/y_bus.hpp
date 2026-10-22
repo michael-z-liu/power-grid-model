@@ -367,6 +367,9 @@ template <symmetry_tag sym> class YBus {
     constexpr MathModelTopology const& math_topology() const { return math_topology_.get(); }
     constexpr MathModelParam<sym> const& math_model_param() const { return math_model_param_; }
 
+    // in a math model with one- or two-phase buses the rows and columns of absent slots are masked and their diagonal
+    // is one (see update_admittance_entries); consumers that need the physical admittance (future state estimation)
+    // must mask these slots
     constexpr ComplexTensorVector<sym> const& admittance() const { return admittance_; }
     IdxVector const& bus_entry() const { return y_bus_structure().bus_entry; }
     IdxVector const& lu_diag() const { return y_bus_structure().diag_lu; }
@@ -453,6 +456,9 @@ template <symmetry_tag sym> class YBus {
             parameters_changed(true);
         }
 
+        // absent phase slots are only masked in an asymmetric calculation of a network with one- or two-phase buses
+        [[maybe_unused]] bool const reduced_phase = math_topology().has_reduced_phase;
+
         for (auto const entry : y_bus_entries) {
             // start admittance accumulation with zero
             ComplexTensor<sym> entry_admittance{0.0};
@@ -471,6 +477,11 @@ template <symmetry_tag sym> class YBus {
             }
             // assign
             admittance_[entry] = std::move(entry_admittance);
+            if constexpr (!is_symmetric_v<sym>) {
+                if (reduced_phase) {
+                    mask_absent_phase_admittance(entry);
+                }
+            }
         }
     }
 
@@ -543,31 +554,34 @@ template <symmetry_tag sym> class YBus {
     template <typename T>
         requires std::same_as<T, BranchSolverOutput<sym>> || std::same_as<T, BranchShortCircuitSolverOutput<sym>>
     std::vector<T> calculate_branch_flow(ComplexValueVector<sym> const& u) const {
-        return std::views::zip(math_topology_.get().branch_bus_idx, math_model_param_.branch_param) |
-               std::views::transform([&u](auto const& branch_idx_params) -> T {
-                   auto const& [branch_idx, param] = branch_idx_params;
+        std::vector<T> branch_flow =
+            std::views::zip(math_topology_.get().branch_bus_idx, math_model_param_.branch_param) |
+            std::views::transform([&u](auto const& branch_idx_params) -> T {
+                auto const& [branch_idx, param] = branch_idx_params;
 
-                   auto const [f, t] = branch_idx;
-                   // if one side is disconnected, use zero voltage at that side
-                   ComplexValue<sym> const uf = f != -1 ? u[f] : ComplexValue<sym>{0.0};
-                   ComplexValue<sym> const ut = t != -1 ? u[t] : ComplexValue<sym>{0.0};
-                   T output;
+                auto const [f, t] = branch_idx;
+                // if one side is disconnected, use zero voltage at that side
+                ComplexValue<sym> const uf = f != -1 ? u[f] : ComplexValue<sym>{0.0};
+                ComplexValue<sym> const ut = t != -1 ? u[t] : ComplexValue<sym>{0.0};
+                T output;
 
-                   // See "Branch Flow Calculation" in "State Estimation Alliander"
-                   output.i_f = dot(param.yff(), uf) + dot(param.yft(), ut);
-                   output.i_t = dot(param.ytf(), uf) + dot(param.ytt(), ut);
+                // See "Branch Flow Calculation" in "State Estimation Alliander"
+                output.i_f = dot(param.yff(), uf) + dot(param.yft(), ut);
+                output.i_t = dot(param.ytf(), uf) + dot(param.ytt(), ut);
 
-                   // TODO(mgovers): cleanup v2: branch solver output should always be in current domain; conversion to
-                   // power domain should be done in main_core/output.hpp
-                   if constexpr (std::same_as<T, BranchSolverOutput<sym>>) {
-                       // See "Shunt Injection Flow Calculation" in "State Estimation Alliander"
-                       output.s_f = uf * conj(output.i_f);
-                       output.s_t = ut * conj(output.i_t);
-                   }
+                // TODO(mgovers): cleanup v2: branch solver output should always be in current domain; conversion to
+                // power domain should be done in main_core/output.hpp
+                if constexpr (std::same_as<T, BranchSolverOutput<sym>>) {
+                    // See "Shunt Injection Flow Calculation" in "State Estimation Alliander"
+                    output.s_f = uf * conj(output.i_f);
+                    output.s_t = ut * conj(output.i_t);
+                }
 
-                   return output;
-               }) |
-               std::ranges::to<std::vector<T>>();
+                return output;
+            }) |
+            std::ranges::to<std::vector<T>>();
+        mask_absent_phase_branch_flow(branch_flow);
+        return branch_flow;
     }
 
     // calculate shunt flow based on voltage, injection direction
@@ -590,6 +604,7 @@ template <symmetry_tag sym> class YBus {
                 }
             }
         }
+        mask_absent_phase_shunt_flow(shunt_flow);
         return shunt_flow;
     }
 
@@ -617,6 +632,73 @@ template <symmetry_tag sym> class YBus {
 
     std::vector<IdxVector> y_bus_entries_per_branch_;
     std::vector<IdxVector> y_bus_entries_per_shunt_;
+
+    // mask-then-identity of one admittance entry (row i, col j): Y_ij <- M_i Y_ij M_j, and on the diagonal
+    // Y_ii(p, p) = 1 for each absent phase p
+    // the identity overwrites the diagonal instead of adding to it, so that the equation of an absent slot is exactly
+    // 1 * x = 0, whatever the (masked) contributions of the shunts and branches were
+    void mask_absent_phase_admittance(Idx entry)
+        requires(!is_symmetric_v<sym>)
+    {
+        MathModelTopology const& topo = math_topology();
+        auto const& pos_in_entries = y_bus_struct_->y_bus_pos_in_entries;
+        if (pos_in_entries.empty()) {
+            // artificial single bus without branches and shunts: it has the source, so it has all phases
+            assert(topo.n_bus() == 1 && topo.bus_phase(0).all());
+            return;
+        }
+        auto const [row, col] = pos_in_entries[entry];
+        PhaseMask const row_phases = topo.bus_phase(row);
+        ComplexTensor<sym>& admittance = admittance_[entry];
+        mask_absent_phases(admittance, row_phases, topo.bus_phase(col));
+        if (row == col) {
+            set_absent_phase_identity(admittance, row_phases);
+        }
+    }
+
+    // the flows into a bus are exactly zero at the phases that are absent at that bus
+    template <typename T> void mask_absent_phase_branch_flow(std::vector<T>& branch_flow) const {
+        if constexpr (!is_symmetric_v<sym>) {
+            MathModelTopology const& topo = math_topology();
+            if (!topo.has_reduced_phase) {
+                return;
+            }
+            for (auto&& [flow, branch_idx] : std::views::zip(branch_flow, topo.branch_bus_idx)) {
+                auto const [f, t] = branch_idx;
+                if (f != -1) {
+                    mask_absent_phases(flow.i_f, topo.bus_phase(f));
+                    if constexpr (std::same_as<T, BranchSolverOutput<sym>>) {
+                        mask_absent_phases(flow.s_f, topo.bus_phase(f));
+                    }
+                }
+                if (t != -1) {
+                    mask_absent_phases(flow.i_t, topo.bus_phase(t));
+                    if constexpr (std::same_as<T, BranchSolverOutput<sym>>) {
+                        mask_absent_phases(flow.s_t, topo.bus_phase(t));
+                    }
+                }
+            }
+        }
+    }
+
+    template <typename SolverOutputType>
+    void mask_absent_phase_shunt_flow(std::vector<SolverOutputType>& shunt_flow) const {
+        if constexpr (!is_symmetric_v<sym>) {
+            MathModelTopology const& topo = math_topology();
+            if (!topo.has_reduced_phase) {
+                return;
+            }
+            for (auto const [bus, shunts] : enumerated_zip_sequence(topo.shunts_per_bus)) {
+                PhaseMask const phases = topo.bus_phase(bus);
+                for (Idx const shunt : shunts) {
+                    mask_absent_phases(shunt_flow[shunt].i, phases);
+                    if constexpr (std::same_as<SolverOutputType, ApplianceSolverOutput<sym>>) {
+                        mask_absent_phases(shunt_flow[shunt].s, phases);
+                    }
+                }
+            }
+        }
+    }
 
     ParameterChangeSubscribers parameters_changed_callbacks_;
 

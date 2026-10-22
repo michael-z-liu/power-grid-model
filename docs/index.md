@@ -88,6 +88,7 @@ user_manual/data-model
 user_manual/dataset-terminology
 user_manual/components
 user_manual/calculations
+user_manual/reduced-phase-networks
 user_manual/non-native-components
 user_manual/performance-guide
 user_manual/data-validator
@@ -139,6 +140,7 @@ advanced_documentation/devcontainer-setup.md
 advanced_documentation/c-api
 advanced_documentation/high-level-design
 advanced_documentation/core-design
+advanced_documentation/multi-phase-and-swer-design
 advanced_documentation/python-wrapper-design
 advanced_documentation/terminology
 ```

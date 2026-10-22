@@ -11,6 +11,7 @@
 #include "common/common.hpp"
 #include "common/counting_iterator.hpp"
 #include "common/enum.hpp"
+#include "common/exception.hpp"
 #include "common/grouped_index_vector.hpp"
 #include "index_mapping.hpp"
 
@@ -29,10 +30,13 @@
 #include <cassert>
 #include <concepts>
 #include <cstddef>
+#include <format>
 #include <iterator>
 #include <map>
 #include <memory>
 #include <ranges>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -64,6 +68,17 @@ class Topology {
     // branch3 #1, has internal node idx n_node + 1
     using GlobalGraph = boost::compressed_sparse_row_graph<boost::directedS, GlobalVertex, GlobalEdge,
                                                            boost::no_property, GraphIdx, GraphIdx>;
+
+    // directed graph to propagate the phases of the buses, only built if there are reduced-phase branches
+    // arc i -> j: phases `feeding` at node i can feed phases `fed` at node j
+    // it has the same nodes and edges as the global graph, including the branch3 internal nodes
+    struct PhaseArc {
+        PhaseMask feeding{};
+        PhaseMask fed{};
+        PhaseCoupling coupling{};
+    };
+    using PhaseGraph = boost::compressed_sparse_row_graph<boost::directedS, boost::no_property, PhaseArc,
+                                                          boost::no_property, GraphIdx, GraphIdx>;
 
     // dfs visitor for global graph
     class GlobalDFSVisitor : public boost::dfs_visitor<> {
@@ -140,6 +155,7 @@ class Topology {
         reset_topology();
         build_sparse_graph();
         dfs_search();
+        propagate_phases();
         couple_branch();
         // Links are not coupled here; they're merged into topological nodes in supernodes.hpp
         couple_all_appliance();
@@ -295,6 +311,238 @@ class Topology {
             // iterate math model sequence number
             ++math_solver_idx;
             assert(math_solver_idx == std::ssize(math_topology_));
+        }
+    }
+
+    // derive the phases that are present at each bus of each math model
+    // only does something if at least one branch is not abc -> abc, per phase
+    // otherwise has_reduced_phase stays false and bus_phase_mask and bus_slot_pattern stay empty for all math models
+    void propagate_phases() {
+        if (comp_conn_.branch_phase_incidence.empty()) {
+            return;
+        }
+        assert(comp_conn_.branch_phase_incidence.size() == comp_conn_.branch_connected.size());
+
+        PhaseGraph const phase_graph = build_phase_graph();
+        std::vector<PhaseMask> node_phase(narrow_cast<size_t>(comp_topo_.n_node_total()), phase_mask_none);
+        seed_and_propagate(phase_graph, node_phase);
+        // validate after the fixed point, so that the outcome does not depend on the visit order
+        check_branch_phases(node_phase);
+        assign_bus_phase_masks(node_phase, split_phase_nodes(phase_graph, node_phase));
+    }
+
+    // "{type} with ID {id}" if the IDs are registered, "{type} #{idx}" otherwise
+    static std::string branch_label(std::string_view type, Idx idx, std::vector<ID> const& ids) {
+        if (ids.empty()) {
+            return std::format("{} #{}", type, idx);
+        }
+        return std::format("{} with ID {}", type, ids[narrow_cast<size_t>(idx)]);
+    }
+
+    // same edge set as the global graph, with both directions of each edge
+    PhaseGraph build_phase_graph() const {
+        std::vector<std::pair<GraphIdx, GraphIdx>> edges;
+        std::vector<PhaseArc> arcs;
+        for (auto const& [branch_node_idx, branch_connected, incidence] :
+             std::views::zip(by_const_ref(comp_topo_.branch_node_idx), comp_conn_.branch_connected,
+                             comp_conn_.branch_phase_incidence)) {
+            auto const [i, j] = branch_node_idx;
+            auto const [i_status, j_status] = branch_connected;
+            assert(incidence.coupling == PhaseCoupling::winding || incidence.from == incidence.to);
+            assert(!incidence.from.none() && !incidence.to.none());
+            if (i_status != 0 && j_status != 0 && i != j) {
+                edges.emplace_back(narrow_cast<GraphIdx>(i), narrow_cast<GraphIdx>(j));
+                arcs.push_back({.feeding = incidence.from, .fed = incidence.to, .coupling = incidence.coupling});
+                edges.emplace_back(narrow_cast<GraphIdx>(j), narrow_cast<GraphIdx>(i));
+                arcs.push_back({.feeding = incidence.to, .fed = incidence.from, .coupling = incidence.coupling});
+            }
+        }
+        // each connected leg of a 3-way branch is a three-phase winding towards the internal node
+        for (auto const& [i, i_status, j_internal] :
+             std::views::zip(by_const_ref(comp_topo_.branch3_node_idx), comp_conn_.branch3_connected,
+                             std::views::iota(comp_topo_.n_node))) {
+            for (Idx m = 0; m != 3; ++m) {
+                if (i_status[m] != 0) {
+                    edges.emplace_back(narrow_cast<GraphIdx>(i[m]), narrow_cast<GraphIdx>(j_internal));
+                    arcs.push_back({.feeding = three_phase_winding.from,
+                                    .fed = three_phase_winding.to,
+                                    .coupling = PhaseCoupling::winding});
+                    edges.emplace_back(narrow_cast<GraphIdx>(j_internal), narrow_cast<GraphIdx>(i[m]));
+                    arcs.push_back({.feeding = three_phase_winding.to,
+                                    .fed = three_phase_winding.from,
+                                    .coupling = PhaseCoupling::winding});
+                }
+            }
+        }
+        return PhaseGraph{boost::edges_are_unsorted_multi_pass, edges.cbegin(), edges.cend(), arcs.cbegin(),
+                          narrow_cast<GraphIdx>(comp_topo_.n_node_total())};
+    }
+
+    // every connected source feeds all three phases; masks only grow, so this terminates
+    void seed_and_propagate(PhaseGraph const& phase_graph, std::vector<PhaseMask>& node_phase) const {
+        std::vector<GraphIdx> worklist;
+        for (auto const& [source_connected, source_node] :
+             std::views::zip(comp_conn_.source_connected, by_const_ref(comp_topo_.source_node_idx))) {
+            if (source_connected != IntS{0}) {
+                node_phase[narrow_cast<GraphIdx>(source_node)] = phase_mask_abc;
+                worklist.push_back(narrow_cast<GraphIdx>(source_node));
+            }
+        }
+
+        while (!worklist.empty()) {
+            GraphIdx const u = worklist.back();
+            worklist.pop_back();
+            auto [arc_it, arc_end] = boost::out_edges(u, phase_graph);
+            for (; arc_it != arc_end; ++arc_it) {
+                PhaseArc const& arc = phase_graph[*arc_it];
+                GraphIdx const v = boost::target(*arc_it, phase_graph);
+                PhaseMask gained = phase_mask_none;
+                if (arc.coupling != PhaseCoupling::winding) {
+                    // per_phase and link: phase k feeds phase k
+                    gained = node_phase[u] & arc.feeding;
+                } else if (!arc.feeding.none() && node_phase[u].contains(arc.feeding)) {
+                    gained = arc.fed;
+                }
+                PhaseMask const updated = node_phase[v] | gained;
+                if (updated != node_phase[v]) {
+                    node_phase[v] = updated;
+                    worklist.push_back(v);
+                }
+            }
+        }
+    }
+
+    // nodes with the split-phase slot pattern of a centre-tapped winding: seeded at the to node of every
+    // centre-tapped winding whose to side is connected, then spread along the per_phase and link arcs only, never
+    // through a winding; a node with phase c is three-phase and neither takes nor passes on the pattern, so it does
+    // not leak through a three-phase node into other laterals; the flag only grows, so the result does not depend on
+    // the visit order
+    std::vector<bool> split_phase_nodes(PhaseGraph const& phase_graph, std::vector<PhaseMask> const& node_phase) const {
+        std::vector<bool> split(narrow_cast<size_t>(comp_topo_.n_node_total()), false);
+        std::vector<GraphIdx> worklist;
+        auto const can_split = [&node_phase, &split](GraphIdx node) {
+            return !split[node] && !node_phase[node].has(2);
+        };
+        for (auto const& [branch_node_idx, branch_connected, incidence] :
+             std::views::zip(by_const_ref(comp_topo_.branch_node_idx), comp_conn_.branch_connected,
+                             comp_conn_.branch_phase_incidence)) {
+            auto const to_node = narrow_cast<GraphIdx>(branch_node_idx[1]);
+            if (incidence.to_pattern == SlotPattern::split_phase && branch_connected[1] != 0 && can_split(to_node)) {
+                split[to_node] = true;
+                worklist.push_back(to_node);
+            }
+        }
+
+        while (!worklist.empty()) {
+            GraphIdx const u = worklist.back();
+            worklist.pop_back();
+            auto [arc_it, arc_end] = boost::out_edges(u, phase_graph);
+            for (; arc_it != arc_end; ++arc_it) {
+                GraphIdx const v = boost::target(*arc_it, phase_graph);
+                if (phase_graph[*arc_it].coupling != PhaseCoupling::winding && can_split(v)) {
+                    split[v] = true;
+                    worklist.push_back(v);
+                }
+            }
+        }
+        return split;
+    }
+
+    // validate the phases of each branch side that is connected to a node in a math model; with terminals T and
+    // node phases N at that side:
+    //   per_phase: every conductor must be present at its nodes, T without N must be empty (DanglingConductor)
+    //   winding: all phases of a connected winding must be present, T and N must equal T (MissingPhaseForWinding)
+    //   link: an ideal connection carries the phases of its nodes, nothing to validate
+    // under propagation T and N_from equals T and N_to for a per_phase branch that is connected at both sides, so a
+    // dangling conductor is absent at both of its connected nodes
+    // branch_idx is the position in ComponentConnections::branch_connected: on the legacy path this counts all Edges
+    // (links included), on the v2 path only Branches; the errors use the matching ID if it is registered
+    void check_branch_phases(std::vector<PhaseMask> const& node_phase) const {
+        auto const in_math_model = [this](Idx node) { return comp_coup_.node[node].group != disconnected; };
+        // the owner of the winding is the branch or branch3 idx, labelled only when the error is thrown
+        auto const check_winding_side = [&in_math_model, &node_phase](std::string_view owner_type, Idx owner_idx,
+                                                                      std::vector<ID> const& owner_ids, Idx node,
+                                                                      PhaseMask terminals) {
+            if (!in_math_model(node)) {
+                return;
+            }
+            PhaseMask const present = node_phase[node];
+            if ((present & terminals) != terminals) {
+                throw MissingPhaseForWinding{branch_label(owner_type, owner_idx, owner_ids), phase_letters(terminals),
+                                             phase_letters(present)};
+            }
+        };
+        auto const check_per_phase = [this, &in_math_model, &node_phase](Idx branch_idx, BranchIdx const& nodes,
+                                                                         BranchConnected const& connected,
+                                                                         PhaseMask terminals) {
+            PhaseMask dangling = phase_mask_none;
+            std::array<std::string_view, 2> side_phases{"open", "open"};
+            for (size_t side = 0; side != 2; ++side) {
+                if (connected[side] != 0 && in_math_model(nodes[side])) {
+                    PhaseMask const present = node_phase[nodes[side]];
+                    dangling = dangling | terminals.without(present);
+                    side_phases[side] = phase_letters(present);
+                }
+            }
+            assert(connected[0] == 0 || connected[1] == 0 || !in_math_model(nodes[0]) ||
+                   (terminals & node_phase[nodes[0]]) == (terminals & node_phase[nodes[1]]));
+            if (!dangling.none()) {
+                throw DanglingConductor{branch_label("branch", branch_idx, comp_conn_.branch_id),
+                                        phase_letters(dangling), side_phases[0], side_phases[1]};
+            }
+        };
+
+        for (auto const& [branch_idx, branch_node_idx, branch_connected, incidence] :
+             std::views::zip(std::views::iota(Idx{0}), by_const_ref(comp_topo_.branch_node_idx),
+                             comp_conn_.branch_connected, comp_conn_.branch_phase_incidence)) {
+            if (incidence.coupling == PhaseCoupling::link) {
+                continue;
+            }
+            if (incidence.coupling == PhaseCoupling::per_phase) {
+                assert(incidence.from == incidence.to);
+                check_per_phase(branch_idx, branch_node_idx, branch_connected, incidence.from);
+                continue;
+            }
+            assert(incidence.coupling == PhaseCoupling::winding);
+            if (branch_connected[0] != 0) {
+                check_winding_side("branch", branch_idx, comp_conn_.branch_id, branch_node_idx[0], incidence.from);
+            }
+            if (branch_connected[1] != 0) {
+                check_winding_side("branch", branch_idx, comp_conn_.branch_id, branch_node_idx[1], incidence.to);
+            }
+        }
+        for (auto const& [branch3_idx, branch3_node_idx, branch3_connected] : std::views::zip(
+                 std::views::iota(Idx{0}), by_const_ref(comp_topo_.branch3_node_idx), comp_conn_.branch3_connected)) {
+            for (Idx m = 0; m != 3; ++m) {
+                if (branch3_connected[m] != 0) {
+                    check_winding_side("branch3", branch3_idx, comp_conn_.branch3_id, branch3_node_idx[m],
+                                       phase_mask_abc);
+                }
+            }
+        }
+    }
+
+    // only math models with at least one reduced-phase bus get a mask vector and a slot pattern vector
+    void assign_bus_phase_masks(std::vector<PhaseMask> const& node_phase, std::vector<bool> const& split_phase) {
+        for (auto const& [node, phase] : std::views::zip(comp_coup_.node, node_phase)) {
+            if (node.group != disconnected && !phase.all()) {
+                math_topology_[node.group].has_reduced_phase = true;
+            }
+        }
+        for (auto& math_topo : math_topology_) {
+            if (math_topo.has_reduced_phase) {
+                math_topo.bus_phase_mask.assign(narrow_cast<size_t>(math_topo.n_bus()), phase_mask_none);
+                math_topo.bus_slot_pattern.assign(narrow_cast<size_t>(math_topo.n_bus()), SlotPattern::three_phase);
+            }
+        }
+        for (auto const& [node, phase, split] : std::views::zip(comp_coup_.node, node_phase, split_phase)) {
+            if (node.group != disconnected && math_topology_[node.group].has_reduced_phase) {
+                MathModelTopology& math_topo = math_topology_[node.group];
+                math_topo.bus_phase_mask[node.pos] = phase;
+                if (split) {
+                    math_topo.bus_slot_pattern[node.pos] = SlotPattern::split_phase;
+                }
+            }
         }
     }
 
@@ -583,6 +831,20 @@ class Topology {
                 continue;
             }
             math_topology_[idx_math.group].load_gen_type[idx_math.pos] = load_gen_type;
+        }
+        // set load gen connection: only a math model with a connected delta load_gen gets the (all wye) vector
+        if (!comp_topo_.load_gen_connection.empty()) {
+            for (auto const& [idx_math, connection] :
+                 std::views::zip(by_const_ref(comp_coup_.load_gen), by_const_ref(comp_topo_.load_gen_connection))) {
+                if (idx_math.group == disconnected || connection != LoadGenConnection::delta) {
+                    continue;
+                }
+                MathModelTopology& topo = math_topology_[idx_math.group];
+                if (topo.load_gen_connection.empty()) {
+                    topo.load_gen_connection.resize(topo.n_load_gen(), LoadGenConnection::wye);
+                }
+                topo.load_gen_connection[idx_math.pos] = LoadGenConnection::delta;
+            }
         }
 
         // source

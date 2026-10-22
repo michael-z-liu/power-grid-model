@@ -1,0 +1,13 @@
+Clear
+Set DefaultBaseFrequency=50
+New Circuit.c phases=3 basekv=22.0 pu=1.1 angle=0 bus1=n1 Z1=[0.5297578000677983, 5.297578000677983] Z0=[0.5297578000677983, 5.297578000677983]
+New Line.l101 phases=1 bus1=n1.1 bus2=n2.1 length=1 units=km rmatrix=[28.986960440108934] xmatrix=[16.971230962241698] cmatrix=[119.99999999999999]
+New Line.l102 phases=1 bus1=n2.1 bus2=n3.1 length=1 units=km rmatrix=[14.493480220054467] xmatrix=[8.485615481120849] cmatrix=[59.99999999999999]
+New Line.l103 phases=1 bus1=n2.1 bus2=open_l103_to.1 length=1 units=km rmatrix=[7.2467401100272335] xmatrix=[4.2428077405604245] cmatrix=[29.999999999999996]
+New Fault.f601 phases=1 bus1=n3.1 r=10.0
+Set VoltageBases=[22.0]
+CalcVoltageBases
+Set Tolerance=1e-12
+Set MaxIterations=200
+Set Mode=Snapshot
+Solve

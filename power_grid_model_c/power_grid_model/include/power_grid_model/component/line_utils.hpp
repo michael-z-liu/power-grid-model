@@ -4,8 +4,11 @@
 
 #pragma once
 
+#include "../calculation_parameters.hpp"
 #include "../common/three_phase_tensor.hpp"
 #include "power_grid_model/common/common.hpp"
+
+#include <Eigen/Core>
 
 namespace power_grid_model {
 
@@ -16,6 +19,45 @@ inline ComplexTensor<asymmetric_t> kron_reduction(const ComplexTensor4& matrix_t
     ComplexValue<asymmetric_t> const Y_ba(Y(3, 0), Y(3, 1), Y(3, 2));
     DoubleComplex const Y_bb_inv = 1.0 / Y(3, 3);
     return Y_aa - vector_outer_product(Y_ba, Y_ab) * Y_bb_inv;
+}
+
+// Kron reduction of a single node k of a nodal admittance matrix (Schur complement of y(k, k)):
+// y <- y - y(:, k) y(k, :) / y(k, k); row and column k are set to exactly zero
+// eliminating several nodes one after the other equals eliminating them together
+// y must be an Eigen Matrix (not an Array), so that the product of the column and the row is the outer product
+template <typename Derived> inline void kron_eliminate(Eigen::MatrixBase<Derived>& y, Idx k) {
+    DoubleComplex const pivot = y(k, k);
+    auto const column = y.col(k).eval();
+    auto const row = y.row(k).eval();
+    y -= column * row / pivot;
+    y.row(k).setZero();
+    y.col(k).setZero();
+}
+
+// inverse of the block of the present phases: the absent rows and columns of matrix are ignored (they may be
+// non-finite), those of the result are exactly zero (by assignment, never by multiplication)
+inline ComplexTensor<asymmetric_t> masked_inv(ComplexTensor<asymmetric_t> matrix, PhaseMask phases) {
+    if (phases.all()) {
+        return inv(matrix);
+    }
+    mask_absent_phases(matrix, phases, phases);
+    set_absent_phase_identity(matrix, phases);
+    ComplexTensor<asymmetric_t> result = inv(matrix);
+    mask_absent_phases(result, phases, phases);
+    return result;
+}
+
+// replace the rows and columns of the absent phase conductors (0, 1, 2 for a, b, c; the neutral 3 is kept) by the
+// identity, so that kron_reduction keeps them decoupled with an identity block
+inline ComplexTensor4 mask_absent_phase_conductors(ComplexTensor4 matrix, PhaseMask phases) {
+    for (Idx phase = 0; phase != 3; ++phase) {
+        if (!phases.has(phase)) {
+            matrix.row(phase).setZero();
+            matrix.col(phase).setZero();
+            matrix(phase, phase) = DoubleComplex{1.0};
+        }
+    }
+    return matrix;
 }
 
 } // namespace power_grid_model

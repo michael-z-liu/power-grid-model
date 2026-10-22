@@ -164,3 +164,27 @@ class UnsupportedVoltageRegulatorSourceCombinationError(PowerGridError):
 
 class ExperimentalFeature(PowerGridError):
     """An experimental feature was used but experimental features are not enabled."""
+
+
+class ReducedPhaseNotSupported(PowerGridError):
+    """The calculation or feature is not supported in a network with one- or two-phase nodes."""
+
+
+class DanglingConductor(PowerGridError):
+    """A conductor of a branch is not present at any of the nodes it connects."""
+
+
+class MissingPhaseForWinding(PowerGridError):
+    """A connected winding has phases that are not present at its node."""
+
+
+class InvalidPhaseConnection(PowerGridError):
+    """The phases of a reduced-phase component do not match its input values."""
+
+
+class LoadGenOnAbsentPhase(PowerGridError):
+    """A load or generator has a non-zero specified power on a phase that is not present at its node."""
+
+
+class ShuntAtReducedPhaseNode(PowerGridError):
+    """A shunt that is switched on is connected to a node without all phases."""

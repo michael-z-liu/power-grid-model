@@ -114,7 +114,7 @@ struct get_attributes_list<LineInput> {
 
 template<>
 struct get_attributes_list<AsymLineInput> {
-    static constexpr std::array<MetaAttribute, 34> value{
+    static constexpr std::array<MetaAttribute, 35> value{
             // all attributes including base class
             
             meta_data_gen::get_meta_attribute<&AsymLineInput::id>(offsetof(AsymLineInput, id), "id"),
@@ -122,6 +122,7 @@ struct get_attributes_list<AsymLineInput> {
             meta_data_gen::get_meta_attribute<&AsymLineInput::to_node>(offsetof(AsymLineInput, to_node), "to_node"),
             meta_data_gen::get_meta_attribute<&AsymLineInput::from_status>(offsetof(AsymLineInput, from_status), "from_status"),
             meta_data_gen::get_meta_attribute<&AsymLineInput::to_status>(offsetof(AsymLineInput, to_status), "to_status"),
+            meta_data_gen::get_meta_attribute<&AsymLineInput::phases>(offsetof(AsymLineInput, phases), "phases"),
             meta_data_gen::get_meta_attribute<&AsymLineInput::r_aa>(offsetof(AsymLineInput, r_aa), "r_aa"),
             meta_data_gen::get_meta_attribute<&AsymLineInput::r_ba>(offsetof(AsymLineInput, r_ba), "r_ba"),
             meta_data_gen::get_meta_attribute<&AsymLineInput::r_bb>(offsetof(AsymLineInput, r_bb), "r_bb"),
@@ -227,6 +228,45 @@ struct get_attributes_list<TransformerInput> {
 };
 
 template<>
+struct get_attributes_list<SinglePhaseTransformerInput> {
+    static constexpr std::array<MetaAttribute, 31> value{
+            // all attributes including base class
+            
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::id>(offsetof(SinglePhaseTransformerInput, id), "id"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::from_node>(offsetof(SinglePhaseTransformerInput, from_node), "from_node"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::to_node>(offsetof(SinglePhaseTransformerInput, to_node), "to_node"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::from_status>(offsetof(SinglePhaseTransformerInput, from_status), "from_status"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::to_status>(offsetof(SinglePhaseTransformerInput, to_status), "to_status"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::u1>(offsetof(SinglePhaseTransformerInput, u1), "u1"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::u2>(offsetof(SinglePhaseTransformerInput, u2), "u2"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::sn>(offsetof(SinglePhaseTransformerInput, sn), "sn"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::uk>(offsetof(SinglePhaseTransformerInput, uk), "uk"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk>(offsetof(SinglePhaseTransformerInput, pk), "pk"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::i0>(offsetof(SinglePhaseTransformerInput, i0), "i0"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::p0>(offsetof(SinglePhaseTransformerInput, p0), "p0"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::uk_half>(offsetof(SinglePhaseTransformerInput, uk_half), "uk_half"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk_half>(offsetof(SinglePhaseTransformerInput, pk_half), "pk_half"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::from_connection>(offsetof(SinglePhaseTransformerInput, from_connection), "from_connection"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::to_connection>(offsetof(SinglePhaseTransformerInput, to_connection), "to_connection"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::clock>(offsetof(SinglePhaseTransformerInput, clock), "clock"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_side>(offsetof(SinglePhaseTransformerInput, tap_side), "tap_side"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_pos>(offsetof(SinglePhaseTransformerInput, tap_pos), "tap_pos"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_min>(offsetof(SinglePhaseTransformerInput, tap_min), "tap_min"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_max>(offsetof(SinglePhaseTransformerInput, tap_max), "tap_max"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_nom>(offsetof(SinglePhaseTransformerInput, tap_nom), "tap_nom"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::tap_size>(offsetof(SinglePhaseTransformerInput, tap_size), "tap_size"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::uk_min>(offsetof(SinglePhaseTransformerInput, uk_min), "uk_min"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::uk_max>(offsetof(SinglePhaseTransformerInput, uk_max), "uk_max"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk_min>(offsetof(SinglePhaseTransformerInput, pk_min), "pk_min"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::pk_max>(offsetof(SinglePhaseTransformerInput, pk_max), "pk_max"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::r_grounding_from>(offsetof(SinglePhaseTransformerInput, r_grounding_from), "r_grounding_from"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::x_grounding_from>(offsetof(SinglePhaseTransformerInput, x_grounding_from), "x_grounding_from"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::r_grounding_to>(offsetof(SinglePhaseTransformerInput, r_grounding_to), "r_grounding_to"),
+            meta_data_gen::get_meta_attribute<&SinglePhaseTransformerInput::x_grounding_to>(offsetof(SinglePhaseTransformerInput, x_grounding_to), "x_grounding_to"),
+    };
+};
+
+template<>
 struct get_attributes_list<ThreeWindingTransformerInput> {
     static constexpr std::array<MetaAttribute, 50> value{
             // all attributes including base class
@@ -300,7 +340,7 @@ template <symmetry_tag sym_type>
 struct get_attributes_list<LoadGenInput<sym_type>> {
     using sym = sym_type;
 
-    static constexpr std::array<MetaAttribute, 6> value{
+    static constexpr std::array<MetaAttribute, 7> value{
             // all attributes including base class
             
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::id>(offsetof(LoadGenInput<sym>, id), "id"),
@@ -309,6 +349,7 @@ struct get_attributes_list<LoadGenInput<sym_type>> {
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::type>(offsetof(LoadGenInput<sym>, type), "type"),
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::p_specified>(offsetof(LoadGenInput<sym>, p_specified), "p_specified"),
             meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::q_specified>(offsetof(LoadGenInput<sym>, q_specified), "q_specified"),
+            meta_data_gen::get_meta_attribute<&LoadGenInput<sym>::connection>(offsetof(LoadGenInput<sym>, connection), "connection"),
     };
 };
 

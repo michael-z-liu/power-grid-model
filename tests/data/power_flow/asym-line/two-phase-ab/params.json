@@ -1,0 +1,16 @@
+{
+  "calculation_method": [
+    "linear",
+    "linear_current",
+    "newton_raphson",
+    "iterative_current"
+  ],
+  "rtol": 1e-08,
+  "atol": 1e-08,
+  "experimental_features": "enabled",
+  "extra_params": {
+    "iterative_current": {
+      "error_tolerance": 1e-10
+    }
+  }
+}

@@ -88,6 +88,8 @@ class Edge : public Base {
     virtual double base_i_to() const = 0;
     virtual double loading(double max_s, double max_i) const = 0;
     virtual double phase_shift() const = 0; // shift theta_from - theta_to
+    // phase slots used at each terminal and how they couple; default: abc -> abc, per phase (line-like)
+    virtual BranchPhaseIncidence phase_incidence() const { return {}; }
 
     template <symmetry_tag sym> BranchOutput<sym> get_output(BranchSolverOutput<sym> const& edge_solver_output) const {
         // result object

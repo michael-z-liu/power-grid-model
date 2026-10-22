@@ -1,0 +1,11 @@
+{
+  "calculation_method": "iec60909",
+  "rtol": 1e-08,
+  "atol": 1e-08,
+  "short_circuit_voltage_scaling": "maximum",
+  "experimental_features": "enabled",
+  "raises": {
+    "raises": "InvalidShortCircuitPhaseOrType",
+    "reason": "The short circuit phases (b) of fault 601 are not all present at its node 4 (node phases: a); this short circuit type cannot be applied there"
+  }
+}

@@ -77,6 +77,8 @@ TEST_CASE("Test generic_branch") {
 
     SUBCASE("Test genericbranch phase shift") { CHECK(branch.phase_shift() == doctest::Approx(0.0)); }
 
+    SUBCASE("Test genericbranch phase incidence") { CHECK(branch.phase_incidence() == three_phase_winding); }
+
     SUBCASE("Test genericbranch loading") { CHECK(branch.loading(60.0e6, 0.0) == doctest::Approx(2.0)); }
 }
 
@@ -222,6 +224,7 @@ TEST_CASE("Test compare_generic_branch") {
     }
 
     SUBCASE("Test transformer phase shift") { CHECK(transformer.phase_shift() == doctest::Approx(0.0)); }
+    SUBCASE("Test transformer phase incidence") { CHECK(transformer.phase_incidence() == three_phase_winding); }
 }
 
 } // namespace power_grid_model

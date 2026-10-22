@@ -194,7 +194,8 @@ Output:
 
 ```{note}
 Short-circuit calculations are currently implemented in the phase (abc) domain and therefore require a grounded configurations in certain cases, similar to asymmetric power flow calculations.
-For details on how floating grids are treated in power-grid-model, please refer to[Floating grid handling](calulations.md#floating-grid-handling).
+For details on how floating grids are treated in power-grid-model, please refer to [Floating grid handling](calculations.md#floating-grid-handling).
+```
 
 #### Common calculations
 
@@ -240,13 +241,22 @@ The option affects which attributes are required and how results are exposed.
   for all output variables.
 
 ```{note}
-In power-grid model, asymmetric calculations with certain configurations require the network to have a reference to ground. For details on how floating grids are treated in power-grid-model, please refer to [Floating grid handling](calulations.md#floating-grid-handling).
+In power-grid model, asymmetric calculations with certain configurations require the network to have a reference to ground. For details on how floating grids are treated in power-grid-model, please refer to [Floating grid handling](calculations.md#floating-grid-handling).
 ```
 
 ```{note}
 For short-circuit calculations, a three-phase `fault_type` is calculated with a symmetric calculation, while any other
 `fault_type` (e.g. single- or two-phase faults) automatically triggers the asymmetric calculation.
 Outputs for short circuit calculations always give asymmetric output, independent of the fault type present.
+```
+
+```{note}
+A network with one- or two-phase components (`asym_line` with `phases`, or `single_phase_transformer`) or with
+delta-connected loads or generators only supports the asymmetric power flow and the short circuit; symmetric power flow
+and state estimation raise `ReducedPhaseNotSupported`.
+In a network with one- or two-phase components the short circuit is always calculated asymmetrically, also when all
+faults are `three_phase`.
+These networks are an experimental feature; see [Reduced-phase networks](./reduced-phase-networks.md).
 ```
 
 #### Floating grid handling
@@ -347,6 +357,35 @@ This signal can be ignored when using linear methods.
 Similarly, having atleast some results from linear methods can aid in finding data errors or the reason
 for non convergence of newton raphson method.
 
+The advice to try the flat start has a caveat.
+The flat start can also fail: it puts every node at 1 p.u., which ignores the ratio of the transformers.
+With a stiff transformer (a very small short-circuit impedance) whose ratio is off nominal by a few percent, it can
+raise `IterationDiverge` or a `SparseMatrixError` where the default (linear) start converges.
+The `average_source` start has the same limitation.
+In that case, keep the default start or use the
+[Iterative current](../algorithms/pf-algorithms.md#iterative-current-power-flow) method, which is not affected.
+The limitation is described in item b of
+[To raise upstream](../advanced_documentation/multi-phase-and-swer-design.md#to-raise-upstream).
+
+#### Networks with near-zero impedance branches
+
+Real utility data often contains dummy connectors with an impedance far below 1 mΩ.
+They make the admittance matrix ill-conditioned, so the accuracy of the solution is limited by round-off.
+[Newton-Raphson](../algorithms/pf-algorithms.md#newton-raphson-power-flow) can then stall at a maximum deviation of
+about 1e-7 to 1e-6 and raise `IterationDiverge` at the default `error_tolerance` of 1e-8, although the solution is
+already accurate to a few 1e-7.
+You have the following options:
+
+- Merge such branches into one node before the calculation. This gives the best accuracy (about 4e-10 in the voltages on
+  the two real networks we measured).
+- Use `error_tolerance=1e-5` with `newton_raphson`. On the same two networks it converged in 2 to 3 iterations and agreed
+  with OpenDSS to about 3e-7 to 7e-7 in the node voltages. A tolerance of 1e-6 is marginal: it can still be below the
+  level at which the iteration stalls.
+- Use [Iterative current](../algorithms/pf-algorithms.md#iterative-current-power-flow) at the default tolerance. It
+  converges and has a similar accuracy.
+
+Do not loosen the tolerance of the iterative current method to 1e-5 on such networks: its accuracy then drops.
+
 ### Regulated power flow calculations
 
 Regulated power flow calculations are disabled by default.
@@ -379,6 +418,15 @@ option.
 
 For detailed control logic, initialization behavior, search methods, and error handling for automatic tap changing,
 see [Automatic Tap Changing Algorithm Details](../algorithms/tap-changing-algorithms.md).
+
+```{note}
+A [Single-Phase Transformer](../user_manual/components.md#single-phase-transformer) can be regulated as well, in an
+asymmetric power flow only (it is an experimental feature).
+It needs both `tap_min` and `tap_max`.
+The controlled voltage is the voltage of the controlled winding, computed from the voltages of its node to earth, and
+`u_set` and `u_band` are in volts across that winding; see
+[Single-phase transformer regulated by a tap regulator](../user_manual/components.md#single-phase-transformer-regulated-by-a-tap-regulator).
+```
 
 ### State estimation algorithms
 

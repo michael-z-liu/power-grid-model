@@ -50,6 +50,7 @@ concept validate_component_types_c =
     dependent_type_check<CompList, Line, Node> &&                    //
     dependent_type_check<CompList, Link, Node> &&                    //
     dependent_type_check<CompList, Transformer, Node> &&             //
+    dependent_type_check<CompList, SinglePhaseTransformer, Node> &&  //
     dependent_type_check<CompList, GenericBranch, Node> &&           //
     dependent_type_check<CompList, AsymLine, Node> &&                //
     dependent_type_check<CompList, ThreeWindingTransformer, Node> && //
@@ -67,21 +68,24 @@ concept validate_component_types_c =
     dependent_type_check<CompList, SymCurrentSensor, Line, AsymLine, Link, GenericBranch, Transformer,
                          ThreeWindingTransformer> && //
     dependent_type_check<CompList, AsymCurrentSensor, Line, AsymLine, Link, GenericBranch, Transformer,
-                         ThreeWindingTransformer> &&                                                       //
-    dependent_type_check<CompList, TransformerTapRegulator, Node, Transformer, ThreeWindingTransformer> && //
-    dependent_type_check<CompList, Fault, Node> &&                                                         //
-    dependent_type_check<CompList, VoltageRegulator, SymGenerator, AsymGenerator, SymLoad, AsymLoad> &&    //
+                         ThreeWindingTransformer> && //
+    dependent_type_check<CompList, TransformerTapRegulator, Node, Transformer, ThreeWindingTransformer,
+                         SinglePhaseTransformer> &&                                                     //
+    dependent_type_check<CompList, Fault, Node> &&                                                      //
+    dependent_type_check<CompList, VoltageRegulator, SymGenerator, AsymGenerator, SymLoad, AsymLoad> && //
     // We ensure that certain components are registered before others in the component list
     // This is because it affects the sequence of offsets at certain places in the code.
     // Specifically pseudo branches are registered after actual branches.
-    before_in_list_c<CompList, Line, Link> &&                           //
-    before_in_list_c<CompList, Transformer, Link> &&                    //
-    before_in_list_c<CompList, AsymLine, Link> &&                       //
-    before_in_list_c<CompList, GenericBranch, Link> &&                  //
-    before_in_list_c<CompList, Line, ThreeWindingTransformer> &&        //
-    before_in_list_c<CompList, Transformer, ThreeWindingTransformer> && //
-    before_in_list_c<CompList, AsymLine, ThreeWindingTransformer> &&    //
-    before_in_list_c<CompList, GenericBranch, ThreeWindingTransformer>; //
+    before_in_list_c<CompList, Line, Link> &&                                      //
+    before_in_list_c<CompList, Transformer, Link> &&                               //
+    before_in_list_c<CompList, SinglePhaseTransformer, Link> &&                    //
+    before_in_list_c<CompList, AsymLine, Link> &&                                  //
+    before_in_list_c<CompList, GenericBranch, Link> &&                             //
+    before_in_list_c<CompList, Line, ThreeWindingTransformer> &&                   //
+    before_in_list_c<CompList, Transformer, ThreeWindingTransformer> &&            //
+    before_in_list_c<CompList, SinglePhaseTransformer, ThreeWindingTransformer> && //
+    before_in_list_c<CompList, AsymLine, ThreeWindingTransformer> &&               //
+    before_in_list_c<CompList, GenericBranch, ThreeWindingTransformer>;            //
 } // namespace detail
 
 template <class T, class U> class MainModelType;

@@ -100,6 +100,8 @@ int main(int argc, char** argv) {
         if (total_elements > 0) {
             // input buffers
             input_buffers[component_idx] = PGM_create_buffer(handle, input_meta_component, total_elements);
+            // buffers are uninitialized: set all attributes to NaN so that attributes missing in the JSON are n/a
+            PGM_buffer_set_nan(handle, input_meta_component, input_buffers[component_idx], 0, total_elements);
             PGM_dataset_writable_set_buffer(handle, writable_dataset, component_name, NULL,
                                             input_buffers[component_idx]);
             CHECK_NO_ERROR(handle);

@@ -21,8 +21,10 @@ graph LR
       edge-->link
       edge-->branch
         branch-->line
+        branch-->asym_line
         branch-->generic_branch
         branch-->transformer      
+        branch-->single_phase_transformer
     base-->branch3
       branch3-->three_winding_transformer
     base-->appliance
@@ -42,7 +44,7 @@ graph LR
         generic_power_sensor-->asym_power_sensor
      
    classDef green fill:#9f6,stroke:#333,stroke-width:2px
-   class node,line,link,generic_branch,transformer,three_winding_transformer,source,shunt,sym_load,sym_gen,asym_load,asym_gen,sym_voltage_sensor,asym_voltage_sensor,sym_power_sensor,asym_power_sensor green
+   class node,line,asym_line,link,generic_branch,transformer,single_phase_transformer,three_winding_transformer,source,shunt,sym_load,sym_gen,asym_load,asym_gen,sym_voltage_sensor,asym_voltage_sensor,sym_power_sensor,asym_power_sensor green
 ```
 
 ```{note}

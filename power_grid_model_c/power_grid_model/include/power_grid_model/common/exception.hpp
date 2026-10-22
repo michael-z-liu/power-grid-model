@@ -8,6 +8,7 @@
 #include "enum.hpp"
 
 #include <concepts>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <string>
@@ -77,6 +78,69 @@ class InvalidTransformerClock : public PowerGridError {
   public:
     InvalidTransformerClock(ID id, IntS clock)
         : PowerGridError{std::format("Invalid clock for transformer {}, clock {}\n", id, clock)} {}
+};
+
+class MissingPhaseForWinding : public PowerGridError {
+  public:
+    // winding_owner names the branch, e.g. "branch with ID 5" or "branch3 #0"
+    MissingPhaseForWinding(std::string_view winding_owner, std::string_view winding_phases,
+                           std::string_view node_phases)
+        : PowerGridError{std::format("Winding of {} has phases ({}) that are not all present at its node "
+                                     "(node phases: {}). A connected winding must have all of its phases present.\n",
+                                     winding_owner, winding_phases, node_phases)} {}
+};
+
+class DanglingConductor : public PowerGridError {
+  public:
+    // branch names the branch, e.g. "branch with ID 5" or "branch #2"
+    DanglingConductor(std::string_view branch, std::string_view dangling_phases, std::string_view from_node_phases,
+                      std::string_view to_node_phases)
+        : PowerGridError{std::format("Conductors of {} on phases ({}) are not present at any of its connected "
+                                     "nodes (from node phases: {}, to node phases: {}). Every conductor must be "
+                                     "present at the nodes it connects.\n",
+                                     branch, dangling_phases, from_node_phases, to_node_phases)} {}
+};
+
+class InvalidPhaseConnection : public PowerGridError {
+  public:
+    InvalidPhaseConnection(std::string_view component, ID id, std::string_view phases, std::string_view reason)
+        : PowerGridError{std::format("Invalid phase connection for {} {} with phases ({}): {}\n", component, id, phases,
+                                     reason)} {}
+};
+
+class LoadGenOnAbsentPhase : public PowerGridError {
+  public:
+    // the wye message is the default; a delta load_gen gets a tail about its phase-to-phase entries
+    LoadGenOnAbsentPhase(ID id, std::string_view absent_phases, std::string_view node_phases,
+                         LoadGenConnection connection = LoadGenConnection::wye)
+        : PowerGridError{std::format(
+              "Load or generator {} has a non-zero specified power on phases ({}) that are not present at its node "
+              "(node phases: {}). {}\n",
+              id, absent_phases, node_phases,
+              connection == LoadGenConnection::delta
+                  ? "A delta (phase-to-phase) entry needs both of its phases: ab needs a and b, bc needs b and c, ca "
+                    "needs c and a."
+                  : "Use an asym_load or asym_gen with zero power on the absent phases; a sym_load or sym_gen puts "
+                    "power on all three phases.")} {}
+};
+
+class ShuntAtReducedPhaseNode : public PowerGridError {
+  public:
+    explicit ShuntAtReducedPhaseNode(ID id)
+        : PowerGridError{std::format("Shunt {} is connected to a node without all phases. A shunt at a node without "
+                                     "all phases is not supported.\n",
+                                     id)} {}
+};
+
+class ReducedPhaseNotSupported : public PowerGridError {
+  public:
+    // the network feature that rules the calculation out
+    enum class Cause : std::uint8_t { reduced_phase_nodes, delta_load_gens };
+
+    explicit ReducedPhaseNotSupported(std::string_view feature, Cause cause = Cause::reduced_phase_nodes)
+        : PowerGridError{std::format("{} is not supported in a network with {}.\n", feature,
+                                     cause == Cause::delta_load_gens ? "delta-connected loads or generators"
+                                                                     : "one- or two-phase nodes")} {}
 };
 
 class SparseMatrixError : public PowerGridError {
@@ -251,6 +315,20 @@ class InvalidShortCircuitPhases : public PowerGridError {
         : PowerGridError{std::format("The short circuit phases ({}) do not match the short circuit type ({})\n",
                                      std::to_underlying(short_circuit_phases),
                                      std::to_underlying(short_circuit_type))} {}
+    InvalidShortCircuitPhases(std::string_view short_circuit_phases, std::string_view node_phases)
+        : PowerGridError{std::format("The short circuit phases ({}) are not all present at the faulted node (node "
+                                     "phases: {}); this short circuit type cannot be applied there\n",
+                                     short_circuit_phases, node_phases)} {}
+    // a fault whose phases are not all present at its node (model-level check, M8); default_phases: the phases are the
+    // default of the fault type
+    InvalidShortCircuitPhases(ID fault_id, ID node_id, std::string_view short_circuit_phases,
+                              std::string_view node_phases, bool default_phases)
+        : PowerGridError{std::format("The short circuit phases ({}) of fault {} are not all present at its node {} "
+                                     "(node phases: {}); this short circuit type cannot be applied there{}\n",
+                                     short_circuit_phases, fault_id, node_id, node_phases,
+                                     default_phases ? "; the phases are the default of the fault type, so set "
+                                                      "fault_phase explicitly"
+                                                    : "")} {}
 };
 
 class InvalidShortCircuitPhaseOrType : public PowerGridError {

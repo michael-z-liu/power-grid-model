@@ -57,9 +57,14 @@ int main(int argc, char** argv) {
     /**** create input buffer ****/
     // we create input buffer data using two ways of creating buffer
     // use PGM function to create node and sym_load buffer
+    // PGM_create_buffer returns uninitialized memory: always call PGM_buffer_set_nan on input buffers before setting
+    // attributes. Otherwise attributes that are not set (e.g. the optional connection of sym_load) hold garbage.
     void* node_input = PGM_create_buffer(handle, PGM_def_input_node, 1);
     CHECK_NO_ERROR(handle);
+    PGM_buffer_set_nan(handle, PGM_def_input_node, node_input, 0, 1);
     void* sym_load_input = PGM_create_buffer(handle, PGM_def_input_sym_load, 2);
+    CHECK_NO_ERROR(handle);
+    PGM_buffer_set_nan(handle, PGM_def_input_sym_load, sym_load_input, 0, 2);
     CHECK_NO_ERROR(handle);
     // allocate source buffer in the caller
     size_t source_size = PGM_meta_component_size(handle, PGM_def_input_source);

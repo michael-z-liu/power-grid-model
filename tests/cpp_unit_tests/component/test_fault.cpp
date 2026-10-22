@@ -217,6 +217,57 @@ TEST_CASE("Test fault") {
         }
     }
 
+    SUBCASE("Check has_default_phase") {
+        auto create_fault = [](FaultPhase fault_phase) {
+            return Fault{{.id = 1,
+                          .status = 1,
+                          .fault_type = FaultType::single_phase_to_ground,
+                          .fault_phase = fault_phase,
+                          .fault_object = 4,
+                          .r_f = 3.0,
+                          .x_f = 4.0}};
+        };
+
+        CHECK(create_fault(FaultPhase::nan).has_default_phase());
+        CHECK(create_fault(FaultPhase::default_value).has_default_phase());
+        CHECK_FALSE(create_fault(FaultPhase::a).has_default_phase());
+        CHECK_FALSE(fault.has_default_phase()); // ab
+
+        Fault updated_fault = create_fault(FaultPhase::a);
+        FaultUpdate const update_default{.id = 1,
+                                         .status = na_IntS,
+                                         .fault_type = FaultType::nan,
+                                         .fault_phase = FaultPhase::default_value,
+                                         .fault_object = na_IntID,
+                                         .r_f = nan,
+                                         .x_f = nan};
+        updated_fault.update(update_default);
+        CHECK(updated_fault.has_default_phase());
+
+        // an update with nan phase keeps the previous value
+        FaultUpdate const update_nan{.id = 1,
+                                     .status = na_IntS,
+                                     .fault_type = FaultType::nan,
+                                     .fault_phase = FaultPhase::nan,
+                                     .fault_object = na_IntID,
+                                     .r_f = nan,
+                                     .x_f = nan};
+        updated_fault.update(update_nan);
+        CHECK(updated_fault.has_default_phase());
+
+        FaultUpdate const update_b{.id = 1,
+                                   .status = na_IntS,
+                                   .fault_type = FaultType::nan,
+                                   .fault_phase = FaultPhase::b,
+                                   .fault_object = na_IntID,
+                                   .r_f = nan,
+                                   .x_f = nan};
+        updated_fault.update(update_b);
+        CHECK_FALSE(updated_fault.has_default_phase());
+        updated_fault.update(update_nan);
+        CHECK_FALSE(updated_fault.has_default_phase());
+    }
+
     SUBCASE("Test update") {
         FaultUpdate const fault_update{.id = 1,
                                        .status = 0,

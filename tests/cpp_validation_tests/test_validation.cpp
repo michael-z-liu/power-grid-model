@@ -176,7 +176,17 @@ class Subcase {
              std::regex{"Nodes with a source and a voltage regulated load/generator are not supported when both are "
                         "enabled. Found at node with id (-?\\d+)"}},
             {"ExperimentalFeature", std::regex{" is an experimental feature"}}, // multiple different flavors
-            {"PowerGridDatasetError", std::regex{"Dataset error: "}},           // multiple different flavors
+            {"ReducedPhaseNotSupported",
+             std::regex{" is not supported in a network with (one- or two-phase nodes|delta-connected loads or "
+                        "generators)"}}, // multiple different flavors
+            {"DanglingConductor",
+             std::regex{"Conductors of .+ on phases \\([^)]*\\) are not present at any of its connected nodes"}},
+            {"InvalidPhaseConnection", std::regex{"Invalid phase connection for "}}, // multiple different flavors
+            {"LoadGenOnAbsentPhase", std::regex{"Load or generator (-?\\d+) has a non-zero specified power on phases"}},
+            {"ShuntAtReducedPhaseNode", std::regex{"Shunt (-?\\d+) is connected to a node without all phases"}},
+            {"MissingPhaseForWinding",
+             std::regex{"Winding of .+ has phases \\([^)]*\\) that are not all present at its node"}},
+            {"PowerGridDatasetError", std::regex{"Dataset error: "}}, // multiple different flavors
             {"PowerGridUnreachableHit",
              std::regex{"Unreachable code hit when executing "}}, // multiple different flavors
             {"PowerGridNotImplementedError",
@@ -481,21 +491,26 @@ std::optional<CaseParam> construct_case(std::filesystem::path const& case_dir, j
     param.calculation_method = calculation_method;
     param.sym = sym;
     param.is_batch = is_batch;
-    j.at("rtol").get_to(param.rtol);
-    json const& j_atol = j.at("atol");
+
+    // the parameters of this calculation method: the top-level parameters, overridden by extra_params[<method>]
+    // (replaced key by key, also for dictionaries like atol, as in the Python harness)
+    json calculation_method_params;
+    calculation_method_params.update(j, true);
+    if (j.contains("extra_params")) {
+        if (json const& extra_params = j.at("extra_params"); extra_params.contains(calculation_method_str)) {
+            calculation_method_params.update(extra_params.at(calculation_method_str));
+        }
+    }
+
+    calculation_method_params.at("rtol").get_to(param.rtol);
+    json const& j_atol = calculation_method_params.at("atol");
     if (j_atol.type() != json::value_t::object) {
         param.atol = {{"default", j_atol.get<double>()}};
     } else {
         j_atol.get_to(param.atol);
     }
-
-    json calculation_method_params;
-    calculation_method_params.update(j, true);
-    if (j.contains("extra_params")) {
-        if (json const& extra_params = j.at("extra_params"); extra_params.contains(calculation_method_str)) {
-            calculation_method_params.update(extra_params.at(calculation_method_str), true);
-        }
-    }
+    param.err_tol = calculation_method_params.value("error_tolerance", 1e-8);
+    param.max_iter = calculation_method_params.value("max_iterations", Idx{20});
 
     if (calculation_method_params.contains("raises")) {
         if (json const& raises = calculation_method_params.at("raises"); raises.contains("raises")) {
