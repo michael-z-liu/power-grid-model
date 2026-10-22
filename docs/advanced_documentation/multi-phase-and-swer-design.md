@@ -403,8 +403,11 @@ The centre-tapped (split-phase) secondary of `single_phase_transformer` (all dec
     ("… refers to a centre-tapped winding and must be left empty"), following D11: reject rather than ignore.
   * **Valid ranges** (implemented in M9 as Python rules, D41; no C++ check, as `transformer` does not check
     `uk = 0` either):
-    `uk_half >= pk_half / (sn/2)`; `uk_half > uk/2` (otherwise the half branch $z_b$ is 0 or negative, and singular
-    at equality); `pk/4 <= pk_half <= pk/2` (non-negative branch resistances).
+    `uk_half >= pk_half / (sn/2)`; `uk_half > uk/2`, that is $|z_{hs}| > |z_{f,nom}|$ (the half branch
+    $z_b = 2(z_{hs} - z_{f,nom})$ is 0, singular, at `uk_half = uk/2` with `pk_half = pk/4`); `pk/4 <= pk_half <= pk/2`
+    (non-negative branch resistances). The rule on `uk_half` bounds magnitudes only: within these ranges the reactance
+    of $z_b$ can still be negative, which is legitimate in a star equivalent, as for the branches of
+    `three_winding_transformer`.
 * **D21. `u2`, `uk`, `pk` and `sn` describe the full winding.** `u2` is the full winding, end to end: 480 V for
   240-0-240 V, consistent with D15 (the voltage across the connection terminals a-b). `uk`, `pk` and `sn` are the
   full-winding nameplate: the primary against both halves in series, at rated `sn`. Each half is $u_2/2$. The
@@ -1168,6 +1171,9 @@ the solvers; its results are discarded, and the input data need not be valid on 
   start, also on a three-phase network; before D64 the loop ended after its one iteration. `run_power_flow` now skips
   the guard when `cache_run` is set; every scenario keeps it. Tests: the unit test `the batch cache run does not raise
   on a NaN deviation` and `test_batch_power_flow_with_power_left_to_the_update_data`.
+  * **Confirmed by Michael (2026-10-22).** The cache run skips the guard; single calculations and every scenario keep
+    it. The guard itself changes three-phase behaviour and is raised upstream (item n of
+    [To raise upstream](#to-raise-upstream)).
 * **D77. The cache run swallows `DanglingConductor` and `MissingPhaseForWinding`.** Both depend on the status of the
   branches and sources, so the update data may fix them, as for `LoadGenOnAbsentPhase` (D3), `ShuntAtReducedPhaseNode`
   (D4) and `InvalidShortCircuitPhases` (D37). Before, a batch whose input data has a dangling line that every scenario
@@ -1175,6 +1181,9 @@ the solvers; its results are discarded, and the input data need not be valid on 
   their own topology; a scenario that leaves the line on fails on its own, with the branch ID.
   `ReducedPhaseNotSupported` stays unswallowed (D4), including its flavour for a voltage regulator at a node without
   all phases, which also depends on a status. Test: `test_reduced_phase_topology_error_fixed_in_the_update_data`.
+  * **Confirmed by Michael (2026-10-22).** Both errors stay swallowed in the cache run; `ReducedPhaseNotSupported`
+    stays unswallowed. The growing list of swallowed errors is raised upstream (item o of
+    [To raise upstream](#to-raise-upstream)).
 
 ### Decision index
 
@@ -1255,8 +1264,8 @@ the solvers; its results are discarded, and the input data need not be valid on 
 | D73 | Python validation: required tap values, `u_set` warning, and the `_get_indexer` fix | [Taken in FU5](#taken-in-fu5) |
 | D74 | Validation against OpenDSS: a scan of fixed taps with a `RegControl` cross-check | [Taken in FU5](#taken-in-fu5) |
 | D75 | Bit-identity of the existing results and the measured test results | [Taken in FU5](#taken-in-fu5) |
-| D76 | The batch cache run does not raise on a NaN deviation | [Taken in the final review](#taken-in-the-final-review) |
-| D77 | The batch cache run swallows `DanglingConductor` and `MissingPhaseForWinding` | [Taken in the final review](#taken-in-the-final-review) |
+| D76 | The batch cache run does not raise on a NaN deviation (confirmed 2026-10-22) | [Taken in the final review](#taken-in-the-final-review) |
+| D77 | The batch cache run swallows `DanglingConductor` and `MissingPhaseForWinding` (confirmed 2026-10-22) | [Taken in the final review](#taken-in-the-final-review) |
 
 D5 is also described in [Absent-phase output](#absent-phase-output), and D9 and D45 in the user manual page
 [Reduced-phase networks](../user_manual/reduced-phase-networks.md#experimental-feature).
@@ -1840,8 +1849,10 @@ Items for the upstream maintainers. Nothing has been submitted: Michael wants ev
   the short-circuit section, and the link `calulations.md#floating-grid-handling` (twice), which has a typo and should
   point to `#floating-grid-handling` on the same page.
 * **i. The main pull request:** everything in this branch, to be proposed when the other items are settled. It includes
-  the fork fixes of items k (4fb4c1278) and m (4f918d3e0) and the tap regulator on a `single_phase_transformer`
-  (D68 to D75). Items j and l are not fixed in the fork and are raised as issues, together with the proposals below.
+  the fork fixes of items k (4fb4c1278) and m (4f918d3e0), the tap regulator on a `single_phase_transformer`
+  (D68 to D75) and the NaN guard of item n (D64). Items j and l are not fixed in the fork and are raised as issues,
+  together with the proposals below. Items o to q are design points to discuss in the pull request; the fork does not
+  change them.
 * **j. The asymmetric line drop compensation of `transformer_tap_regulator` uses `base_power_1p` and is 3x too weak** (D70).
   * **Description.** `TransformerTapRegulator::calc_param` computes `z_base = u_rated^2 / base_power<sym>`. For an
     asymmetric calculation that is $3 u_{rated}^2 / S_3$, but the per-phase impedance base is $u_{rated}^2 / S_3$, so the
@@ -1864,6 +1875,26 @@ Items for the upstream maintainers. Nothing has been submitted: Michael wants ev
 * **m. `validation.utils._get_indexer` with a `default_value` is wrong for unsorted IDs** (D73). The sort permutation is
   applied twice, so the positions are wrong unless the source IDs are sorted. Upstream never calls the branch; the fork
   does in three warnings. The fork commit 4f918d3e0 is a one-line fix with direct tests and can be proposed on its own.
+* **n. The NaN guard** (D64). A NaN deviation now raises `IterationDiverge` in single calculations. That is a
+  three-phase behaviour change: before, the calculation ended and returned NaN results silently (for example a load
+  with a NaN power and iterative current). The batch cache run skips the guard (D76).
+* **o. The growing list of errors swallowed by the batch cache run** (`job_adapter.hpp`).
+  * **Description.** Upstream swallows `SparseMatrixError` and `NotObservableError` in the cache run. The fork adds
+    `LoadGenOnAbsentPhase` (D3), `ShuntAtReducedPhaseNode` (D4), `DanglingConductor` and `MissingPhaseForWinding`
+    (D77), and `InvalidShortCircuitPhases` (D37). Every new check that depends on the data needs another catch, and
+    forgetting one breaks batches whose input data is fixed by the update data (as found for D77).
+  * **Proposal.** A common base class for "errors the update data can fix", caught once. Raising it is an API
+    decision, because it touches the exception hierarchy, the C-API error codes and the Python mapping.
+* **p. The delta-load special case is repeated in five places of the solvers:** the Newton-Raphson matrix and loads,
+  the iterative current loads, the linear method, the shared load helpers and the results.
+  * **Proposal.** A load abstraction in which each connection type supplies its current, Jacobian and admittance.
+    Risk: the inner loops of the solvers are shared by the three-phase models, so performance and bit-identity of
+    three-phase results have to be shown.
+* **q. `single_phase_transformer` re-implements the tap logic of `transformer`:** the limits, `tap_nom`, `tap_size`,
+  the direction rule, `uk`/`pk_min`/`max`, and the behaviour when a limit is not provided, which already differs from
+  `transformer` (D18).
+  * **Proposal.** Shared tap logic for both transformers. It needs a refactor of the upstream `transformer` and
+    agreement on the design.
 
 ## Later work
 
